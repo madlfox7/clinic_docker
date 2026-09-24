@@ -5,8 +5,10 @@
 <p>Role: {{ role }}</p>
 {% if role == "patient" %}
   <p>Patient: here will be only your appointments.</p>
+  <p><a href="/doctors">Doctors</a> | <a href="/my">My appointments</a></p>
 {% elif role == "doctor" %}
   <p>Doctor: here will be only your patients.</p>
+  <p><a href="/doctors">Doctors</a> | <a href="/doctor/appointments">My appointments</a></p>
 {% elif role == "registrar" %}
   <p>Registrar: here will be the general schedule.</p>
 {% elif role == "admin" %}

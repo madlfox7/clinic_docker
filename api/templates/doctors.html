@@ -1,0 +1,17 @@
+{% extends "base.html" %}
+{% block content %}
+<h1>Doctors</h1>
+<ul>
+  {% for d in doctors %}
+    <li>
+      {{ d.full_name }} — {{ d.specialty }}, {{ d.experience_years }} years of experience
+      {% if role == "patient" or role == "registrar" %}
+        — <a href="/doctors/{{ d.id }}/slots">available slots</a>
+      {% endif %}
+    </li>
+  {% endfor %}
+</ul>
+{% if not role %}
+  <p>To book an appointment, <a href="/login">log in</a> as a patient.</p>
+{% endif %}
+{% endblock %}

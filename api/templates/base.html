@@ -1,5 +1,5 @@
 <!doctype html>
-<html lang="ru">
+<html lang="en">
 <head>
   <meta charset="utf-8">
   <title>Clinic</title>
@@ -7,6 +7,13 @@
 <body>
   <p>
     <a href="/">Home</a>
+    | <a href="/doctors">Doctors</a>
+    {% if role == "patient" %}
+      | <a href="/my">My appointments</a>
+    {% endif %}
+    {% if role == "doctor" %}
+      | <a href="/doctor/appointments">My appointments</a>
+    {% endif %}
     {% if role %}
       | <a href="/me">Cabinet</a>
       | <a href="/logout">Logout</a>

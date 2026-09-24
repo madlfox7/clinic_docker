@@ -17,6 +17,7 @@ app.add_middleware(SessionMiddleware, secret_key=SESSION_SECRET)
 SEED_USERS = [
     ("admin@clinic.local", "password123", "admin"),
     ("doc@clinic.local", "password123", "doctor"),
+    ("doc2@clinic.local", "password123", "doctor"),
     ("pat@clinic.local", "password123", "patient"),
     ("reg@clinic.local", "password123", "registrar"),
 ]
@@ -29,14 +30,80 @@ def db():
 def seed_users():
     conn = db()
     cur = conn.cursor()
-    cur.execute("SELECT count(*) FROM users")
-    n = cur.fetchone()[0]
-    if n == 0:
-        for email, raw, role in SEED_USERS:
+    for email, raw, role in SEED_USERS:
+        cur.execute("SELECT 1 FROM users WHERE email=%s", (email,))
+        if cur.fetchone() is None:
             cur.execute(
                 "INSERT INTO users (email, password_hash, role) VALUES (%s, %s, %s)",
                 (email, pwd.hash(raw), role),
             )
+    conn.commit()
+    cur.close()
+    conn.close()
+
+
+def ensure_schema():
+    conn = db()
+    cur = conn.cursor()
+    cur.execute(
+        """
+        CREATE TABLE IF NOT EXISTS doctors (
+          id SERIAL PRIMARY KEY,
+          user_id INTEGER UNIQUE REFERENCES users(id),
+          full_name TEXT NOT NULL,
+          specialty TEXT NOT NULL,
+          experience_years INTEGER NOT NULL DEFAULT 0
+        );
+        CREATE TABLE IF NOT EXISTS slots (
+          id SERIAL PRIMARY KEY,
+          doctor_id INTEGER NOT NULL REFERENCES doctors(id),
+          starts_at TIMESTAMP NOT NULL,
+          ends_at TIMESTAMP NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS appointments (
+          id SERIAL PRIMARY KEY,
+          slot_id INTEGER NOT NULL UNIQUE REFERENCES slots(id),
+          patient_user_id INTEGER NOT NULL REFERENCES users(id),
+          status TEXT NOT NULL DEFAULT 'scheduled'
+        );
+        """
+    )
+    conn.commit()
+    cur.close()
+    conn.close()
+
+
+def seed_clinic():
+    conn = db()
+    cur = conn.cursor()
+    cur.execute("SELECT count(*) FROM doctors")
+    if cur.fetchone()[0] == 0:
+        cur.execute("SELECT id FROM users WHERE email=%s", ("doc@clinic.local",))
+        d1 = cur.fetchone()[0]
+        cur.execute("SELECT id FROM users WHERE email=%s", ("doc2@clinic.local",))
+        d2 = cur.fetchone()[0]
+        cur.execute(
+            "INSERT INTO doctors (user_id, full_name, specialty, experience_years) VALUES (%s,%s,%s,%s) RETURNING id",
+            (d1, "Anna Ohanyan", "Therapist", 8),
+        )
+        id1 = cur.fetchone()[0]
+        cur.execute(
+            "INSERT INTO doctors (user_id, full_name, specialty, experience_years) VALUES (%s,%s,%s,%s) RETURNING id",
+            (d2, "Levon Petrosyan", "Dentist", 5),
+        )
+        id2 = cur.fetchone()[0]
+        cur.execute(
+            """
+            INSERT INTO slots (doctor_id, starts_at, ends_at) VALUES
+            (%s, '2026-10-01 09:00', '2026-10-01 09:30'),
+            (%s, '2026-10-01 10:00', '2026-10-01 10:30'),
+            (%s, '2026-10-01 11:00', '2026-10-01 11:30'),
+            (%s, '2026-10-02 09:00', '2026-10-02 09:30'),
+            (%s, '2026-10-01 09:00', '2026-10-01 09:30'),
+            (%s, '2026-10-01 10:00', '2026-10-01 10:30')
+            """,
+            (id1, id1, id1, id1, id2, id2),
+        )
         conn.commit()
     cur.close()
     conn.close()
@@ -44,7 +111,9 @@ def seed_users():
 
 @app.on_event("startup")
 def on_start():
+    ensure_schema()
     seed_users()
+    seed_clinic()
 
 
 @app.get("/")
@@ -74,7 +143,7 @@ def login(request: Request, email: str = Form(...), password: str = Form(...)):
     if not row or not pwd.verify(password, row[1]):
         return templates.TemplateResponse(
             "login.html",
-            {"request": request, "error": "Неверный email или пароль", "role": None},
+            {"request": request, "error": "Invalid email or password", "role": None},
             status_code=401,
         )
     request.session["email"] = row[0]
@@ -98,3 +167,184 @@ def me(request: Request):
 def logout(request: Request):
     request.session.clear()
     return RedirectResponse("/", status_code=303)
+
+
+@app.get("/doctors")
+def doctors_list(request: Request):
+    conn = db()
+    cur = conn.cursor()
+    cur.execute("SELECT id, full_name, specialty, experience_years FROM doctors ORDER BY id")
+    rows = cur.fetchall()
+    cur.close()
+    conn.close()
+    doctors = [
+        {"id": r[0], "full_name": r[1], "specialty": r[2], "experience_years": r[3]}
+        for r in rows
+    ]
+    return templates.TemplateResponse(
+        "doctors.html",
+        {"request": request, "doctors": doctors, "role": request.session.get("role")},
+    )
+
+
+@app.get("/doctors/{doctor_id}/slots")
+def doctor_slots(request: Request, doctor_id: int):
+    role = request.session.get("role")
+    if role not in ("patient", "registrar"):
+        return RedirectResponse("/login", status_code=303)
+    error = request.query_params.get("error")
+    conn = db()
+    cur = conn.cursor()
+    cur.execute("SELECT id, full_name FROM doctors WHERE id=%s", (doctor_id,))
+    doc = cur.fetchone()
+    cur.execute(
+        """
+        SELECT s.id, s.starts_at, s.ends_at,
+               EXISTS(SELECT 1 FROM appointments a WHERE a.slot_id=s.id) AS taken
+        FROM slots s
+        WHERE s.doctor_id=%s
+        ORDER BY s.starts_at
+        """,
+        (doctor_id,),
+    )
+    rows = cur.fetchall()
+    cur.close()
+    conn.close()
+    if not doc:
+        return RedirectResponse("/doctors", status_code=303)
+    slots = [
+        {"id": r[0], "starts_at": r[1], "ends_at": r[2], "taken": r[3]}
+        for r in rows
+    ]
+    return templates.TemplateResponse(
+        "slots.html",
+        {
+            "request": request,
+            "doctor": {"id": doc[0], "full_name": doc[1]},
+            "slots": slots,
+            "error": error,
+            "role": role,
+        },
+    )
+
+
+@app.post("/slots/{slot_id}/book")
+def book_slot(request: Request, slot_id: int):
+    email = request.session.get("email")
+    role = request.session.get("role")
+    if role != "patient" or not email:
+        return RedirectResponse("/login", status_code=303)
+    conn = db()
+    cur = conn.cursor()
+    cur.execute("SELECT id FROM users WHERE email=%s", (email,))
+    patient_id = cur.fetchone()[0]
+    cur.execute("SELECT doctor_id, starts_at, ends_at FROM slots WHERE id=%s", (slot_id,))
+    slot = cur.fetchone()
+    if not slot:
+        cur.close()
+        conn.close()
+        return RedirectResponse("/doctors", status_code=303)
+    doctor_id, starts_at, ends_at = slot
+
+    cur.execute(
+        """
+        SELECT a.id
+        FROM appointments a
+        JOIN slots s ON s.id = a.slot_id
+        WHERE a.patient_user_id = %s
+          AND a.status = 'scheduled'
+          AND s.starts_at < %s
+          AND s.ends_at > %s
+        """,
+        (patient_id, ends_at, starts_at),
+    )
+    if cur.fetchone():
+        cur.close()
+        conn.close()
+        return RedirectResponse(f"/doctors/{doctor_id}/slots?error=overlap", status_code=303)
+
+    cur.execute("SELECT 1 FROM appointments WHERE slot_id=%s", (slot_id,))
+    if cur.fetchone():
+        cur.close()
+        conn.close()
+        return RedirectResponse(f"/doctors/{doctor_id}/slots?error=unavailable", status_code=303)
+
+    try:
+        cur.execute(
+            "INSERT INTO appointments (slot_id, patient_user_id) VALUES (%s, %s)",
+            (slot_id, patient_id),
+        )
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        cur.close()
+        conn.close()
+        return RedirectResponse(f"/doctors/{doctor_id}/slots?error=unavailable", status_code=303)
+    cur.close()
+    conn.close()
+    return RedirectResponse("/my", status_code=303)
+
+
+@app.get("/my")
+def my_appointments(request: Request):
+    email = request.session.get("email")
+    role = request.session.get("role")
+    if role != "patient" or not email:
+        return RedirectResponse("/login", status_code=303)
+    conn = db()
+    cur = conn.cursor()
+    cur.execute(
+        """
+        SELECT d.full_name, s.starts_at, a.status
+        FROM appointments a
+        JOIN slots s ON s.id=a.slot_id
+        JOIN doctors d ON d.id=s.doctor_id
+        JOIN users u ON u.id=a.patient_user_id
+        WHERE u.email=%s
+        ORDER BY s.starts_at
+        """,
+        (email,),
+    )
+    items = [
+        {"doctor_name": r[0], "starts_at": r[1], "status": r[2]}
+        for r in cur.fetchall()
+    ]
+    cur.close()
+    conn.close()
+    return templates.TemplateResponse(
+        "my_appointments.html",
+        {"request": request, "items": items, "role": role},
+    )
+
+
+@app.get("/doctor/appointments")
+def doctor_appointments(request: Request):
+    email = request.session.get("email")
+    role = request.session.get("role")
+    if role != "doctor" or not email:
+        return RedirectResponse("/login", status_code=303)
+    conn = db()
+    cur = conn.cursor()
+    cur.execute(
+        """
+        SELECT u.email, s.starts_at, a.status
+        FROM appointments a
+        JOIN slots s ON s.id=a.slot_id
+        JOIN doctors d ON d.id=s.doctor_id
+        JOIN users u ON u.id=a.patient_user_id
+        JOIN users du ON du.id=d.user_id
+        WHERE du.email=%s
+        ORDER BY s.starts_at
+        """,
+        (email,),
+    )
+    items = [
+        {"patient_email": r[0], "starts_at": r[1], "status": r[2]}
+        for r in cur.fetchall()
+    ]
+    cur.close()
+    conn.close()
+    return templates.TemplateResponse(
+        "doctor_appointments.html",
+        {"request": request, "items": items, "role": role},
+    )

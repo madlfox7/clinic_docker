@@ -1,0 +1,23 @@
+{% extends "base.html" %}
+{% block content %}
+<h1>Slots: {{ doctor.full_name }}</h1>
+{% if error == "overlap" %}
+  <p>You already have an appointment at this time.</p>
+{% elif error == "unavailable" %}
+  <p>This slot is no longer available. Please choose another slot.</p>
+{% endif %}
+<ul>
+  {% for s in slots %}
+    <li>
+      {{ s.starts_at }} — {{ s.ends_at }}
+      {% if s.taken %}
+        Booked
+      {% else %}
+        <form method="post" action="/slots/{{ s.id }}/book" style="display:inline">
+          <button type="submit">Book appointment</button>
+        </form>
+      {% endif %}
+    </li>
+  {% endfor %}
+</ul>
+{% endblock %}
