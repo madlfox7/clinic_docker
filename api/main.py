@@ -309,7 +309,6 @@ def book_slot(request: Request, slot_id: int, patient_email: str = Form(None)):
     role = request.session.get("role")
     if role not in ("patient", "registrar") or not email:
         return RedirectResponse("/login", status_code=303)
-    target_email = email if role == "patient" else patient_email
     conn = db()
     cur = conn.cursor()
     cur.execute("SELECT doctor_id, starts_at, ends_at FROM slots WHERE id=%s", (slot_id,))
@@ -319,21 +318,27 @@ def book_slot(request: Request, slot_id: int, patient_email: str = Form(None)):
         conn.close()
         return RedirectResponse("/doctors", status_code=303)
     doctor_id, starts_at, ends_at = slot
-    if not target_email:
-        cur.close()
-        conn.close()
-        return RedirectResponse(f"/doctors/{doctor_id}/slots?error=patient_required", status_code=303)
+    if role == "patient":
+        target_email = email
+    else:
+        target_email = (patient_email or "").strip()
+        if not target_email:
+            cur.close()
+            conn.close()
+            return RedirectResponse(
+                f"/doctors/{doctor_id}/slots?error=patient_required", status_code=303
+            )
     cur.execute(
-        "SELECT id, blocked FROM users WHERE email=%s AND role='patient'",
+        "SELECT id, role, blocked FROM users WHERE email=%s",
         (target_email,),
     )
-    patient = cur.fetchone()
-    if not patient:
+    target = cur.fetchone()
+    if not target or target[1] != "patient":
         cur.close()
         conn.close()
         return RedirectResponse(f"/doctors/{doctor_id}/slots?error=patient_not_found", status_code=303)
-    patient_id, patient_blocked = patient
-    if patient_blocked:
+    patient_id = target[0]
+    if target[2]:
         cur.close()
         conn.close()
         return RedirectResponse(f"/doctors/{doctor_id}/slots?error=patient_blocked", status_code=303)
