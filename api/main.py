@@ -238,7 +238,12 @@ def doctor_slots(request: Request, doctor_id: int):
     cur.execute(
         """
         SELECT s.id, s.starts_at, s.ends_at,
-               EXISTS(SELECT 1 FROM appointments a WHERE a.slot_id=s.id) AS taken
+               EXISTS(
+                   SELECT 1
+                   FROM appointments a
+                   WHERE a.slot_id = s.id
+                     AND a.status = 'scheduled'
+               ) AS taken
         FROM slots s
         WHERE s.doctor_id=%s
         ORDER BY s.starts_at
@@ -325,7 +330,10 @@ def book_slot(request: Request, slot_id: int, patient_email: str = Form(None)):
             status_code=303,
         )
 
-    cur.execute("SELECT 1 FROM appointments WHERE slot_id=%s", (slot_id,))
+    cur.execute(
+        "SELECT 1 FROM appointments WHERE slot_id=%s AND status='scheduled'",
+        (slot_id,),
+    )
     if cur.fetchone():
         cur.close()
         conn.close()
