@@ -27,7 +27,8 @@ clinic_24_9/
 |       |-- doctors.html
 |       |-- slots.html
 |       |-- my_appointments.html
-|       `-- doctor_appointments.html
+|       |-- doctor_appointments.html
+|       `-- admin_users.html
 |-- db/
 |   `-- init.sql
 `-- proxy/
@@ -132,7 +133,7 @@ seed_clinic()
 
 ### `ensure_schema()`
 
-Создает таблицы `doctors`, `slots` и `appointments`, если их еще нет. В `db/init.sql` также описаны таблицы, поэтому схема защищена и при инициализации PostgreSQL, и при старте API.
+Добавляет колонку `users.blocked`, если ее еще нет, и создает таблицы `doctors`, `slots` и `appointments`, если их еще нет. В `db/init.sql` также описана актуальная схема, поэтому новая база и существующий volume поддерживаются при старте API.
 
 ### `seed_users()`
 
