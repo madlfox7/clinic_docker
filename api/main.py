@@ -221,7 +221,8 @@ def doctor_slots(request: Request, doctor_id: int):
     doc = cur.fetchone()
     conflict_appointment_id = request.query_params.get("conflict_appointment_id")
     email = request.session.get("email")
-    if error == "overlap" and conflict_appointment_id and email:
+    conflict_patient_id = request.query_params.get("conflict_patient_id")
+    if error == "overlap" and conflict_appointment_id and role == "patient" and email:
         cur.execute(
             """
             SELECT d.full_name, s.starts_at, s.ends_at
@@ -232,6 +233,30 @@ def doctor_slots(request: Request, doctor_id: int):
             WHERE a.id=%s AND u.email=%s AND a.status='scheduled'
             """,
             (conflict_appointment_id, email),
+        )
+        row = cur.fetchone()
+        if row:
+            conflict = {
+                "doctor_name": row[0],
+                "starts_at": row[1],
+                "ends_at": row[2],
+            }
+    elif (
+        error == "overlap"
+        and conflict_appointment_id
+        and conflict_patient_id
+        and role == "registrar"
+        and conflict_patient_id.isdigit()
+    ):
+        cur.execute(
+            """
+            SELECT d.full_name, s.starts_at, s.ends_at
+            FROM appointments a
+            JOIN slots s ON s.id = a.slot_id
+            JOIN doctors d ON d.id = s.doctor_id
+            WHERE a.id=%s AND a.patient_user_id=%s AND a.status='scheduled'
+            """,
+            (conflict_appointment_id, conflict_patient_id),
         )
         row = cur.fetchone()
         if row:
@@ -331,7 +356,7 @@ def book_slot(request: Request, slot_id: int, patient_email: str = Form(None)):
         cur.close()
         conn.close()
         return RedirectResponse(
-            f"/doctors/{doctor_id}/slots?error=overlap&conflict_appointment_id={conflict_row[0]}",
+            f"/doctors/{doctor_id}/slots?error=overlap&conflict_appointment_id={conflict_row[0]}&conflict_patient_id={patient_id}",
             status_code=303,
         )
 
@@ -383,11 +408,13 @@ def cancel_appointment(request: Request, appointment_id: int):
         """,
         (appointment_id, email),
     )
-    cur.fetchone()
+    cancelled = cur.fetchone() is not None
     conn.commit()
     cur.close()
     conn.close()
-    return RedirectResponse("/my?cancelled=1", status_code=303)
+    if cancelled:
+        return RedirectResponse("/my?cancelled=1", status_code=303)
+    return RedirectResponse("/my?cancel_error=1", status_code=303)
 
 
 @app.get("/my")
@@ -397,6 +424,7 @@ def my_appointments(request: Request):
     if role != "patient" or not email:
         return RedirectResponse("/login", status_code=303)
     cancelled = request.query_params.get("cancelled")
+    cancel_error = request.query_params.get("cancel_error")
     conn = db()
     cur = conn.cursor()
     cur.execute(
@@ -425,7 +453,13 @@ def my_appointments(request: Request):
     conn.close()
     return templates.TemplateResponse(
         "my_appointments.html",
-        {"request": request, "items": items, "role": role, "cancelled": cancelled},
+        {
+            "request": request,
+            "items": items,
+            "role": role,
+            "cancelled": cancelled,
+            "cancel_error": cancel_error,
+        },
     )
 
 

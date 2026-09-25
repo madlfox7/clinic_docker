@@ -2,9 +2,10 @@
 {% block content %}
 <h1>My appointments</h1>
 {% if cancelled %}<p>Appointment cancelled.</p>{% endif %}
+{% if cancel_error %}<p>Appointment could not be cancelled. It may not belong to you or may already be cancelled.</p>{% endif %}
 <ul>
   {% for a in items %}
-    <li>
+    <li {% if a.status == "cancelled" %}style="color: gray"{% endif %}>
       {{ a.doctor_name }} — {{ a.starts_at }} - {{ a.ends_at }} ({{ a.status }})
       {% if a.status == "scheduled" %}
         <form method="post" action="/appointments/{{ a.id }}/cancel" style="display:inline">
@@ -14,5 +15,5 @@
     </li>
   {% endfor %}
 </ul>
-{% if not items %}<p>No appointments.</p>{% endif %}
+{% if not items %}<p>No appointments yet.</p>{% endif %}
 {% endblock %}

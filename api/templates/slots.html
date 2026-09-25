@@ -3,9 +3,9 @@
 <h1>Slots: {{ doctor.full_name }}</h1>
 {% if error == "overlap" %}
   <script>
-    window.alert("You already have an appointment at this time.");
+    window.alert("Your appointment times overlap.");
   </script>
-  <p><strong>Booking failed.</strong> You already have an appointment at this time.</p>
+  <p><strong>Booking failed.</strong> Your appointment times overlap.</p>
   {% if conflict %}
     <p>Existing appointment: {{ conflict.doctor_name }} — {{ conflict.starts_at }} - {{ conflict.ends_at }}.</p>
     <p>Cause: appointment times overlap.</p>

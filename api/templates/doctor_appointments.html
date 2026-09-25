@@ -3,8 +3,8 @@
 <h1>My appointments</h1>
 <ul>
   {% for a in items %}
-    <li>{{ a.patient_email }} — {{ a.starts_at }} ({{ a.status }})</li>
+    <li {% if a.status == "cancelled" %}style="color: gray"{% endif %}>{{ a.patient_email }} — {{ a.starts_at }} ({{ a.status }})</li>
   {% endfor %}
 </ul>
-{% if not items %}<p>No appointments.</p>{% endif %}
+{% if not items %}<p>No appointments yet.</p>{% endif %}
 {% endblock %}
