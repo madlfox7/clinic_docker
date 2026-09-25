@@ -65,10 +65,15 @@ def ensure_schema():
         );
         CREATE TABLE IF NOT EXISTS appointments (
           id SERIAL PRIMARY KEY,
-          slot_id INTEGER NOT NULL UNIQUE REFERENCES slots(id),
+          slot_id INTEGER NOT NULL REFERENCES slots(id),
           patient_user_id INTEGER NOT NULL REFERENCES users(id),
           status TEXT NOT NULL DEFAULT 'scheduled'
         );
+        ALTER TABLE appointments DROP CONSTRAINT IF EXISTS appointments_slot_id_key;
+        DROP INDEX IF EXISTS appointments_slot_id_key;
+        CREATE UNIQUE INDEX IF NOT EXISTS appointments_one_scheduled_per_slot
+          ON appointments(slot_id)
+          WHERE status = 'scheduled';
         """
     )
     conn.commit()
