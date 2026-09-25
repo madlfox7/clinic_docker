@@ -340,6 +340,15 @@ def book_slot(request: Request, slot_id: int, patient_email: str = Form(None)):
     cur.execute("SELECT pg_advisory_xact_lock(%s)", (patient_id,))
 
     cur.execute(
+        "SELECT 1 FROM appointments WHERE slot_id=%s AND status='scheduled'",
+        (slot_id,),
+    )
+    if cur.fetchone():
+        cur.close()
+        conn.close()
+        return RedirectResponse(f"/doctors/{doctor_id}/slots?error=unavailable", status_code=303)
+
+    cur.execute(
         """
         SELECT a.id
         FROM appointments a
@@ -359,15 +368,6 @@ def book_slot(request: Request, slot_id: int, patient_email: str = Form(None)):
             f"/doctors/{doctor_id}/slots?error=overlap&conflict_appointment_id={conflict_row[0]}&conflict_patient_id={patient_id}",
             status_code=303,
         )
-
-    cur.execute(
-        "SELECT 1 FROM appointments WHERE slot_id=%s AND status='scheduled'",
-        (slot_id,),
-    )
-    if cur.fetchone():
-        cur.close()
-        conn.close()
-        return RedirectResponse(f"/doctors/{doctor_id}/slots?error=unavailable", status_code=303)
 
     try:
         cur.execute(
