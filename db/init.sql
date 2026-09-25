@@ -6,6 +6,9 @@ CREATE TABLE IF NOT EXISTS users (
   blocked BOOLEAN NOT NULL DEFAULT FALSE
 );
 
+ALTER TABLE users
+ADD COLUMN IF NOT EXISTS blocked BOOLEAN NOT NULL DEFAULT FALSE;
+
 CREATE TABLE IF NOT EXISTS doctors (
   id SERIAL PRIMARY KEY,
   user_id INTEGER UNIQUE REFERENCES users(id),
@@ -28,6 +31,11 @@ CREATE TABLE IF NOT EXISTS appointments (
   status TEXT NOT NULL DEFAULT 'scheduled'
 );
 
+ALTER TABLE appointments
+DROP CONSTRAINT IF EXISTS appointments_slot_id_key;
+
+DROP INDEX IF EXISTS appointments_slot_id_key;
+
 CREATE UNIQUE INDEX IF NOT EXISTS appointments_one_scheduled_per_slot
-ON appointments(slot_id)
+ON appointments (slot_id)
 WHERE status = 'scheduled';

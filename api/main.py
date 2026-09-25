@@ -72,7 +72,7 @@ def ensure_schema():
         ALTER TABLE appointments DROP CONSTRAINT IF EXISTS appointments_slot_id_key;
         DROP INDEX IF EXISTS appointments_slot_id_key;
         CREATE UNIQUE INDEX IF NOT EXISTS appointments_one_scheduled_per_slot
-          ON appointments(slot_id)
+                    ON appointments (slot_id)
           WHERE status = 'scheduled';
         """
     )
