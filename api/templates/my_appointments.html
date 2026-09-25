@@ -1,9 +1,17 @@
 {% extends "base.html" %}
 {% block content %}
 <h1>My appointments</h1>
+{% if cancelled %}<p>Appointment cancelled.</p>{% endif %}
 <ul>
   {% for a in items %}
-    <li>{{ a.doctor_name }} — {{ a.starts_at }} - {{ a.ends_at }} ({{ a.status }})</li>
+    <li>
+      {{ a.doctor_name }} — {{ a.starts_at }} - {{ a.ends_at }} ({{ a.status }})
+      {% if a.status == "scheduled" %}
+        <form method="post" action="/appointments/{{ a.id }}/cancel" style="display:inline">
+          <button type="submit">Cancel appointment</button>
+        </form>
+      {% endif %}
+    </li>
   {% endfor %}
 </ul>
 {% if not items %}<p>No appointments.</p>{% endif %}

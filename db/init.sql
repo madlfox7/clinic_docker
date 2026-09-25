@@ -2,9 +2,9 @@ CREATE TABLE IF NOT EXISTS users (
   id SERIAL PRIMARY KEY,
   email TEXT UNIQUE NOT NULL,
   password_hash TEXT NOT NULL,
-  role TEXT NOT NULL CHECK (role IN ('admin','doctor','patient','registrar'))
+  role TEXT NOT NULL CHECK (role IN ('admin','doctor','patient','registrar')),
+  blocked BOOLEAN NOT NULL DEFAULT FALSE
 );
-
 
 CREATE TABLE IF NOT EXISTS doctors (
   id SERIAL PRIMARY KEY,

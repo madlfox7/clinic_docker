@@ -16,6 +16,14 @@
   </script>
   <p><strong>Booking failed.</strong> This slot is no longer available. Please choose another slot.</p>
   <p>Cause: another patient booked this slot first.</p>
+{% elif error == "patient_not_found" %}
+  <p><strong>Booking failed.</strong> Patient account was not found.</p>
+{% elif error == "patient_blocked" %}
+  <p><strong>Booking failed.</strong> This patient account is blocked.</p>
+{% elif error == "patient_required" %}
+  <p><strong>Booking failed.</strong> Enter a patient email first.</p>
+{% elif booked == "1" %}
+  <p>Appointment booked successfully.</p>
 {% endif %}
 <ul>
   {% for s in slots %}
@@ -24,9 +32,16 @@
       {% if s.taken %}
         Booked
       {% else %}
-        <form method="post" action="/slots/{{ s.id }}/book" style="display:inline">
-          <button type="submit">Book appointment</button>
-        </form>
+        {% if role == "registrar" %}
+          <form method="post" action="/slots/{{ s.id }}/book">
+            <input name="patient_email" type="email" placeholder="Patient email" required>
+            <button type="submit">Book for patient</button>
+          </form>
+        {% else %}
+          <form method="post" action="/slots/{{ s.id }}/book" style="display:inline">
+            <button type="submit">Book appointment</button>
+          </form>
+        {% endif %}
       {% endif %}
     </li>
   {% endfor %}

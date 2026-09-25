@@ -19,6 +19,7 @@ SEED_USERS = [
     ("doc@clinic.local", "password123", "doctor"),
     ("doc2@clinic.local", "password123", "doctor"),
     ("pat@clinic.local", "password123", "patient"),
+    ("pat2@clinic.local", "password123", "patient"),
     ("reg@clinic.local", "password123", "registrar"),
 ]
 
@@ -47,6 +48,8 @@ def ensure_schema():
     cur = conn.cursor()
     cur.execute(
         """
+        ALTER TABLE users
+        ADD COLUMN IF NOT EXISTS blocked BOOLEAN NOT NULL DEFAULT FALSE;
         CREATE TABLE IF NOT EXISTS doctors (
           id SERIAL PRIMARY KEY,
           user_id INTEGER UNIQUE REFERENCES users(id),
@@ -139,7 +142,10 @@ def login_form(request: Request):
 def login(request: Request, email: str = Form(...), password: str = Form(...)):
     conn = db()
     cur = conn.cursor()
-    cur.execute("SELECT email, password_hash, role FROM users WHERE email = %s", (email,))
+    cur.execute(
+        "SELECT email, password_hash, role, blocked FROM users WHERE email = %s",
+        (email,),
+    )
     row = cur.fetchone()
     cur.close()
     conn.close()
@@ -148,6 +154,12 @@ def login(request: Request, email: str = Form(...), password: str = Form(...)):
             "login.html",
             {"request": request, "error": "Invalid email or password", "role": None},
             status_code=401,
+        )
+    if row[3]:
+        return templates.TemplateResponse(
+            "login.html",
+            {"request": request, "error": "This account is blocked", "role": None},
+            status_code=403,
         )
     request.session["email"] = row[0]
     request.session["role"] = row[2]
@@ -196,6 +208,7 @@ def doctor_slots(request: Request, doctor_id: int):
     if role not in ("patient", "registrar"):
         return RedirectResponse("/login", status_code=303)
     error = request.query_params.get("error")
+    booked = request.query_params.get("booked")
     conflict = None
     conn = db()
     cur = conn.cursor()
@@ -248,6 +261,7 @@ def doctor_slots(request: Request, doctor_id: int):
             "doctor": {"id": doc[0], "full_name": doc[1]},
             "slots": slots,
             "error": error,
+            "booked": booked,
             "conflict": conflict,
             "role": role,
         },
@@ -255,16 +269,14 @@ def doctor_slots(request: Request, doctor_id: int):
 
 
 @app.post("/slots/{slot_id}/book")
-def book_slot(request: Request, slot_id: int):
+def book_slot(request: Request, slot_id: int, patient_email: str = Form(None)):
     email = request.session.get("email")
     role = request.session.get("role")
-    if role != "patient" or not email:
+    if role not in ("patient", "registrar") or not email:
         return RedirectResponse("/login", status_code=303)
+    target_email = email if role == "patient" else patient_email
     conn = db()
     cur = conn.cursor()
-    cur.execute("SELECT id FROM users WHERE email=%s", (email,))
-    patient_id = cur.fetchone()[0]
-    cur.execute("SELECT pg_advisory_xact_lock(%s)", (patient_id,))
     cur.execute("SELECT doctor_id, starts_at, ends_at FROM slots WHERE id=%s", (slot_id,))
     slot = cur.fetchone()
     if not slot:
@@ -272,6 +284,25 @@ def book_slot(request: Request, slot_id: int):
         conn.close()
         return RedirectResponse("/doctors", status_code=303)
     doctor_id, starts_at, ends_at = slot
+    if not target_email:
+        cur.close()
+        conn.close()
+        return RedirectResponse(f"/doctors/{doctor_id}/slots?error=patient_required", status_code=303)
+    cur.execute(
+        "SELECT id, blocked FROM users WHERE email=%s AND role='patient'",
+        (target_email,),
+    )
+    patient = cur.fetchone()
+    if not patient:
+        cur.close()
+        conn.close()
+        return RedirectResponse(f"/doctors/{doctor_id}/slots?error=patient_not_found", status_code=303)
+    patient_id, patient_blocked = patient
+    if patient_blocked:
+        cur.close()
+        conn.close()
+        return RedirectResponse(f"/doctors/{doctor_id}/slots?error=patient_blocked", status_code=303)
+    cur.execute("SELECT pg_advisory_xact_lock(%s)", (patient_id,))
 
     cur.execute(
         """
@@ -313,11 +344,13 @@ def book_slot(request: Request, slot_id: int):
         return RedirectResponse(f"/doctors/{doctor_id}/slots?error=unavailable", status_code=303)
     cur.close()
     conn.close()
+    if role == "registrar":
+        return RedirectResponse(f"/doctors/{doctor_id}/slots?booked=1", status_code=303)
     return RedirectResponse("/my", status_code=303)
 
 
-@app.get("/my")
-def my_appointments(request: Request):
+@app.post("/appointments/{appointment_id}/cancel")
+def cancel_appointment(request: Request, appointment_id: int):
     email = request.session.get("email")
     role = request.session.get("role")
     if role != "patient" or not email:
@@ -326,7 +359,36 @@ def my_appointments(request: Request):
     cur = conn.cursor()
     cur.execute(
         """
-        SELECT d.full_name, s.starts_at, s.ends_at, a.status
+        UPDATE appointments a
+        SET status='cancelled'
+        FROM users u
+        WHERE a.id=%s
+          AND a.patient_user_id=u.id
+          AND u.email=%s
+          AND a.status='scheduled'
+        RETURNING a.id
+        """,
+        (appointment_id, email),
+    )
+    cur.fetchone()
+    conn.commit()
+    cur.close()
+    conn.close()
+    return RedirectResponse("/my?cancelled=1", status_code=303)
+
+
+@app.get("/my")
+def my_appointments(request: Request):
+    email = request.session.get("email")
+    role = request.session.get("role")
+    if role != "patient" or not email:
+        return RedirectResponse("/login", status_code=303)
+    cancelled = request.query_params.get("cancelled")
+    conn = db()
+    cur = conn.cursor()
+    cur.execute(
+        """
+        SELECT a.id, d.full_name, s.starts_at, s.ends_at, a.status
         FROM appointments a
         JOIN slots s ON s.id=a.slot_id
         JOIN doctors d ON d.id=s.doctor_id
@@ -337,14 +399,20 @@ def my_appointments(request: Request):
         (email,),
     )
     items = [
-        {"doctor_name": r[0], "starts_at": r[1], "ends_at": r[2], "status": r[3]}
+        {
+            "id": r[0],
+            "doctor_name": r[1],
+            "starts_at": r[2],
+            "ends_at": r[3],
+            "status": r[4],
+        }
         for r in cur.fetchall()
     ]
     cur.close()
     conn.close()
     return templates.TemplateResponse(
         "my_appointments.html",
-        {"request": request, "items": items, "role": role},
+        {"request": request, "items": items, "role": role, "cancelled": cancelled},
     )
 
 
@@ -379,3 +447,56 @@ def doctor_appointments(request: Request):
         "doctor_appointments.html",
         {"request": request, "items": items, "role": role},
     )
+
+
+@app.get("/admin/users")
+def admin_users(request: Request):
+    if request.session.get("role") != "admin":
+        return RedirectResponse("/login", status_code=303)
+    conn = db()
+    cur = conn.cursor()
+    cur.execute(
+        "SELECT id, email, blocked FROM users WHERE role='patient' ORDER BY email"
+    )
+    users = [
+        {"id": row[0], "email": row[1], "blocked": row[2]}
+        for row in cur.fetchall()
+    ]
+    cur.close()
+    conn.close()
+    return templates.TemplateResponse(
+        "admin_users.html",
+        {"request": request, "users": users, "role": "admin"},
+    )
+
+
+@app.post("/admin/users/{user_id}/block")
+def block_user(request: Request, user_id: int):
+    if request.session.get("role") != "admin":
+        return RedirectResponse("/login", status_code=303)
+    conn = db()
+    cur = conn.cursor()
+    cur.execute(
+        "UPDATE users SET blocked=TRUE WHERE id=%s AND role='patient'",
+        (user_id,),
+    )
+    conn.commit()
+    cur.close()
+    conn.close()
+    return RedirectResponse("/admin/users", status_code=303)
+
+
+@app.post("/admin/users/{user_id}/unblock")
+def unblock_user(request: Request, user_id: int):
+    if request.session.get("role") != "admin":
+        return RedirectResponse("/login", status_code=303)
+    conn = db()
+    cur = conn.cursor()
+    cur.execute(
+        "UPDATE users SET blocked=FALSE WHERE id=%s AND role='patient'",
+        (user_id,),
+    )
+    conn.commit()
+    cur.close()
+    conn.close()
+    return RedirectResponse("/admin/users", status_code=303)

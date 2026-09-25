@@ -1,0 +1,23 @@
+{% extends "base.html" %}
+{% block content %}
+<h1>Manage patients</h1>
+<ul>
+  {% for user in users %}
+    <li>
+      {{ user.email }}
+      {% if user.blocked %}
+        <strong>Blocked</strong>
+        <form method="post" action="/admin/users/{{ user.id }}/unblock" style="display:inline">
+          <button type="submit">Unblock</button>
+        </form>
+      {% else %}
+        <strong>Active</strong>
+        <form method="post" action="/admin/users/{{ user.id }}/block" style="display:inline">
+          <button type="submit">Block</button>
+        </form>
+      {% endif %}
+    </li>
+  {% endfor %}
+</ul>
+{% if not users %}<p>No patients found.</p>{% endif %}
+{% endblock %}
