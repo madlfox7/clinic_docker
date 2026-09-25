@@ -14,6 +14,9 @@
     {% if role == "doctor" %}
       | <a href="/doctor/appointments">My appointments</a>
     {% endif %}
+    {% if role == "admin" %}
+      | <a href="/admin/users">Admin</a>
+    {% endif %}
     {% if role %}
       | <a href="/me">Cabinet</a>
       | <a href="/logout">Logout</a>

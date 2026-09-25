@@ -34,7 +34,7 @@
       {% else %}
         {% if role == "registrar" %}
           <form method="post" action="/slots/{{ s.id }}/book">
-            <input name="patient_email" type="email" placeholder="Patient email" required>
+            <input name="patient_email" type="email" placeholder="patient@clinic.local" required>
             <button type="submit">Book for patient</button>
           </form>
         {% else %}

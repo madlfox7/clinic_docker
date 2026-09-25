@@ -163,7 +163,7 @@ def login(request: Request, email: str = Form(...), password: str = Form(...)):
     if row[3]:
         return templates.TemplateResponse(
             "login.html",
-            {"request": request, "error": "This account is blocked", "role": None},
+            {"request": request, "error": "Account is blocked", "role": None},
             status_code=403,
         )
     request.session["email"] = row[0]
