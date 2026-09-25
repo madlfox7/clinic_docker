@@ -100,11 +100,14 @@ def seed_clinic():
             (%s, '2026-10-01 11:00', '2026-10-01 11:30'),
             (%s, '2026-10-02 09:00', '2026-10-02 09:30'),
             (%s, '2026-10-01 09:00', '2026-10-01 09:30'),
-            (%s, '2026-10-01 10:00', '2026-10-01 10:30')
+            (%s, '2026-10-01 10:00', '2026-10-01 10:30'),
+            (%s, '2026-10-03 10:00', '2026-10-03 11:00'),
+            (%s, '2026-10-03 10:30', '2026-10-03 11:30')
             """,
-            (id1, id1, id1, id1, id2, id2),
+            (id1, id1, id1, id1, id2, id2, id1, id2),
         )
         conn.commit()
+
     cur.close()
     conn.close()
 
@@ -193,10 +196,32 @@ def doctor_slots(request: Request, doctor_id: int):
     if role not in ("patient", "registrar"):
         return RedirectResponse("/login", status_code=303)
     error = request.query_params.get("error")
+    conflict = None
     conn = db()
     cur = conn.cursor()
     cur.execute("SELECT id, full_name FROM doctors WHERE id=%s", (doctor_id,))
     doc = cur.fetchone()
+    conflict_appointment_id = request.query_params.get("conflict_appointment_id")
+    email = request.session.get("email")
+    if error == "overlap" and conflict_appointment_id and email:
+        cur.execute(
+            """
+            SELECT d.full_name, s.starts_at, s.ends_at
+            FROM appointments a
+            JOIN slots s ON s.id = a.slot_id
+            JOIN doctors d ON d.id = s.doctor_id
+            JOIN users u ON u.id = a.patient_user_id
+            WHERE a.id=%s AND u.email=%s AND a.status='scheduled'
+            """,
+            (conflict_appointment_id, email),
+        )
+        row = cur.fetchone()
+        if row:
+            conflict = {
+                "doctor_name": row[0],
+                "starts_at": row[1],
+                "ends_at": row[2],
+            }
     cur.execute(
         """
         SELECT s.id, s.starts_at, s.ends_at,
@@ -223,6 +248,7 @@ def doctor_slots(request: Request, doctor_id: int):
             "doctor": {"id": doc[0], "full_name": doc[1]},
             "slots": slots,
             "error": error,
+            "conflict": conflict,
             "role": role,
         },
     )
@@ -238,6 +264,7 @@ def book_slot(request: Request, slot_id: int):
     cur = conn.cursor()
     cur.execute("SELECT id FROM users WHERE email=%s", (email,))
     patient_id = cur.fetchone()[0]
+    cur.execute("SELECT pg_advisory_xact_lock(%s)", (patient_id,))
     cur.execute("SELECT doctor_id, starts_at, ends_at FROM slots WHERE id=%s", (slot_id,))
     slot = cur.fetchone()
     if not slot:
@@ -258,10 +285,14 @@ def book_slot(request: Request, slot_id: int):
         """,
         (patient_id, ends_at, starts_at),
     )
-    if cur.fetchone():
+    conflict_row = cur.fetchone()
+    if conflict_row:
         cur.close()
         conn.close()
-        return RedirectResponse(f"/doctors/{doctor_id}/slots?error=overlap", status_code=303)
+        return RedirectResponse(
+            f"/doctors/{doctor_id}/slots?error=overlap&conflict_appointment_id={conflict_row[0]}",
+            status_code=303,
+        )
 
     cur.execute("SELECT 1 FROM appointments WHERE slot_id=%s", (slot_id,))
     if cur.fetchone():
@@ -295,7 +326,7 @@ def my_appointments(request: Request):
     cur = conn.cursor()
     cur.execute(
         """
-        SELECT d.full_name, s.starts_at, a.status
+        SELECT d.full_name, s.starts_at, s.ends_at, a.status
         FROM appointments a
         JOIN slots s ON s.id=a.slot_id
         JOIN doctors d ON d.id=s.doctor_id
@@ -306,7 +337,7 @@ def my_appointments(request: Request):
         (email,),
     )
     items = [
-        {"doctor_name": r[0], "starts_at": r[1], "status": r[2]}
+        {"doctor_name": r[0], "starts_at": r[1], "ends_at": r[2], "status": r[3]}
         for r in cur.fetchall()
     ]
     cur.close()
