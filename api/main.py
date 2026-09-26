@@ -131,7 +131,7 @@ def on_start():
 def home(request: Request):
     return templates.TemplateResponse(
         "home.html",
-        {"request": request, "role": request.session.get("role")},
+        {"request": request, "role": request.session.get("role") or "guest"},
     )
 
 
@@ -139,7 +139,11 @@ def home(request: Request):
 def login_form(request: Request):
     return templates.TemplateResponse(
         "login.html",
-        {"request": request, "error": None, "role": request.session.get("role")},
+        {
+            "request": request,
+            "error": None,
+            "role": request.session.get("role") or "guest",
+        },
     )
 
 
@@ -157,13 +161,17 @@ def login(request: Request, email: str = Form(...), password: str = Form(...)):
     if not row or not pwd.verify(password, row[1]):
         return templates.TemplateResponse(
             "login.html",
-            {"request": request, "error": "Invalid email or password", "role": None},
+            {
+                "request": request,
+                "error": "Invalid email or password",
+                "role": "guest",
+            },
             status_code=401,
         )
     if row[3]:
         return templates.TemplateResponse(
             "login.html",
-            {"request": request, "error": "Account is blocked", "role": None},
+            {"request": request, "error": "Account is blocked", "role": "guest"},
             status_code=403,
         )
     request.session["email"] = row[0]
@@ -179,7 +187,7 @@ def me(request: Request):
         return RedirectResponse("/login", status_code=303)
     return templates.TemplateResponse(
         "me.html",
-        {"request": request, "email": email, "role": role},
+        {"request": request, "email": email, "role": role or "guest"},
     )
 
 
@@ -203,7 +211,11 @@ def doctors_list(request: Request):
     ]
     return templates.TemplateResponse(
         "doctors.html",
-        {"request": request, "doctors": doctors, "role": request.session.get("role")},
+        {
+            "request": request,
+            "doctors": doctors,
+            "role": request.session.get("role") or "guest",
+        },
     )
 
 
@@ -312,7 +324,7 @@ def doctor_slots(request: Request, doctor_id: int):
             "error": error,
             "booked": booked,
             "conflict": conflict,
-            "role": role,
+            "role": role or "guest",
         },
     )
 
@@ -475,7 +487,7 @@ def my_appointments(request: Request):
         {
             "request": request,
             "items": items,
-            "role": role,
+            "role": role or "guest",
             "cancelled": cancelled,
             "cancel_error": cancel_error,
         },
@@ -511,7 +523,7 @@ def doctor_appointments(request: Request):
     conn.close()
     return templates.TemplateResponse(
         "doctor_appointments.html",
-        {"request": request, "items": items, "role": role},
+        {"request": request, "items": items, "role": role or "guest"},
     )
 
 

@@ -29,6 +29,10 @@ clinic_24_9/
 |       |-- my_appointments.html
 |       |-- doctor_appointments.html
 |       `-- admin_users.html
+|-- tests/
+|   |-- requirements.txt
+|   |-- run_tests.sh
+|   `-- test_stage4.py
 |-- db/
 |   `-- init.sql
 `-- proxy/
@@ -105,6 +109,24 @@ docker compose up -d --build api
 ```bash
 docker compose restart api
 ```
+
+### Запуск автоматических тестов этапа 4
+
+Из WSL в корне проекта:
+
+```bash
+./tests/run_tests.sh
+```
+
+Если текущая директория уже `tests/`, запускай:
+
+```bash
+./run_tests.sh
+```
+
+Скрипт сам определяет корень репозитория, поднимает Compose без удаления volume, дожидается ответа `http://localhost:8080`, затем запускает `pytest -v tests/test_stage4.py`. Тестовые зависимости закреплены в `tests/requirements.txt`. Для окружений без `python3-venv` скрипт использует доступный `pip --user`; обычное окружение с venv использует отдельный `.venv-tests/`, игнорируемый Git.
+
+Тесты проверяют роли, вход, Book/Cancel, overlap, registrar и admin block. Они временно создают и отменяют appointments, а admin-тест блокирует и затем разблокирует `pat@clinic.local`. Запускай их только против локальной dev-БД, не production. Volume не удаляется, но отдельные записи тестов и последовательности ID в таблице могут измениться.
 
 ## 5. Переменные окружения
 
