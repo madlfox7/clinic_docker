@@ -273,12 +273,20 @@ def doctor_slots(request: Request, doctor_id: int):
                    FROM appointments a
                    WHERE a.slot_id = s.id
                      AND a.status = 'scheduled'
-               ) AS taken
+             ) AS taken,
+             EXISTS(
+                 SELECT 1
+                 FROM appointments a
+                 JOIN users u ON u.id = a.patient_user_id
+                 WHERE a.slot_id = s.id
+                AND a.status = 'scheduled'
+                AND u.email = %s
+             ) AS mine
         FROM slots s
         WHERE s.doctor_id=%s
         ORDER BY s.starts_at
         """,
-        (doctor_id,),
+         (email, doctor_id),
     )
     rows = cur.fetchall()
     cur.close()
@@ -286,7 +294,13 @@ def doctor_slots(request: Request, doctor_id: int):
     if not doc:
         return RedirectResponse("/doctors", status_code=303)
     slots = [
-        {"id": r[0], "starts_at": r[1], "ends_at": r[2], "taken": r[3]}
+        {
+            "id": r[0],
+            "starts_at": r[1],
+            "ends_at": r[2],
+            "taken": r[3],
+            "mine": r[4],
+        }
         for r in rows
     ]
     return templates.TemplateResponse(

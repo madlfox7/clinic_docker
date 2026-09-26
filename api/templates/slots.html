@@ -29,8 +29,14 @@
   {% for s in slots %}
     <li>
       {{ s.starts_at }} — {{ s.ends_at }}
-      {% if s.taken %}
-        Booked
+      {% if s.mine %}
+        Your appointment — <a href="/my">open my appointments</a>
+      {% elif s.taken %}
+        {% if role == "registrar" %}
+          Booked
+        {% else %}
+          Unavailable
+        {% endif %}
       {% else %}
         {% if role == "registrar" %}
           <form method="post" action="/slots/{{ s.id }}/book">
