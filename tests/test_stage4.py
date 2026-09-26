@@ -161,12 +161,22 @@ def test_registrar_books_for_pat2():
 	with client() as reg, client() as pat2:
 		login(reg, REG)
 		login(pat2, PAT2)
-		_, slot_id = open_free_slot_page(reg)
 		existing_ids = set(appointment_ids(pat2.get("/my").text))
-		r = reg.post(
-			f"/slots/{slot_id}/book",
-			data={"patient_email": PAT2},
-		)
+		doctors = reg.get("/doctors")
+		r = None
+		for doc_id in re.findall(r'href="/doctors/(\d+)/slots"', doctors.text):
+			page = reg.get(f"/doctors/{doc_id}/slots")
+			for slot_id in slot_ids(page.text):
+				candidate = reg.post(
+					f"/slots/{slot_id}/book",
+					data={"patient_email": PAT2},
+				)
+				if "booked=1" in str(candidate.url):
+					r = candidate
+					break
+			if r is not None:
+				break
+		assert r is not None, "no free slot without patient overlap for registrar test"
 		assert r.status_code == 200
 		assert "patient_required" not in r.text
 		assert "patient_not_found" not in r.text
@@ -176,6 +186,84 @@ def test_registrar_books_for_pat2():
 		assert created_ids, "registrar booking not visible in patient's appointments"
 		for appointment_id in created_ids:
 			pat2.post(f"/appointments/{appointment_id}/cancel")
+
+
+def test_registrar_can_cancel_patient_appointment():
+	with client() as reg, client() as pat:
+		login(reg, REG)
+		login(pat, PAT)
+		doc_id, slot_id = open_free_slot_page(pat)
+		existing_ids = set(appointment_ids(pat.get("/my").text))
+		booked = pat.post(f"/slots/{slot_id}/book")
+		assert booked.status_code == 200
+
+		created_ids = set(appointment_ids(pat.get("/my").text)) - existing_ids
+		assert created_ids, "test booking did not create a cancellable appointment"
+		appointment_id = created_ids.pop()
+		try:
+			registrar_slots = reg.get(f"/doctors/{doc_id}/slots")
+			assert f'action="/appointments/{appointment_id}/cancel"' in registrar_slots.text
+			cancelled = reg.post(f"/appointments/{appointment_id}/cancel")
+			assert "cancelled=1" in str(cancelled.url)
+			assert appointment_id not in appointment_ids(pat.get("/my").text)
+		finally:
+			if appointment_id in appointment_ids(pat.get("/my").text):
+				pat.post(f"/appointments/{appointment_id}/cancel")
+
+
+def test_admin_can_cancel_future_appointments_separately_from_block():
+	with client() as admin, client() as pat, client() as doc:
+		login(admin, ADMIN)
+		login(pat, PAT)
+		login(doc, DOC)
+		if appointment_ids(pat.get("/my").text):
+			pytest.skip("pat already has scheduled appointments; preserving existing bookings")
+
+		_, slot_id = open_free_slot_page(pat)
+		booked = pat.post(f"/slots/{slot_id}/book")
+		assert booked.status_code == 200
+		created_ids = set(appointment_ids(pat.get("/my").text))
+		assert created_ids, "test booking did not create a scheduled appointment"
+		appointment_id = created_ids.pop()
+		user_id = None
+
+		try:
+			html = admin.get("/admin/users").text
+			block_match = re.search(
+				rf"{re.escape(PAT)}[\s\S]{{0,400}}/admin/users/(\d+)/block",
+				html,
+			)
+			assert block_match, "cannot find Block action for pat"
+			user_id = block_match.group(1)
+			admin.post(f"/admin/users/{user_id}/block")
+
+			assert appointment_id in appointment_ids(pat.get("/my").text)
+			doctor_schedule = doc.get("/doctor/appointments").text
+			assert PAT in doctor_schedule
+			assert "scheduled, account blocked" in doctor_schedule
+
+			html = admin.get("/admin/users").text
+			patient_row_match = re.search(
+				rf"{re.escape(PAT)}[\s\S]{{0,600}}/admin/users/(\d+)/cancel-future-appointments",
+				html,
+			)
+			if not patient_row_match:
+				pytest.skip("selected seed slot is not in the future")
+			patient_row = patient_row_match.group(0)
+			assert "Blocked: Yes" in patient_row
+			assert "Future scheduled appointments: 1" in html
+			cancelled = admin.post(
+				f"/admin/users/{user_id}/cancel-future-appointments"
+			)
+			assert "future_cancelled=1" in str(cancelled.url)
+			assert appointment_id not in appointment_ids(pat.get("/my").text)
+			assert "(cancelled)" in pat.get("/my").text
+			assert "/admin/users" in cancelled.url.path
+		finally:
+			if user_id:
+				admin.post(f"/admin/users/{user_id}/unblock")
+			if appointment_id in appointment_ids(pat.get("/my").text):
+				pat.post(f"/appointments/{appointment_id}/cancel")
 
 
 def test_admin_block_pat():

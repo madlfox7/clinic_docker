@@ -3,7 +3,9 @@
 <h1>My appointments</h1>
 <ul>
   {% for a in items %}
-    <li {% if a.status == "cancelled" %}style="color: gray"{% endif %}>{{ a.patient_email }} — {{ a.starts_at }} ({{ a.status }})</li>
+    <li {% if a.status == "cancelled" %}style="color: gray"{% endif %}>
+      {{ a.patient_email }} — {{ a.starts_at.strftime("%Y-%m-%d %H:%M") }}-{{ a.ends_at.strftime("%H:%M") }} ({{ a.status }}{% if a.patient_blocked %}, account blocked{% endif %})
+    </li>
   {% endfor %}
 </ul>
 {% if not items %}<p>No appointments yet.</p>{% endif %}

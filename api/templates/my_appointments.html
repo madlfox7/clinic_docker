@@ -7,7 +7,7 @@
   {% for a in items %}
     <li {% if a.status == "cancelled" %}style="color: gray"{% endif %}>
       {{ a.doctor_name }} — {{ a.starts_at }} - {{ a.ends_at }} ({{ a.status }})
-      {% if a.status == "scheduled" %}
+      {% if a.status == "scheduled" and a.cancellable %}
         <form method="post" action="/appointments/{{ a.id }}/cancel" style="display:inline">
           <button type="submit">Cancel appointment</button>
         </form>

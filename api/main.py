@@ -226,6 +226,8 @@ def doctor_slots(request: Request, doctor_id: int):
         return RedirectResponse("/login", status_code=303)
     error = request.query_params.get("error")
     booked = request.query_params.get("booked")
+    cancelled = request.query_params.get("cancelled")
+    cancel_error = request.query_params.get("cancel_error")
     conflict = None
     conn = db()
     cur = conn.cursor()
@@ -293,7 +295,14 @@ def doctor_slots(request: Request, doctor_id: int):
                  WHERE a.slot_id = s.id
                 AND a.status = 'scheduled'
                 AND u.email = %s
-             ) AS mine
+                             ) AS mine,
+                             (
+                                     SELECT a.id
+                                     FROM appointments a
+                                     WHERE a.slot_id = s.id
+                                         AND a.status = 'scheduled'
+                                     LIMIT 1
+                             ) AS appointment_id
         FROM slots s
         WHERE s.doctor_id=%s
         ORDER BY s.starts_at
@@ -312,6 +321,7 @@ def doctor_slots(request: Request, doctor_id: int):
             "ends_at": r[2],
             "taken": r[3],
             "mine": r[4],
+            "appointment_id": r[5],
         }
         for r in rows
     ]
@@ -323,6 +333,8 @@ def doctor_slots(request: Request, doctor_id: int):
             "slots": slots,
             "error": error,
             "booked": booked,
+            "cancelled": cancelled,
+            "cancel_error": cancel_error,
             "conflict": conflict,
             "role": role or "guest",
         },
@@ -422,30 +434,72 @@ def book_slot(request: Request, slot_id: int, patient_email: str = Form(None)):
 def cancel_appointment(request: Request, appointment_id: int):
     email = request.session.get("email")
     role = request.session.get("role")
-    if role != "patient" or not email:
+    if role not in ("patient", "registrar") or not email:
         return RedirectResponse("/login", status_code=303)
     conn = db()
     cur = conn.cursor()
     cur.execute(
         """
-        UPDATE appointments a
-        SET status='cancelled'
-        FROM users u
-        WHERE a.id=%s
-          AND a.patient_user_id=u.id
-          AND u.email=%s
-          AND a.status='scheduled'
-        RETURNING a.id
+         SELECT s.doctor_id, a.patient_user_id,
+             s.starts_at > CURRENT_TIMESTAMP AS is_future
+        FROM appointments a
+        JOIN slots s ON s.id=a.slot_id
+        WHERE a.id=%s AND a.status='scheduled'
         """,
-        (appointment_id, email),
+        (appointment_id,),
     )
-    cancelled = cur.fetchone() is not None
+    appointment = cur.fetchone()
+    if not appointment:
+        cur.close()
+        conn.close()
+        if role == "patient":
+            return RedirectResponse("/my?cancel_error=1", status_code=303)
+        return RedirectResponse("/doctors", status_code=303)
+
+    doctor_id, patient_user_id, is_future = appointment
+    if role == "patient":
+        if not is_future:
+            cur.close()
+            conn.close()
+            return RedirectResponse("/my?cancel_error=1", status_code=303)
+        cur.execute(
+            """
+            UPDATE appointments a
+            SET status='cancelled'
+            WHERE a.id=%s
+              AND a.patient_user_id=%s
+              AND a.status='scheduled'
+              AND EXISTS (
+                  SELECT 1 FROM users u
+                  WHERE u.id=a.patient_user_id AND u.email=%s
+              )
+              AND EXISTS (
+                  SELECT 1 FROM slots s
+                  WHERE s.id=a.slot_id AND s.starts_at > CURRENT_TIMESTAMP
+              )
+            """,
+            (appointment_id, patient_user_id, email),
+        )
+    else:
+        cur.execute(
+            """
+            UPDATE appointments
+            SET status='cancelled'
+            WHERE id=%s AND status='scheduled'
+            """,
+            (appointment_id,),
+        )
+    updated = cur.rowcount
     conn.commit()
     cur.close()
     conn.close()
-    if cancelled:
-        return RedirectResponse("/my?cancelled=1", status_code=303)
-    return RedirectResponse("/my?cancel_error=1", status_code=303)
+    if role == "patient":
+        if updated:
+            return RedirectResponse("/my?cancelled=1", status_code=303)
+        return RedirectResponse("/my?cancel_error=1", status_code=303)
+    if updated:
+        return RedirectResponse(f"/doctors/{doctor_id}/slots?cancelled=1", status_code=303)
+    return RedirectResponse(f"/doctors/{doctor_id}/slots?cancel_error=1", status_code=303)
 
 
 @app.get("/my")
@@ -460,7 +514,8 @@ def my_appointments(request: Request):
     cur = conn.cursor()
     cur.execute(
         """
-        SELECT a.id, d.full_name, s.starts_at, s.ends_at, a.status
+         SELECT a.id, d.full_name, s.starts_at, s.ends_at, a.status,
+             s.starts_at > CURRENT_TIMESTAMP AS cancellable
         FROM appointments a
         JOIN slots s ON s.id=a.slot_id
         JOIN doctors d ON d.id=s.doctor_id
@@ -477,6 +532,7 @@ def my_appointments(request: Request):
             "starts_at": r[2],
             "ends_at": r[3],
             "status": r[4],
+            "cancellable": r[5],
         }
         for r in cur.fetchall()
     ]
@@ -504,7 +560,7 @@ def doctor_appointments(request: Request):
     cur = conn.cursor()
     cur.execute(
         """
-        SELECT u.email, s.starts_at, a.status
+        SELECT u.email, s.starts_at, s.ends_at, a.status, u.blocked
         FROM appointments a
         JOIN slots s ON s.id=a.slot_id
         JOIN doctors d ON d.id=s.doctor_id
@@ -516,7 +572,13 @@ def doctor_appointments(request: Request):
         (email,),
     )
     items = [
-        {"patient_email": r[0], "starts_at": r[1], "status": r[2]}
+        {
+            "patient_email": r[0],
+            "starts_at": r[1],
+            "ends_at": r[2],
+            "status": r[3],
+            "patient_blocked": r[4],
+        }
         for r in cur.fetchall()
     ]
     cur.close()
@@ -534,17 +596,40 @@ def admin_users(request: Request):
     conn = db()
     cur = conn.cursor()
     cur.execute(
-        "SELECT id, email, blocked FROM users WHERE role='patient' ORDER BY email"
+        """
+        SELECT p.id, p.email, p.blocked,
+               (
+                   SELECT count(*)
+                   FROM appointments a
+                   JOIN slots s ON s.id = a.slot_id
+                   WHERE a.patient_user_id = p.id
+                     AND a.status = 'scheduled'
+                     AND s.starts_at > CURRENT_TIMESTAMP
+               ) AS future_scheduled
+        FROM users p
+        WHERE p.role='patient'
+        ORDER BY p.email
+        """
     )
     users = [
-        {"id": row[0], "email": row[1], "blocked": row[2]}
+        {
+            "id": row[0],
+            "email": row[1],
+            "blocked": row[2],
+            "future_scheduled": row[3],
+        }
         for row in cur.fetchall()
     ]
     cur.close()
     conn.close()
     return templates.TemplateResponse(
         "admin_users.html",
-        {"request": request, "users": users, "role": "admin"},
+        {
+            "request": request,
+            "users": users,
+            "role": "admin",
+            "future_cancelled": request.query_params.get("future_cancelled"),
+        },
     )
 
 
@@ -578,3 +663,32 @@ def unblock_user(request: Request, user_id: int):
     cur.close()
     conn.close()
     return RedirectResponse("/admin/users", status_code=303)
+
+
+@app.post("/admin/users/{user_id}/cancel-future-appointments")
+def cancel_future_appointments(request: Request, user_id: int):
+    if request.session.get("role") != "admin":
+        return RedirectResponse("/login", status_code=303)
+    conn = db()
+    cur = conn.cursor()
+    cur.execute(
+        """
+        UPDATE appointments a
+        SET status='cancelled'
+        FROM slots s, users u
+        WHERE a.slot_id=s.id
+          AND a.patient_user_id=u.id
+          AND u.id=%s
+          AND u.role='patient'
+          AND a.status='scheduled'
+          AND s.starts_at > CURRENT_TIMESTAMP
+        """,
+        (user_id,),
+    )
+    cancelled_count = cur.rowcount
+    conn.commit()
+    cur.close()
+    conn.close()
+    return RedirectResponse(
+        f"/admin/users?future_cancelled={cancelled_count}", status_code=303
+    )

@@ -25,6 +25,8 @@
 {% elif booked == "1" %}
   <p>Appointment booked successfully.</p>
 {% endif %}
+{% if cancelled == "1" %}<p>Appointment cancelled.</p>{% endif %}
+{% if cancel_error == "1" %}<p>Appointment could not be cancelled; it may already be cancelled.</p>{% endif %}
 <ul>
   {% for s in slots %}
     <li>
@@ -34,6 +36,9 @@
       {% elif s.taken %}
         {% if role == "registrar" %}
           Booked
+          <form method="post" action="/appointments/{{ s.appointment_id }}/cancel" style="display:inline">
+            <button type="submit">Cancel appointment</button>
+          </form>
         {% else %}
           Unavailable
         {% endif %}
