@@ -72,6 +72,22 @@ def test_bad_password_rejected():
 		assert "Invalid email or password" in r.text
 
 
+def test_already_logged_in_admin_is_not_asked_for_credentials():
+	with client() as c:
+		login(c, ADMIN)
+		page = c.get("/login")
+		assert page.status_code == 200
+		assert str(page.url).rstrip("/").endswith("/login")
+		assert ADMIN in page.text
+		assert "Password:" not in page.text
+		kept = c.post("/login", data={"email": PAT, "password": PASSWORD})
+		assert str(kept.url).rstrip("/").endswith("/login")
+		me = c.get("/me")
+		assert f"You are logged in as: {ADMIN}" in me.text
+		assert "Role: admin" in me.text
+		assert f"You are logged in as: {PAT}" not in me.text
+
+
 def test_patient_login_and_cabinet():
 	with client() as c:
 		r = login(c, PAT)
@@ -286,3 +302,73 @@ def test_admin_block_pat():
 			assert "Account is blocked" in response.text
 		finally:
 			admin.post(f"/admin/users/{user_id}/unblock")
+
+
+def test_admin_slot_generator_respects_time_off_and_role():
+	with client() as admin, client() as registrar:
+		login(admin, ADMIN)
+		login(registrar, REG)
+		html = admin.get("/admin/schedule").text
+		match = re.search(
+			rf'action="/admin/doctors/(\d+)/generate"[\s\S]{{0,250}}Anna Ohanyan',
+			html,
+		)
+		assert match, "Anna slot-generation form missing"
+		doctor_id = match.group(1)
+
+		generated = admin.post(
+			f"/admin/doctors/{doctor_id}/generate",
+			data={"from_date": "2026-10-12", "to_date": "2026-10-12"},
+		)
+		assert "generated=0" in str(generated.url)
+		assert "skipped=6" in str(generated.url)
+		assert "Created 0 slots, skipped 6." in generated.text
+
+		unauthorized = registrar.post(
+			f"/admin/doctors/{doctor_id}/generate",
+			data={"from_date": "2026-10-19", "to_date": "2026-10-19"},
+		)
+		assert "/login" in str(unauthorized.url)
+
+
+def test_admin_schedule_configuration_is_admin_only_and_repeatable():
+	with client() as admin, client() as registrar:
+		login(admin, ADMIN)
+		login(registrar, REG)
+		page = admin.get("/admin/schedule")
+		assert page.status_code == 200
+		assert "Thanksgiving" in page.text
+		assert "Monday" in page.text
+		doctor_match = re.search(r'<option value="(\d+)">Anna Ohanyan</option>', page.text)
+		assert doctor_match, "Anna missing from admin schedule controls"
+		doctor_id = doctor_match.group(1)
+
+		for path, data in (
+			(
+				"/admin/work-hours",
+				{
+					"doctor_id": doctor_id,
+					"weekday": "0",
+					"start_time": "09:00",
+					"end_time": "12:00",
+					"slot_minutes": "30",
+				},
+			),
+			(
+				"/admin/time-off",
+				{
+					"doctor_id": doctor_id,
+					"starts_on": "2026-10-12",
+					"ends_on": "2026-10-18",
+				},
+			),
+			(
+				"/admin/holidays",
+				{"holiday_day": "2026-11-26", "name": "Thanksgiving"},
+			),
+		):
+			response = admin.post(path, data=data)
+			assert response.status_code == 200
+			assert "/admin/schedule?saved=" in str(response.url)
+			unauthorized = registrar.post(path, data=data)
+			assert "/login" in str(unauthorized.url)

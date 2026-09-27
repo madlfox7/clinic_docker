@@ -22,26 +22,34 @@
   <p><strong>Booking failed.</strong> This patient account is blocked.</p>
 {% elif error == "patient_required" %}
   <p><strong>Booking failed.</strong> Enter a patient email first.</p>
+{% elif error == "closed" %}
+  <p><strong>Booking failed.</strong> The clinic is closed for this date.</p>
 {% elif booked == "1" %}
   <p>Appointment booked successfully.</p>
 {% endif %}
 {% if cancelled == "1" %}<p>Appointment cancelled.</p>{% endif %}
 {% if cancel_error == "1" %}<p>Appointment could not be cancelled; it may already be cancelled.</p>{% endif %}
-<ul>
-  {% for s in slots %}
+{% for day in days %}
+  <h2>{{ day.label }}</h2>
+  <ul>
+  {% for s in day.slots %}
     <li>
-      {{ s.starts_at }} — {{ s.ends_at }}
+      {{ s.starts_at.strftime("%H:%M") }}–{{ s.ends_at.strftime("%H:%M") }}
       {% if s.mine %}
         Your appointment — <a href="/my">open my appointments</a>
+        {% if s.closed %}<strong>Clinic closed — staff action required.</strong>{% endif %}
       {% elif s.taken %}
         {% if role == "registrar" %}
           Booked
+          {% if s.closed %}<strong>Clinic closed — staff action required.</strong>{% endif %}
           <form method="post" action="/appointments/{{ s.appointment_id }}/cancel" style="display:inline">
             <button type="submit">Cancel appointment</button>
           </form>
         {% else %}
-          Unavailable
+          Unavailable{% if s.closed %} — clinic closed{% endif %}
         {% endif %}
+      {% elif s.closed %}
+        Closed — unavailable
       {% else %}
         {% if role == "registrar" %}
           <form method="post" action="/slots/{{ s.id }}/book">
@@ -56,5 +64,6 @@
       {% endif %}
     </li>
   {% endfor %}
-</ul>
+  </ul>
+{% endfor %}
 {% endblock %}
