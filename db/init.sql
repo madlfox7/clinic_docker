@@ -39,3 +39,19 @@ DROP INDEX IF EXISTS appointments_slot_id_key;
 CREATE UNIQUE INDEX IF NOT EXISTS appointments_one_scheduled_per_slot
 ON appointments (slot_id)
 WHERE status = 'scheduled';
+
+CREATE EXTENSION IF NOT EXISTS btree_gist;
+
+ALTER TABLE slots
+  ADD COLUMN IF NOT EXISTS time_range tsrange
+  GENERATED ALWAYS AS (tsrange(starts_at, ends_at, '[)')) STORED;
+
+ALTER TABLE slots
+  DROP CONSTRAINT IF EXISTS slots_no_overlap_per_doctor;
+
+ALTER TABLE slots
+  ADD CONSTRAINT slots_no_overlap_per_doctor
+  EXCLUDE USING gist (
+    doctor_id WITH =,
+    time_range WITH &&
+  );

@@ -33,6 +33,9 @@ clinic_24_9/
 |   |-- requirements.txt
 |   |-- run_tests.sh
 |   `-- test_stage4.py
+|-- experiments/
+|   |-- concurrent_book.py
+|   `-- concurrent_book_results.md
 |-- db/
 |   `-- init.sql
 `-- proxy/
@@ -128,6 +131,55 @@ docker compose restart api
 
 Тесты проверяют роли, вход, Book/Cancel, overlap, registrar и admin block. Они временно создают и отменяют appointments, а admin-тест блокирует и затем разблокирует `pat@clinic.local`. Запускай их только против локальной dev-БД, не production. Volume не удаляется, но отдельные записи тестов и последовательности ID в таблице могут измениться.
 
+### Эксперимент конкурентного бронирования
+
+Найди свободный слот, у которого нет `scheduled` appointment:
+
+```sql
+SELECT s.id, d.full_name, s.starts_at
+FROM slots s
+JOIN doctors d ON d.id = s.doctor_id
+LEFT JOIN appointments a
+    ON a.slot_id = s.id AND a.status = 'scheduled'
+WHERE a.id IS NULL
+ORDER BY s.id;
+```
+
+Из WSL в корне проекта запусти 10, затем 50 одновременных POST-запросов на выбранный slot ID:
+
+```bash
+python3 experiments/concurrent_book.py 2 10
+python3 experiments/concurrent_book.py 2 50
+```
+
+Замени `2` на реально свободный ID. Между прогонами отмени winner (или поменяй status его записи на `cancelled`), иначе второй прогон проверит только уже занятый слот. После каждого прогона SQL `GROUP BY slot_id, status` должен показать ровно одну строку `scheduled` для проверяемого slot. Скрипт синхронизирует POST-запросы барьером; отчёт двух проверенных прогонов сохранён в `experiments/concurrent_book_results.md`.
+
+Эксперимент изменяет локальную БД и оставляет cancelled history, поэтому запускай его только на dev-данных. Не удаляй volume ради этого теста.
+
+### Stage 5 — конкурентность и ограничения слотов
+
+- `appointments_one_scheduled_per_slot` гарантирует не более одной активной записи на один `slot_id`.
+- `slots_no_overlap_per_doctor` — PostgreSQL `EXCLUDE USING gist` по `doctor_id` и generated `time_range`; два слота одного врача не могут пересекаться.
+- Диапазон слота полуоткрытый (`[)`) — начало включено, конец исключён, поэтому соседние визиты встык разрешены.
+- Overlap одного пациента между слотами разных врачей по-прежнему проверяется в Python в `book_slot()`.
+
+Результаты одновременного бронирования одного свободного slot `2` (Anna, 2026-10-01 10:00), дата проверки — 2026-09-27:
+
+| Одновременные POST-запросы | Accepted | Rejected | `scheduled` после прогона |
+|---:|---:|---:|---:|
+| 10 | 1 | 9 | 1 |
+| 50 | 1 | 49 | 1 |
+
+После каждого прогона тестовую запись отменяли; текущее состояние БД не содержит активной записи на slot `2`.
+
+Регрессию этапа 4 запускать из корня проекта:
+
+```bash
+python3 -m pytest -v tests/test_stage4.py
+```
+
+На дату внесения этой записи набор завершился результатом `11 passed`.
+
 ## 5. Переменные окружения
 
 Файл `.env` не должен добавляться в Git. Шаблон находится в `.env.example`:
@@ -155,7 +207,7 @@ seed_clinic()
 
 ### `ensure_schema()`
 
-Добавляет колонку `users.blocked`, если ее еще нет, и создает таблицы `doctors`, `slots` и `appointments`, если их еще нет. При старте удаляется прежнее глобальное ограничение `appointments_slot_id_key` и создается частичный unique index только для `status = 'scheduled'`. Эта миграция применяется и к существующему volume без удаления данных. В `db/init.sql` описана та же схема для новой базы.
+Добавляет колонку `users.blocked`, если ее еще нет, создает таблицы и применяет ограничения слотов/appointments. При старте также удаляется прежнее глобальное `appointments_slot_id_key`, создаётся partial unique index по активным appointments и мигрируется `slots.time_range` с exclusion constraint. Эта миграция применяется и к существующему volume без удаления данных. В `db/init.sql` описана та же схема для новой базы.
 
 ### `seed_users()`
 
@@ -293,6 +345,9 @@ docker compose up --build -d
 - `doctor_id` — reference на `doctors`.
 - `starts_at` — начало приема.
 - `ends_at` — конец приема.
+- `time_range` — generated `tsrange(starts_at, ends_at, '[)')`; конец интервала не включается.
+
+Constraint `slots_no_overlap_per_doctor` использует `EXCLUDE USING gist (doctor_id WITH =, time_range WITH &&)`: временные слоты одного врача не могут пересекаться. Интервалы встык разрешены благодаря границам `[)`. Для работы равенства integer при GiST в `ensure_schema()` и `db/init.sql` включается extension `btree_gist`.
 
 ### `appointments`
 
@@ -336,6 +391,8 @@ AND existing.ends_at > requested.starts_at
 Соседние интервалы без общего времени разрешены. Например, `10:00-10:30` и `10:30-11:00` не пересекаются.
 
 Проверяются только записи со статусом `scheduled`. Отменённая запись не блокирует новое время.
+
+Python-overlap пациента остаётся отдельным правилом: один пациент не может записаться на пересекающиеся интервалы у разных врачей. Exclusion constraint ограничивает только расписание одного врача, а partial unique index — две живые записи на один slot_id.
 
 Важно: после отмены слот считается свободным немедленно. Проверки доступности и списка слотов исключают записи со статусом `cancelled`, поэтому другой пациент может забронировать тот же слот после успешной отмены, не встречая ложного `unavailable` или `taken` статуса.
 
