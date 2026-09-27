@@ -1,7 +1,11 @@
 import re
+import subprocess
+from pathlib import Path
 
 import httpx
 import pytest
+
+ROOT = Path(__file__).resolve().parents[1]
 
 BASE = "http://localhost:8080"
 PASSWORD = "password123"
@@ -70,6 +74,22 @@ def test_bad_password_rejected():
 		r = c.post("/login", data={"email": PAT, "password": "wrong"})
 		assert r.status_code in (200, 401)
 		assert "Invalid email or password" in r.text
+
+
+def test_already_logged_in_admin_is_not_asked_for_credentials():
+	with client() as c:
+		login(c, ADMIN)
+		page = c.get("/login")
+		assert page.status_code == 200
+		assert str(page.url).rstrip("/").endswith("/login")
+		assert ADMIN in page.text
+		assert "Password:" not in page.text
+		kept = c.post("/login", data={"email": PAT, "password": PASSWORD})
+		assert str(kept.url).rstrip("/").endswith("/login")
+		me = c.get("/me")
+		assert f"You are logged in as: {ADMIN}" in me.text
+		assert "Role: admin" in me.text
+		assert f"You are logged in as: {PAT}" not in me.text
 
 
 def test_patient_login_and_cabinet():
@@ -286,3 +306,263 @@ def test_admin_block_pat():
 			assert "Account is blocked" in response.text
 		finally:
 			admin.post(f"/admin/users/{user_id}/unblock")
+
+
+def test_admin_slot_generator_respects_time_off_and_role():
+	with client() as admin, client() as registrar:
+		login(admin, ADMIN)
+		login(registrar, REG)
+		html = admin.get("/admin/schedule").text
+		match = re.search(
+			rf'action="/admin/doctors/(\d+)/generate"[\s\S]{{0,250}}Anna Ohanyan',
+			html,
+		)
+		assert match, "Anna slot-generation form missing"
+		doctor_id = match.group(1)
+
+		generated = admin.post(
+			f"/admin/doctors/{doctor_id}/generate",
+			data={"from_date": "2026-10-12", "to_date": "2026-10-12"},
+		)
+		assert "generated=0" in str(generated.url)
+		assert "skipped=6" in str(generated.url)
+		assert "Created 0 slots, skipped 6." in generated.text
+
+		unauthorized = registrar.post(
+			f"/admin/doctors/{doctor_id}/generate",
+			data={"from_date": "2026-10-19", "to_date": "2026-10-19"},
+		)
+		assert "/login" in str(unauthorized.url)
+
+
+def test_admin_schedule_configuration_is_admin_only_and_repeatable():
+	with client() as admin, client() as registrar:
+		login(admin, ADMIN)
+		login(registrar, REG)
+		page = admin.get("/admin/schedule")
+		assert page.status_code == 200
+		assert "Thanksgiving" in page.text
+		assert "Monday" in page.text
+		doctor_match = re.search(r'<option value="(\d+)">Anna Ohanyan</option>', page.text)
+		assert doctor_match, "Anna missing from admin schedule controls"
+		doctor_id = doctor_match.group(1)
+
+		for path, data in (
+			(
+				"/admin/work-hours",
+				{
+					"doctor_id": doctor_id,
+					"weekday": "0",
+					"start_time": "09:00",
+					"end_time": "12:00",
+					"slot_minutes": "30",
+				},
+			),
+			(
+				"/admin/time-off",
+				{
+					"doctor_id": doctor_id,
+					"starts_on": "2026-10-12",
+					"ends_on": "2026-10-18",
+				},
+			),
+			(
+				"/admin/holidays",
+				{"holiday_day": "2026-11-26", "name": "Thanksgiving"},
+			),
+		):
+			response = admin.post(path, data=data)
+			assert response.status_code == 200
+			assert "/admin/schedule?saved=" in str(response.url)
+			unauthorized = registrar.post(path, data=data)
+			assert "/login" in str(unauthorized.url)
+
+
+def psql(sql: str) -> str:
+	completed = subprocess.run(
+		[
+			"docker", "compose", "exec", "-T", "db",
+			"psql", "-U", "clinic", "-d", "clinic",
+			"-v", "ON_ERROR_STOP=1", "-At", "-c", sql,
+		],
+		cwd=ROOT,
+		capture_output=True,
+		text=True,
+	)
+	if completed.returncode != 0:
+		raise AssertionError(completed.stderr or completed.stdout)
+	lines = [line.strip() for line in completed.stdout.splitlines() if line.strip()]
+	for line in lines:
+		if line.isdigit() or line in ("scheduled", "cancelled"):
+			return line
+	return lines[-1] if lines else ""
+
+
+def test_past_slot_cannot_be_booked():
+	psql(
+		"""
+		DELETE FROM slots
+		WHERE starts_at = TIMESTAMP '2020-01-06 09:00'
+		  AND doctor_id = (SELECT id FROM doctors WHERE full_name = 'Anna Ohanyan')
+		"""
+	)
+	slot_id = psql(
+		"""
+		INSERT INTO slots (doctor_id, starts_at, ends_at)
+		SELECT id, TIMESTAMP '2020-01-06 09:00', TIMESTAMP '2020-01-06 09:30'
+		FROM doctors WHERE full_name = 'Anna Ohanyan'
+		RETURNING id
+		"""
+	)
+	try:
+		with client() as pat:
+			login(pat, PAT)
+			booked = pat.post(f"/slots/{slot_id}/book")
+			assert "error=past" in str(booked.url)
+			assert "This slot is in the past" in booked.text
+			assert "Past — unavailable" in booked.text
+	finally:
+		psql(f"DELETE FROM slots WHERE id = {int(slot_id)}")
+
+
+def test_closed_day_lists_scheduled_and_drops_cancelled_only_slot():
+	psql(
+		"""
+		DELETE FROM appointments
+		WHERE slot_id IN (
+			SELECT id FROM slots
+			WHERE starts_at::date = DATE '2026-12-25'
+		);
+		DELETE FROM slots WHERE starts_at::date = DATE '2026-12-25';
+		DELETE FROM holidays WHERE day = DATE '2026-12-25' AND name = 'Christmas';
+		"""
+	)
+	free_id = psql(
+		"""
+		INSERT INTO slots (doctor_id, starts_at, ends_at)
+		SELECT id, TIMESTAMP '2026-12-25 09:00', TIMESTAMP '2026-12-25 09:30'
+		FROM doctors WHERE full_name = 'Anna Ohanyan'
+		RETURNING id
+		"""
+	)
+	kept_id = psql(
+		"""
+		INSERT INTO slots (doctor_id, starts_at, ends_at)
+		SELECT id, TIMESTAMP '2026-12-25 10:00', TIMESTAMP '2026-12-25 10:30'
+		FROM doctors WHERE full_name = 'Anna Ohanyan'
+		RETURNING id
+		"""
+	)
+	psql(
+		f"""
+		INSERT INTO appointments (slot_id, patient_user_id, status)
+		SELECT {int(free_id)}, id, 'cancelled' FROM users WHERE email = '{PAT}'
+		"""
+	)
+	psql(
+		f"""
+		INSERT INTO appointments (slot_id, patient_user_id, status)
+		SELECT {int(kept_id)}, id, 'scheduled' FROM users WHERE email = '{PAT2}'
+		"""
+	)
+	try:
+		with client() as admin:
+			login(admin, ADMIN)
+			saved = admin.post(
+				"/admin/holidays",
+				data={"holiday_day": "2026-12-25", "name": "Christmas"},
+			)
+			assert "saved=holiday" in str(saved.url)
+			assert "Needs manual cancellation" in saved.text
+			assert PAT2 in saved.text
+			assert "2026-12-25 10:00" in saved.text
+			assert psql(f"SELECT count(*) FROM slots WHERE id = {int(free_id)}") == "0"
+			assert psql(
+				f"SELECT status FROM appointments WHERE slot_id = {int(kept_id)}"
+			) == "scheduled"
+	finally:
+		psql(
+			f"""
+			DELETE FROM appointments WHERE slot_id IN ({int(free_id)}, {int(kept_id)});
+			DELETE FROM slots WHERE id IN ({int(free_id)}, {int(kept_id)});
+			DELETE FROM holidays WHERE day = DATE '2026-12-25' AND name = 'Christmas';
+			"""
+		)
+
+
+def test_apply_hours_removes_free_slots_outside_window_only():
+	psql(
+		"""
+		DELETE FROM appointments
+		WHERE slot_id IN (
+			SELECT id FROM slots
+			WHERE starts_at::date = DATE '2026-12-05'
+		);
+		DELETE FROM slots WHERE starts_at::date = DATE '2026-12-05';
+		"""
+	)
+	free_id = psql(
+		"""
+		INSERT INTO slots (doctor_id, starts_at, ends_at)
+		SELECT id, TIMESTAMP '2026-12-05 09:00', TIMESTAMP '2026-12-05 09:30'
+		FROM doctors WHERE full_name = 'Anna Ohanyan'
+		RETURNING id
+		"""
+	)
+	kept_id = psql(
+		"""
+		INSERT INTO slots (doctor_id, starts_at, ends_at)
+		SELECT id, TIMESTAMP '2026-12-05 10:00', TIMESTAMP '2026-12-05 10:30'
+		FROM doctors WHERE full_name = 'Anna Ohanyan'
+		RETURNING id
+		"""
+	)
+	psql(
+		f"""
+		INSERT INTO appointments (slot_id, patient_user_id, status)
+		SELECT {int(kept_id)}, id, 'scheduled' FROM users WHERE email = '{PAT2}'
+		"""
+	)
+	try:
+		with client() as admin, client() as registrar:
+			login(admin, ADMIN)
+			login(registrar, REG)
+			page = admin.get("/admin/schedule")
+			match = re.search(
+				r'action="/admin/doctors/(\d+)/apply-hours"',
+				page.text,
+			)
+			assert match, "apply-hours button missing"
+			doctor_id = match.group(1)
+			denied = registrar.post(f"/admin/doctors/{doctor_id}/apply-hours")
+			assert "/login" in str(denied.url)
+			applied = admin.post(f"/admin/doctors/{doctor_id}/apply-hours")
+			assert "saved=apply-hours" in str(applied.url)
+			assert "Scheduled visits were not cancelled" in applied.text
+			assert "Outside work hours" in applied.text
+			assert PAT2 in applied.text
+			assert psql(f"SELECT count(*) FROM slots WHERE id = {int(free_id)}") == "0"
+			assert psql(
+				f"SELECT status FROM appointments WHERE slot_id = {int(kept_id)}"
+			) == "scheduled"
+	finally:
+		psql(
+			f"""
+			DELETE FROM appointments WHERE slot_id IN ({int(free_id)}, {int(kept_id)});
+			DELETE FROM slots WHERE id IN ({int(free_id)}, {int(kept_id)});
+			"""
+		)
+		for name, start, end in (
+			("Anna Ohanyan", "2026-10-03 10:00", "2026-10-03 11:00"),
+			("Levon Petrosyan", "2026-10-01 09:00", "2026-10-01 09:30"),
+			("Levon Petrosyan", "2026-10-01 10:00", "2026-10-01 10:30"),
+			("Levon Petrosyan", "2026-10-03 10:30", "2026-10-03 11:30"),
+		):
+			psql(
+				f"""
+				INSERT INTO slots (doctor_id, starts_at, ends_at)
+				SELECT id, TIMESTAMP '{start}', TIMESTAMP '{end}'
+				FROM doctors WHERE full_name = '{name}'
+				ON CONFLICT (doctor_id, starts_at) DO NOTHING
+				"""
+			)

@@ -1,0 +1,137 @@
+{% extends "base.html" %}
+{% block content %}
+<h1>Schedule management</h1>
+<p><a href="/admin/users">Manage patients</a></p>
+{% if saved == "work-hours" %}<p>Work hours saved. Free slots outside the new hours are not removed until you apply the schedule.</p>{% endif %}
+{% if saved == "time-off" %}<p>Time off saved.</p>{% endif %}
+{% if saved == "holiday" %}<p>Holiday saved.</p>{% endif %}
+{% if saved == "apply-hours" %}<p>Applied schedule. Removed {{ hours_report.removed_slots if hours_report else 0 }} free slots outside work hours. Scheduled visits were not cancelled.</p>{% endif %}
+{% if visit_cancelled == "1" %}<p>Appointment cancelled. The closed date remains unavailable.</p>{% endif %}
+{% if generated is not none %}<p>Created {{ generated }} slots, skipped {{ skipped }}.</p>{% endif %}
+{% if closure_report %}
+  <p>Removed {{ closure_report.removed_slots }} free slots in the closed period. Scheduled visits were not cancelled.</p>
+{% endif %}
+<section>
+  <h2>Needs manual cancellation</h2>
+  <p>Closed days do not cancel scheduled visits. Cancel each one below.</p>
+  {% if manual_cancel_visits %}
+    <ul>
+      {% for visit in manual_cancel_visits %}
+        <li>
+          {{ visit.patient_email }} — {{ visit.doctor_name }} —
+          {{ visit.starts_at.strftime("%Y-%m-%d %H:%M") }}–{{ visit.ends_at.strftime("%H:%M") }}
+          <form method="post" action="/appointments/{{ visit.appointment_id }}/cancel" style="display:inline">
+            <button type="submit">Cancel appointment</button>
+          </form>
+        </li>
+      {% endfor %}
+    </ul>
+  {% else %}
+    <p>No scheduled visits on a closed day.</p>
+  {% endif %}
+</section>
+<section>
+  <h2>Outside work hours</h2>
+  <p>Scheduled visits outside the current work window stay until staff cancel them.</p>
+  {% if outside_hours_visits %}
+    <ul>
+      {% for visit in outside_hours_visits %}
+        <li>
+          {{ visit.patient_email }} — {{ visit.doctor_name }} —
+          {{ visit.starts_at.strftime("%Y-%m-%d %H:%M") }}–{{ visit.ends_at.strftime("%H:%M") }}
+          <form method="post" action="/appointments/{{ visit.appointment_id }}/cancel" style="display:inline">
+            <button type="submit">Cancel appointment</button>
+          </form>
+        </li>
+      {% endfor %}
+    </ul>
+  {% else %}
+    <p>No scheduled visits outside work hours.</p>
+  {% endif %}
+</section>
+{% if error == "invalid_range" %}<p>Choose a valid date range of no more than 90 days.</p>
+{% elif error == "invalid_work_hours" %}<p>Choose valid weekday and working hours.</p>
+{% elif error == "invalid_time_off" %}<p>End date must not be before start date.</p>
+{% elif error == "holiday_name_required" %}<p>Enter a holiday name.</p>
+{% elif error == "doctor_not_found" %}<p>Doctor not found.</p>{% endif %}
+
+<h2>Weekly work hours</h2>
+<table>
+  <thead><tr><th>Doctor</th><th>Weekday</th><th>Start</th><th>End</th><th>Slot minutes</th></tr></thead>
+  <tbody>
+  {% for item in work_hours %}
+    <tr>
+      <td>{{ item.doctor_name }}</td>
+      <td>{{ weekdays[item.weekday] }}</td>
+      <td>{{ item.start_time.strftime("%H:%M") }}</td>
+      <td>{{ item.end_time.strftime("%H:%M") }}</td>
+      <td>{{ item.slot_minutes }}</td>
+    </tr>
+  {% else %}
+    <tr><td colspan="5">No work hours configured.</td></tr>
+  {% endfor %}
+  </tbody>
+</table>
+<form method="post" action="/admin/work-hours">
+  <label>Doctor
+    <select name="doctor_id" required>
+      {% for doctor in doctors %}<option value="{{ doctor.id }}">{{ doctor.full_name }}</option>{% endfor %}
+    </select>
+  </label>
+  <label>Weekday
+    <select name="weekday" required>
+      {% for name in weekdays %}<option value="{{ loop.index0 }}">{{ name }}</option>{% endfor %}
+    </select>
+  </label>
+  <label>Start <input name="start_time" type="time" required></label>
+  <label>End <input name="end_time" type="time" required></label>
+  <label>Slot minutes <input name="slot_minutes" type="number" min="1" value="30" required></label>
+  <button type="submit">Save work hours</button>
+</form>
+{% for doctor in doctors %}
+  <form method="post" action="/admin/doctors/{{ doctor.id }}/apply-hours">
+    <button type="submit">Apply schedule: remove free slots outside hours ({{ doctor.full_name }})</button>
+  </form>
+{% endfor %}
+
+<h2>Time off</h2>
+<ul>
+  {% for item in time_off %}
+    <li>{{ item.doctor_name }} — {{ item.starts_on }} to {{ item.ends_on }}</li>
+  {% else %}
+    <li>No time off configured.</li>
+  {% endfor %}
+</ul>
+<form method="post" action="/admin/time-off">
+  <label>Doctor
+    <select name="doctor_id" required>
+      {% for doctor in doctors %}<option value="{{ doctor.id }}">{{ doctor.full_name }}</option>{% endfor %}
+    </select>
+  </label>
+  <label>From <input name="starts_on" type="date" required></label>
+  <label>Through <input name="ends_on" type="date" required></label>
+  <button type="submit">Add time off</button>
+</form>
+
+<h2>Holidays</h2>
+<ul>
+  {% for holiday in holidays %}<li>{{ holiday.day }} — {{ holiday.name }}</li>
+  {% else %}<li>No holidays configured.</li>{% endfor %}
+</ul>
+<form method="post" action="/admin/holidays">
+  <label>Date <input name="holiday_day" type="date" required></label>
+  <label>Name <input namSeed slots for 1–3 October are separate from this generator and are not rebuilt here. Existing slots, holidays, time off and past intervals are skipped. Past uses the database clock, not the container clock
+  <button type="submit">Save holiday</button>
+</form>
+
+<h2>Generate slots</h2>
+<p>Monday is weekday 0. Existing slots, holidays, time off and past intervals are skipped.</p>
+{% for doctor in doctors %}
+  <form method="post" action="/admin/doctors/{{ doctor.id }}/generate">
+    <strong>{{ doctor.full_name }}</strong>
+    <label>From <input name="from_date" type="date" required></label>
+    <label>To <input name="to_date" type="date" required></label>
+    <button type="submit">Generate</button>
+  </form>
+{% endfor %}
+{% endblock %}

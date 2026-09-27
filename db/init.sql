@@ -24,6 +24,32 @@ CREATE TABLE IF NOT EXISTS slots (
   ends_at TIMESTAMP NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS work_hours (
+  id SERIAL PRIMARY KEY,
+  doctor_id INTEGER NOT NULL REFERENCES doctors(id),
+  weekday INTEGER NOT NULL CHECK (weekday BETWEEN 0 AND 6),
+  start_time TIME NOT NULL,
+  end_time TIME NOT NULL,
+  slot_minutes INTEGER NOT NULL CHECK (slot_minutes > 0),
+  UNIQUE (doctor_id, weekday)
+);
+
+CREATE TABLE IF NOT EXISTS time_off (
+  id SERIAL PRIMARY KEY,
+  doctor_id INTEGER NOT NULL REFERENCES doctors(id),
+  starts_on DATE NOT NULL,
+  ends_on DATE NOT NULL,
+  CHECK (ends_on >= starts_on)
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS time_off_doctor_period
+ON time_off (doctor_id, starts_on, ends_on);
+
+CREATE TABLE IF NOT EXISTS holidays (
+  day DATE PRIMARY KEY,
+  name TEXT NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS appointments (
   id SERIAL PRIMARY KEY,
   slot_id INTEGER NOT NULL REFERENCES slots(id),
@@ -39,6 +65,9 @@ DROP INDEX IF EXISTS appointments_slot_id_key;
 CREATE UNIQUE INDEX IF NOT EXISTS appointments_one_scheduled_per_slot
 ON appointments (slot_id)
 WHERE status = 'scheduled';
+
+CREATE UNIQUE INDEX IF NOT EXISTS slots_doctor_start
+ON slots (doctor_id, starts_at);
 
 CREATE EXTENSION IF NOT EXISTS btree_gist;
 

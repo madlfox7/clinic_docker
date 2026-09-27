@@ -1,6 +1,10 @@
 {% extends "base.html" %}
 {% block content %}
 <h1>Login</h1>
+{% if email %}
+<p>You are already logged in as {{ email }}. Log out before using another account.</p>
+<p><a href="/me">Cabinet</a> | <a href="/logout">Logout</a></p>
+{% else %}
 {% if error %}<p>{{ error }}</p>{% endif %}
 <form method="post" action="/login">
   <p>Email: <input name="email" type="email" required></p>
@@ -16,4 +20,5 @@
   <li>pat2@clinic.local</li>
   <li>reg@clinic.local</li>
 </ul>
+{% endif %}
 {% endblock %}

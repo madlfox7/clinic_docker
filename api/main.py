@@ -1,4 +1,7 @@
+import logging
 import os
+from datetime import date, datetime, timedelta
+from datetime import time as datetime_time
 from fastapi import FastAPI, Form, Request
 from fastapi.responses import RedirectResponse
 from fastapi.templating import Jinja2Templates
@@ -10,6 +13,7 @@ DATABASE_URL = os.environ["DATABASE_URL"]
 SESSION_SECRET = os.environ.get("SESSION_SECRET", "dev-secret-change-me")
 
 pwd = CryptContext(schemes=["bcrypt"], deprecated="auto")
+log = logging.getLogger("clinic")
 templates = Jinja2Templates(directory="templates")
 app = FastAPI()
 app.add_middleware(SessionMiddleware, secret_key=SESSION_SECRET)
@@ -48,46 +52,69 @@ def ensure_schema():
     cur = conn.cursor()
     cur.execute(
         """
-        ALTER TABLE users
-        ADD COLUMN IF NOT EXISTS blocked BOOLEAN NOT NULL DEFAULT FALSE;
-        CREATE TABLE IF NOT EXISTS doctors (
-          id SERIAL PRIMARY KEY,
-          user_id INTEGER UNIQUE REFERENCES users(id),
-          full_name TEXT NOT NULL,
-          specialty TEXT NOT NULL,
-          experience_years INTEGER NOT NULL DEFAULT 0
-        );
-        CREATE TABLE IF NOT EXISTS slots (
-          id SERIAL PRIMARY KEY,
-          doctor_id INTEGER NOT NULL REFERENCES doctors(id),
-          starts_at TIMESTAMP NOT NULL,
-          ends_at TIMESTAMP NOT NULL
-        );
-        CREATE TABLE IF NOT EXISTS appointments (
-          id SERIAL PRIMARY KEY,
-          slot_id INTEGER NOT NULL REFERENCES slots(id),
-          patient_user_id INTEGER NOT NULL REFERENCES users(id),
-          status TEXT NOT NULL DEFAULT 'scheduled'
-        );
-        ALTER TABLE appointments DROP CONSTRAINT IF EXISTS appointments_slot_id_key;
-        DROP INDEX IF EXISTS appointments_slot_id_key;
-        CREATE UNIQUE INDEX IF NOT EXISTS appointments_one_scheduled_per_slot
+                ALTER TABLE users
+                ADD COLUMN IF NOT EXISTS blocked BOOLEAN NOT NULL DEFAULT FALSE;
+                CREATE TABLE IF NOT EXISTS doctors (
+                    id SERIAL PRIMARY KEY,
+                    user_id INTEGER UNIQUE REFERENCES users(id),
+                    full_name TEXT NOT NULL,
+                    specialty TEXT NOT NULL,
+                    experience_years INTEGER NOT NULL DEFAULT 0
+                );
+                CREATE TABLE IF NOT EXISTS slots (
+                    id SERIAL PRIMARY KEY,
+                    doctor_id INTEGER NOT NULL REFERENCES doctors(id),
+                    starts_at TIMESTAMP NOT NULL,
+                    ends_at TIMESTAMP NOT NULL
+                );
+                CREATE TABLE IF NOT EXISTS work_hours (
+                    id SERIAL PRIMARY KEY,
+                    doctor_id INTEGER NOT NULL REFERENCES doctors(id),
+                    weekday INTEGER NOT NULL CHECK (weekday BETWEEN 0 AND 6),
+                    start_time TIME NOT NULL,
+                    end_time TIME NOT NULL,
+                    slot_minutes INTEGER NOT NULL CHECK (slot_minutes > 0),
+                    UNIQUE (doctor_id, weekday)
+                );
+                CREATE TABLE IF NOT EXISTS time_off (
+                    id SERIAL PRIMARY KEY,
+                    doctor_id INTEGER NOT NULL REFERENCES doctors(id),
+                    starts_on DATE NOT NULL,
+                    ends_on DATE NOT NULL,
+                    CHECK (ends_on >= starts_on)
+                );
+                CREATE TABLE IF NOT EXISTS holidays (
+                    day DATE PRIMARY KEY,
+                    name TEXT NOT NULL
+                );
+                CREATE TABLE IF NOT EXISTS appointments (
+                    id SERIAL PRIMARY KEY,
+                    slot_id INTEGER NOT NULL REFERENCES slots(id),
+                    patient_user_id INTEGER NOT NULL REFERENCES users(id),
+                    status TEXT NOT NULL DEFAULT 'scheduled'
+                );
+                ALTER TABLE appointments DROP CONSTRAINT IF EXISTS appointments_slot_id_key;
+                DROP INDEX IF EXISTS appointments_slot_id_key;
+                CREATE UNIQUE INDEX IF NOT EXISTS appointments_one_scheduled_per_slot
                     ON appointments (slot_id)
-          WHERE status = 'scheduled';
+                    WHERE status = 'scheduled';
+                CREATE UNIQUE INDEX IF NOT EXISTS slots_doctor_start
+                    ON slots (doctor_id, starts_at);
+                CREATE UNIQUE INDEX IF NOT EXISTS time_off_doctor_period
+                    ON time_off (doctor_id, starts_on, ends_on);
                 CREATE EXTENSION IF NOT EXISTS btree_gist;
                 ALTER TABLE slots
                     ADD COLUMN IF NOT EXISTS time_range tsrange
                     GENERATED ALWAYS AS (tsrange(starts_at, ends_at, '[)')) STORED;
-                ALTER TABLE slots
-                    DROP CONSTRAINT IF EXISTS slots_no_overlap_per_doctor;
+                ALTER TABLE slots DROP CONSTRAINT IF EXISTS slots_no_overlap_per_doctor;
                 ALTER TABLE slots
                     ADD CONSTRAINT slots_no_overlap_per_doctor
                     EXCLUDE USING gist (
                         doctor_id WITH =,
                         time_range WITH &&
                     );
-        """
-    )
+                """
+        )
     conn.commit()
     cur.close()
     conn.close()
@@ -132,11 +159,70 @@ def seed_clinic():
     conn.close()
 
 
+def seed_work_schedule():
+    conn = db()
+    cur = conn.cursor()
+    cur.execute(
+        "SELECT d.id FROM doctors d JOIN users u ON u.id=d.user_id WHERE u.email=%s",
+        ("doc@clinic.local",),
+    )
+    anna = cur.fetchone()[0]
+    cur.execute(
+        "SELECT d.id FROM doctors d JOIN users u ON u.id=d.user_id WHERE u.email=%s",
+        ("doc2@clinic.local",),
+    )
+    levon = cur.fetchone()[0]
+
+    for weekday in range(5):
+        cur.execute(
+            """
+            INSERT INTO work_hours (doctor_id, weekday, start_time, end_time, slot_minutes)
+            VALUES (%s, %s, '09:00', '12:00', 30)
+            ON CONFLICT (doctor_id, weekday) DO NOTHING
+            """,
+            (anna, weekday),
+        )
+    for weekday in (0, 2, 4):
+        cur.execute(
+            """
+            INSERT INTO work_hours (doctor_id, weekday, start_time, end_time, slot_minutes)
+            VALUES (%s, %s, '09:00', '11:00', 30)
+            ON CONFLICT (doctor_id, weekday) DO NOTHING
+            """,
+            (levon, weekday),
+        )
+
+    cur.execute(
+        """
+        SELECT 1 FROM time_off
+        WHERE doctor_id=%s AND starts_on=%s AND ends_on=%s
+        """,
+        (anna, date(2026, 10, 12), date(2026, 10, 18)),
+    )
+    if cur.fetchone() is None:
+        cur.execute(
+            "INSERT INTO time_off (doctor_id, starts_on, ends_on) VALUES (%s, %s, %s)",
+            (anna, date(2026, 10, 12), date(2026, 10, 18)),
+        )
+    cur.execute(
+        """
+        INSERT INTO holidays (day, name)
+        VALUES (%s, %s)
+        ON CONFLICT (day) DO NOTHING
+        """,
+        (date(2026, 11, 26), "Thanksgiving"),
+    )
+    conn.commit()
+    cur.close()
+    conn.close()
+
+
 @app.on_event("startup")
 def on_start():
     ensure_schema()
     seed_users()
     seed_clinic()
+    seed_work_schedule()
 
 
 @app.get("/")
@@ -147,20 +233,33 @@ def home(request: Request):
     )
 
 
-@app.get("/login")
-def login_form(request: Request):
+def _login_page(request: Request, error: str | None, status_code: int = 200):
+    # A failed attempt must not pretend the previous session was cleared.
     return templates.TemplateResponse(
         "login.html",
         {
             "request": request,
-            "error": None,
+            "error": error,
             "role": request.session.get("role") or "guest",
+            "email": request.session.get("email"),
         },
+        status_code=status_code,
     )
+
+
+@app.get("/login")
+def login_form(request: Request):
+    # Stay on /login so role-restricted redirects still land on a stable
+    # "not permitted" page; just hide the credential form when already signed in.
+    return _login_page(request, None)
 
 
 @app.post("/login")
 def login(request: Request, email: str = Form(...), password: str = Form(...)):
+    # Already signed in: do not collect a second set of credentials or
+    # replace the session. Log out first to switch accounts.
+    if request.session.get("email"):
+        return _login_page(request, None)
     conn = db()
     cur = conn.cursor()
     cur.execute(
@@ -171,21 +270,9 @@ def login(request: Request, email: str = Form(...), password: str = Form(...)):
     cur.close()
     conn.close()
     if not row or not pwd.verify(password, row[1]):
-        return templates.TemplateResponse(
-            "login.html",
-            {
-                "request": request,
-                "error": "Invalid email or password",
-                "role": "guest",
-            },
-            status_code=401,
-        )
+        return _login_page(request, "Invalid email or password", 401)
     if row[3]:
-        return templates.TemplateResponse(
-            "login.html",
-            {"request": request, "error": "Account is blocked", "role": "guest"},
-            status_code=403,
-        )
+        return _login_page(request, "Account is blocked", 403)
     request.session["email"] = row[0]
     request.session["role"] = row[2]
     return RedirectResponse("/me", status_code=303)
@@ -315,6 +402,17 @@ def doctor_slots(request: Request, doctor_id: int):
                                          AND a.status = 'scheduled'
                                      LIMIT 1
                              ) AS appointment_id
+                               , (
+                                   EXISTS (
+                                       SELECT 1 FROM time_off t
+                                       WHERE t.doctor_id=s.doctor_id
+                                         AND s.starts_at::date BETWEEN t.starts_on AND t.ends_on
+                                   )
+                                   OR EXISTS (
+                                       SELECT 1 FROM holidays h WHERE h.day=s.starts_at::date
+                                   )
+                               ) AS closed
+                               , s.starts_at <= CURRENT_TIMESTAMP AS is_past
         FROM slots s
         WHERE s.doctor_id=%s
         ORDER BY s.starts_at
@@ -326,23 +424,32 @@ def doctor_slots(request: Request, doctor_id: int):
     conn.close()
     if not doc:
         return RedirectResponse("/doctors", status_code=303)
-    slots = [
-        {
-            "id": r[0],
-            "starts_at": r[1],
-            "ends_at": r[2],
-            "taken": r[3],
-            "mine": r[4],
-            "appointment_id": r[5],
+    slots_by_day = {}
+    for row in rows:
+        slot = {
+            "id": row[0],
+            "starts_at": row[1],
+            "ends_at": row[2],
+            "taken": row[3],
+            "mine": row[4],
+            "appointment_id": row[5],
+            "closed": row[6],
+            "past": row[7],
         }
-        for r in rows
+        slots_by_day.setdefault(row[1].date(), []).append(slot)
+    days = [
+        {
+            "label": day.strftime("%A, %Y-%m-%d"),
+            "slots": day_slots,
+        }
+        for day, day_slots in sorted(slots_by_day.items())
     ]
     return templates.TemplateResponse(
         "slots.html",
         {
             "request": request,
             "doctor": {"id": doc[0], "full_name": doc[1]},
-            "slots": slots,
+            "days": days,
             "error": error,
             "booked": booked,
             "cancelled": cancelled,
@@ -361,13 +468,36 @@ def book_slot(request: Request, slot_id: int, patient_email: str = Form(None)):
         return RedirectResponse("/login", status_code=303)
     conn = db()
     cur = conn.cursor()
-    cur.execute("SELECT doctor_id, starts_at, ends_at FROM slots WHERE id=%s", (slot_id,))
+    cur.execute(
+        """
+        SELECT s.doctor_id, s.starts_at, s.ends_at,
+               s.starts_at <= CURRENT_TIMESTAMP AS is_past,
+               EXISTS (
+                   SELECT 1 FROM time_off t
+                   WHERE t.doctor_id=s.doctor_id
+                     AND s.starts_at::date BETWEEN t.starts_on AND t.ends_on
+               ) OR EXISTS (
+                   SELECT 1 FROM holidays h WHERE h.day=s.starts_at::date
+               ) AS closed
+        FROM slots s
+        WHERE s.id=%s
+        """,
+        (slot_id,),
+    )
     slot = cur.fetchone()
     if not slot:
         cur.close()
         conn.close()
         return RedirectResponse("/doctors", status_code=303)
-    doctor_id, starts_at, ends_at = slot
+    doctor_id, starts_at, ends_at, is_past, is_closed = slot
+    if is_past:
+        cur.close()
+        conn.close()
+        return RedirectResponse(f"/doctors/{doctor_id}/slots?error=past", status_code=303)
+    if is_closed:
+        cur.close()
+        conn.close()
+        return RedirectResponse(f"/doctors/{doctor_id}/slots?error=closed", status_code=303)
     if role == "patient":
         target_email = email
     else:
@@ -430,11 +560,17 @@ def book_slot(request: Request, slot_id: int, patient_email: str = Form(None)):
             (slot_id, patient_id),
         )
         conn.commit()
-    except Exception:
+    except (psycopg2.errors.UniqueViolation, psycopg2.errors.ExclusionViolation):
         conn.rollback()
         cur.close()
         conn.close()
         return RedirectResponse(f"/doctors/{doctor_id}/slots?error=unavailable", status_code=303)
+    except Exception:
+        log.exception("could not book slot %s", slot_id)
+        conn.rollback()
+        cur.close()
+        conn.close()
+        return RedirectResponse(f"/doctors/{doctor_id}/slots?error=could_not_book", status_code=303)
     cur.close()
     conn.close()
     if role == "registrar":
@@ -446,7 +582,7 @@ def book_slot(request: Request, slot_id: int, patient_email: str = Form(None)):
 def cancel_appointment(request: Request, appointment_id: int):
     email = request.session.get("email")
     role = request.session.get("role")
-    if role not in ("patient", "registrar") or not email:
+    if role not in ("patient", "registrar", "admin") or not email:
         return RedirectResponse("/login", status_code=303)
     conn = db()
     cur = conn.cursor()
@@ -509,6 +645,8 @@ def cancel_appointment(request: Request, appointment_id: int):
         if updated:
             return RedirectResponse("/my?cancelled=1", status_code=303)
         return RedirectResponse("/my?cancel_error=1", status_code=303)
+    if role == "admin":
+        return RedirectResponse("/admin/schedule?visit_cancelled=1", status_code=303)
     if updated:
         return RedirectResponse(f"/doctors/{doctor_id}/slots?cancelled=1", status_code=303)
     return RedirectResponse(f"/doctors/{doctor_id}/slots?cancel_error=1", status_code=303)
@@ -642,6 +780,410 @@ def admin_users(request: Request):
             "role": "admin",
             "future_cancelled": request.query_params.get("future_cancelled"),
         },
+    )
+
+
+def _purge_slots_without_scheduled(cur, where_sql, params):
+    # Cancelled history must not keep a closed or out-of-hours slot on the calendar.
+    cur.execute(
+        f"""
+        DELETE FROM appointments a
+        WHERE a.status <> 'scheduled'
+          AND a.slot_id IN (
+              SELECT s.id
+              FROM slots s
+              WHERE {where_sql}
+                AND NOT EXISTS (
+                    SELECT 1 FROM appointments live
+                    WHERE live.slot_id = s.id AND live.status = 'scheduled'
+                )
+          )
+        """,
+        params,
+    )
+    cur.execute(
+        f"""
+        DELETE FROM slots s
+        WHERE {where_sql}
+          AND NOT EXISTS (
+              SELECT 1 FROM appointments a
+              WHERE a.slot_id = s.id AND a.status = 'scheduled'
+          )
+        """,
+        params,
+    )
+    return cur.rowcount
+
+
+def _outside_hours_sql(alias="s"):
+    # work_hours.weekday is Python's Monday=0, not PostgreSQL DOW (Sunday=0).
+    return f"""
+        NOT EXISTS (
+            SELECT 1 FROM work_hours w
+            WHERE w.doctor_id = {alias}.doctor_id
+              AND w.weekday = ((EXTRACT(DOW FROM {alias}.starts_at)::int + 6) %% 7)
+              AND {alias}.starts_at::date = {alias}.ends_at::date
+              AND {alias}.starts_at::time >= w.start_time
+              AND {alias}.ends_at::time <= w.end_time
+        )
+    """
+
+
+def _scheduled_visit_rows(cur, where_sql, params):
+    cur.execute(
+        f"""
+        SELECT a.id, u.email, d.full_name, s.starts_at, s.ends_at
+        FROM appointments a
+        JOIN users u ON u.id = a.patient_user_id
+        JOIN slots s ON s.id = a.slot_id
+        JOIN doctors d ON d.id = s.doctor_id
+        WHERE a.status = 'scheduled'
+          AND {where_sql}
+        ORDER BY s.starts_at
+        """,
+        params,
+    )
+    return [
+        {
+            "appointment_id": row[0],
+            "patient_email": row[1],
+            "doctor_name": row[2],
+            "starts_at": row[3],
+            "ends_at": row[4],
+        }
+        for row in cur.fetchall()
+    ]
+
+
+def _close_slots_for_period(cur, starts_on: date, ends_on: date, doctor_id=None):
+    if doctor_id is None:
+        where_sql = "s.starts_at::date BETWEEN %s AND %s"
+        params = (starts_on, ends_on)
+    else:
+        where_sql = "s.doctor_id=%s AND s.starts_at::date BETWEEN %s AND %s"
+        params = (doctor_id, starts_on, ends_on)
+    scheduled_visits = _scheduled_visit_rows(cur, where_sql, params)
+    removed = _purge_slots_without_scheduled(cur, where_sql, params)
+    return removed, scheduled_visits
+
+
+@app.get("/admin/schedule")
+def admin_schedule(request: Request):
+    if request.session.get("role") != "admin":
+        return RedirectResponse("/login", status_code=303)
+    conn = db()
+    cur = conn.cursor()
+    cur.execute("SELECT id, full_name FROM doctors ORDER BY full_name")
+    doctors = [{"id": row[0], "full_name": row[1]} for row in cur.fetchall()]
+    cur.execute(
+        """
+        SELECT d.full_name, w.weekday, w.start_time, w.end_time, w.slot_minutes
+        FROM work_hours w
+        JOIN doctors d ON d.id=w.doctor_id
+        ORDER BY d.full_name, w.weekday
+        """
+    )
+    work_hours = [
+        {
+            "doctor_name": row[0],
+            "weekday": row[1],
+            "start_time": row[2],
+            "end_time": row[3],
+            "slot_minutes": row[4],
+        }
+        for row in cur.fetchall()
+    ]
+    cur.execute(
+        """
+        SELECT d.full_name, t.starts_on, t.ends_on
+        FROM time_off t
+        JOIN doctors d ON d.id=t.doctor_id
+        ORDER BY d.full_name, t.starts_on
+        """
+    )
+    time_off = [
+        {"doctor_name": row[0], "starts_on": row[1], "ends_on": row[2]}
+        for row in cur.fetchall()
+    ]
+    cur.execute("SELECT day, name FROM holidays ORDER BY day")
+    holidays = [{"day": row[0], "name": row[1]} for row in cur.fetchall()]
+    closure_report = request.session.pop("closure_report", None)
+    hours_report = request.session.pop("hours_report", None)
+    manual_cancel_visits = _scheduled_visit_rows(
+        cur,
+        """
+        (
+            EXISTS (SELECT 1 FROM holidays h WHERE h.day = s.starts_at::date)
+            OR EXISTS (
+                SELECT 1 FROM time_off t
+                WHERE t.doctor_id = s.doctor_id
+                  AND s.starts_at::date BETWEEN t.starts_on AND t.ends_on
+            )
+        )
+        """,
+        (),
+    )
+    outside_hours_visits = _scheduled_visit_rows(cur, _outside_hours_sql("s"), ())
+    cur.close()
+    conn.close()
+    return templates.TemplateResponse(
+        "admin_schedule.html",
+        {
+            "request": request,
+            "role": request.session.get("role") or "guest",
+            "doctors": doctors,
+            "work_hours": work_hours,
+            "time_off": time_off,
+            "holidays": holidays,
+            "closure_report": closure_report,
+            "hours_report": hours_report,
+            "manual_cancel_visits": manual_cancel_visits,
+            "outside_hours_visits": outside_hours_visits,
+            "visit_cancelled": request.query_params.get("visit_cancelled"),
+            "weekdays": ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"],
+            "saved": request.query_params.get("saved"),
+            "error": request.query_params.get("error"),
+            "generated": request.query_params.get("generated"),
+            "skipped": request.query_params.get("skipped"),
+        },
+    )
+
+
+@app.post("/admin/work-hours")
+def admin_save_work_hours(
+    request: Request,
+    doctor_id: int = Form(...),
+    weekday: int = Form(...),
+    start_time: datetime_time = Form(...),
+    end_time: datetime_time = Form(...),
+    slot_minutes: int = Form(...),
+):
+    if request.session.get("role") != "admin":
+        return RedirectResponse("/login", status_code=303)
+    if not 0 <= weekday <= 6 or start_time >= end_time or slot_minutes <= 0:
+        return RedirectResponse("/admin/schedule?error=invalid_work_hours", status_code=303)
+    conn = db()
+    cur = conn.cursor()
+    cur.execute("SELECT 1 FROM doctors WHERE id=%s", (doctor_id,))
+    if cur.fetchone() is None:
+        cur.close()
+        conn.close()
+        return RedirectResponse("/admin/schedule?error=doctor_not_found", status_code=303)
+    cur.execute(
+        """
+        INSERT INTO work_hours (doctor_id, weekday, start_time, end_time, slot_minutes)
+        VALUES (%s, %s, %s, %s, %s)
+        ON CONFLICT (doctor_id, weekday) DO UPDATE
+        SET start_time=EXCLUDED.start_time,
+            end_time=EXCLUDED.end_time,
+            slot_minutes=EXCLUDED.slot_minutes
+        """,
+        (doctor_id, weekday, start_time, end_time, slot_minutes),
+    )
+    conn.commit()
+    cur.close()
+    conn.close()
+    return RedirectResponse("/admin/schedule?saved=work-hours", status_code=303)
+
+
+@app.post("/admin/doctors/{doctor_id}/apply-hours")
+def admin_apply_hours(request: Request, doctor_id: int):
+    if request.session.get("role") != "admin":
+        return RedirectResponse("/login", status_code=303)
+    conn = db()
+    cur = conn.cursor()
+    cur.execute("SELECT 1 FROM doctors WHERE id=%s", (doctor_id,))
+    if cur.fetchone() is None:
+        cur.close()
+        conn.close()
+        return RedirectResponse("/admin/schedule?error=doctor_not_found", status_code=303)
+    where_sql = f"s.doctor_id=%s AND {_outside_hours_sql('s')}"
+    removed = _purge_slots_without_scheduled(cur, where_sql, (doctor_id,))
+    conn.commit()
+    cur.close()
+    conn.close()
+    request.session["hours_report"] = {
+        "doctor_id": doctor_id,
+        "removed_slots": removed,
+    }
+    return RedirectResponse("/admin/schedule?saved=apply-hours", status_code=303)
+
+
+@app.post("/admin/time-off")
+def admin_add_time_off(
+    request: Request,
+    doctor_id: int = Form(...),
+    starts_on: date = Form(...),
+    ends_on: date = Form(...),
+):
+    if request.session.get("role") != "admin":
+        return RedirectResponse("/login", status_code=303)
+    if starts_on > ends_on:
+        return RedirectResponse("/admin/schedule?error=invalid_time_off", status_code=303)
+    conn = db()
+    cur = conn.cursor()
+    cur.execute("SELECT 1 FROM doctors WHERE id=%s", (doctor_id,))
+    if cur.fetchone() is None:
+        cur.close()
+        conn.close()
+        return RedirectResponse("/admin/schedule?error=doctor_not_found", status_code=303)
+    cur.execute(
+        """
+        INSERT INTO time_off (doctor_id, starts_on, ends_on)
+        VALUES (%s, %s, %s)
+        ON CONFLICT (doctor_id, starts_on, ends_on) DO NOTHING
+        """,
+        (doctor_id, starts_on, ends_on),
+    )
+    removed_slots, _ = _close_slots_for_period(cur, starts_on, ends_on, doctor_id)
+    conn.commit()
+    cur.close()
+    conn.close()
+    request.session["closure_report"] = {
+        "kind": "time-off",
+        "starts_on": starts_on.isoformat(),
+        "ends_on": ends_on.isoformat(),
+        "doctor_id": doctor_id,
+        "removed_slots": removed_slots,
+    }
+    return RedirectResponse("/admin/schedule?saved=time-off", status_code=303)
+
+
+@app.post("/admin/holidays")
+def admin_save_holiday(
+    request: Request,
+    holiday_day: date = Form(...),
+    name: str = Form(...),
+):
+    if request.session.get("role") != "admin":
+        return RedirectResponse("/login", status_code=303)
+    holiday_name = name.strip()
+    if not holiday_name:
+        return RedirectResponse("/admin/schedule?error=holiday_name_required", status_code=303)
+    conn = db()
+    cur = conn.cursor()
+    cur.execute(
+        """
+        INSERT INTO holidays (day, name)
+        VALUES (%s, %s)
+        ON CONFLICT (day) DO UPDATE SET name=EXCLUDED.name
+        """,
+        (holiday_day, holiday_name),
+    )
+    removed_slots, _ = _close_slots_for_period(cur, holiday_day, holiday_day)
+    conn.commit()
+    cur.close()
+    conn.close()
+    request.session["closure_report"] = {
+        "kind": "holiday",
+        "starts_on": holiday_day.isoformat(),
+        "ends_on": holiday_day.isoformat(),
+        "doctor_id": None,
+        "removed_slots": removed_slots,
+    }
+    return RedirectResponse("/admin/schedule?saved=holiday", status_code=303)
+
+
+@app.post("/admin/doctors/{doctor_id}/generate")
+def generate_doctor_slots(
+    request: Request,
+    doctor_id: int,
+    from_date: date = Form(...),
+    to_date: date = Form(...),
+):
+    if request.session.get("role") != "admin":
+        return RedirectResponse("/login", status_code=303)
+    if from_date > to_date or (to_date - from_date).days > 90:
+        return RedirectResponse("/admin/schedule?error=invalid_range", status_code=303)
+
+    conn = db()
+    cur = conn.cursor()
+    cur.execute("SELECT 1 FROM doctors WHERE id=%s", (doctor_id,))
+    if cur.fetchone() is None:
+        cur.close()
+        conn.close()
+        return RedirectResponse("/admin/schedule?error=doctor_not_found", status_code=303)
+
+    cur.execute(
+        """
+        SELECT weekday, start_time, end_time, slot_minutes
+        FROM work_hours
+        WHERE doctor_id=%s
+        ORDER BY weekday
+        """,
+        (doctor_id,),
+    )
+    work_hours = cur.fetchall()
+    cur.execute(
+        """
+        SELECT starts_on, ends_on
+        FROM time_off
+        WHERE doctor_id=%s AND starts_on <= %s AND ends_on >= %s
+        """,
+        (doctor_id, to_date, from_date),
+    )
+    time_off = cur.fetchall()
+    cur.execute(
+        "SELECT day FROM holidays WHERE day BETWEEN %s AND %s",
+        (from_date, to_date),
+    )
+    holidays = {row[0] for row in cur.fetchall()}
+
+    created = 0
+    skipped = 0
+    cur.execute("SELECT CURRENT_TIMESTAMP::timestamp")
+    now = cur.fetchone()[0]
+    today = now.date()
+    current_date = from_date
+    while current_date <= to_date:
+        day_hours = [row for row in work_hours if row[0] == current_date.weekday()]
+        is_day_off = (
+            current_date in holidays
+            or any(start <= current_date <= end for start, end in time_off)
+        )
+        for _, start_time, end_time, slot_minutes in day_hours:
+            slot_duration = timedelta(minutes=slot_minutes)
+            start_at = datetime.combine(current_date, start_time)
+            day_end = datetime.combine(current_date, end_time)
+            if is_day_off:
+                while start_at + slot_duration <= day_end:
+                    skipped += 1
+                    start_at += slot_duration
+                continue
+            while start_at + slot_duration <= day_end:
+                if current_date < today or start_at <= now:
+                    skipped += 1
+                    start_at += slot_duration
+                    continue
+                cur.execute("SAVEPOINT generate_slot")
+                try:
+                    cur.execute(
+                        """
+                        INSERT INTO slots (doctor_id, starts_at, ends_at)
+                        VALUES (%s, %s, %s)
+                        ON CONFLICT (doctor_id, starts_at) DO NOTHING
+                        """,
+                        (doctor_id, start_at, start_at + slot_duration),
+                    )
+                    if cur.rowcount:
+                        created += 1
+                    else:
+                        skipped += 1
+                except psycopg2.errors.ExclusionViolation:
+                    cur.execute("ROLLBACK TO SAVEPOINT generate_slot")
+                    skipped += 1
+                finally:
+                    cur.execute("RELEASE SAVEPOINT generate_slot")
+                start_at += slot_duration
+
+        current_date += timedelta(days=1)
+
+    conn.commit()
+    cur.close()
+    conn.close()
+    return RedirectResponse(
+        f"/admin/schedule?generated={created}&skipped={skipped}",
+        status_code=303,
     )
 
 
