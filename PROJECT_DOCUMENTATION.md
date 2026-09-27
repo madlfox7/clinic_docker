@@ -19,6 +19,10 @@ clinic_24_9/
 |   |-- Dockerfile
 |   |-- requirements.txt
 |   |-- main.py
+|   |-- db.py
+|   |-- routes_auth.py
+|   |-- routes_booking.py
+|   |-- routes_admin.py
 |   `-- templates/
 |       |-- base.html
 |       |-- home.html
