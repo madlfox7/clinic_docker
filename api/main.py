@@ -1,3 +1,4 @@
+import logging
 import os
 from datetime import date, datetime, timedelta
 from datetime import time as datetime_time
@@ -12,6 +13,7 @@ DATABASE_URL = os.environ["DATABASE_URL"]
 SESSION_SECRET = os.environ.get("SESSION_SECRET", "dev-secret-change-me")
 
 pwd = CryptContext(schemes=["bcrypt"], deprecated="auto")
+log = logging.getLogger("clinic")
 templates = Jinja2Templates(directory="templates")
 app = FastAPI()
 app.add_middleware(SessionMiddleware, secret_key=SESSION_SECRET)
@@ -410,6 +412,7 @@ def doctor_slots(request: Request, doctor_id: int):
                                        SELECT 1 FROM holidays h WHERE h.day=s.starts_at::date
                                    )
                                ) AS closed
+                               , s.starts_at <= CURRENT_TIMESTAMP AS is_past
         FROM slots s
         WHERE s.doctor_id=%s
         ORDER BY s.starts_at
@@ -431,6 +434,7 @@ def doctor_slots(request: Request, doctor_id: int):
             "mine": row[4],
             "appointment_id": row[5],
             "closed": row[6],
+            "past": row[7],
         }
         slots_by_day.setdefault(row[1].date(), []).append(slot)
     days = [
@@ -467,6 +471,7 @@ def book_slot(request: Request, slot_id: int, patient_email: str = Form(None)):
     cur.execute(
         """
         SELECT s.doctor_id, s.starts_at, s.ends_at,
+               s.starts_at <= CURRENT_TIMESTAMP AS is_past,
                EXISTS (
                    SELECT 1 FROM time_off t
                    WHERE t.doctor_id=s.doctor_id
@@ -484,7 +489,11 @@ def book_slot(request: Request, slot_id: int, patient_email: str = Form(None)):
         cur.close()
         conn.close()
         return RedirectResponse("/doctors", status_code=303)
-    doctor_id, starts_at, ends_at, is_closed = slot
+    doctor_id, starts_at, ends_at, is_past, is_closed = slot
+    if is_past:
+        cur.close()
+        conn.close()
+        return RedirectResponse(f"/doctors/{doctor_id}/slots?error=past", status_code=303)
     if is_closed:
         cur.close()
         conn.close()
@@ -551,11 +560,17 @@ def book_slot(request: Request, slot_id: int, patient_email: str = Form(None)):
             (slot_id, patient_id),
         )
         conn.commit()
-    except Exception:
+    except (psycopg2.errors.UniqueViolation, psycopg2.errors.ExclusionViolation):
         conn.rollback()
         cur.close()
         conn.close()
         return RedirectResponse(f"/doctors/{doctor_id}/slots?error=unavailable", status_code=303)
+    except Exception:
+        log.exception("could not book slot %s", slot_id)
+        conn.rollback()
+        cur.close()
+        conn.close()
+        return RedirectResponse(f"/doctors/{doctor_id}/slots?error=could_not_book", status_code=303)
     cur.close()
     conn.close()
     if role == "registrar":
@@ -768,37 +783,67 @@ def admin_users(request: Request):
     )
 
 
-def _close_slots_for_period(cur, starts_on: date, ends_on: date, doctor_id=None):
-    if doctor_id is None:
-        cur.execute(
-            """
-            SELECT a.id, u.email, d.full_name, s.starts_at, s.ends_at
-            FROM appointments a
-            JOIN users u ON u.id=a.patient_user_id
-            JOIN slots s ON s.id=a.slot_id
-            JOIN doctors d ON d.id=s.doctor_id
-            WHERE a.status='scheduled'
-              AND s.starts_at::date BETWEEN %s AND %s
-            ORDER BY s.starts_at
-            """,
-            (starts_on, ends_on),
+def _purge_slots_without_scheduled(cur, where_sql, params):
+    # Cancelled history must not keep a closed or out-of-hours slot on the calendar.
+    cur.execute(
+        f"""
+        DELETE FROM appointments a
+        WHERE a.status <> 'scheduled'
+          AND a.slot_id IN (
+              SELECT s.id
+              FROM slots s
+              WHERE {where_sql}
+                AND NOT EXISTS (
+                    SELECT 1 FROM appointments live
+                    WHERE live.slot_id = s.id AND live.status = 'scheduled'
+                )
+          )
+        """,
+        params,
+    )
+    cur.execute(
+        f"""
+        DELETE FROM slots s
+        WHERE {where_sql}
+          AND NOT EXISTS (
+              SELECT 1 FROM appointments a
+              WHERE a.slot_id = s.id AND a.status = 'scheduled'
+          )
+        """,
+        params,
+    )
+    return cur.rowcount
+
+
+def _outside_hours_sql(alias="s"):
+    # work_hours.weekday is Python's Monday=0, not PostgreSQL DOW (Sunday=0).
+    return f"""
+        NOT EXISTS (
+            SELECT 1 FROM work_hours w
+            WHERE w.doctor_id = {alias}.doctor_id
+              AND w.weekday = ((EXTRACT(DOW FROM {alias}.starts_at)::int + 6) %% 7)
+              AND {alias}.starts_at::date = {alias}.ends_at::date
+              AND {alias}.starts_at::time >= w.start_time
+              AND {alias}.ends_at::time <= w.end_time
         )
-    else:
-        cur.execute(
-            """
-            SELECT a.id, u.email, d.full_name, s.starts_at, s.ends_at
-            FROM appointments a
-            JOIN users u ON u.id=a.patient_user_id
-            JOIN slots s ON s.id=a.slot_id
-            JOIN doctors d ON d.id=s.doctor_id
-            WHERE a.status='scheduled'
-              AND s.doctor_id=%s
-              AND s.starts_at::date BETWEEN %s AND %s
-            ORDER BY s.starts_at
-            """,
-            (doctor_id, starts_on, ends_on),
-        )
-    scheduled_visits = [
+    """
+
+
+def _scheduled_visit_rows(cur, where_sql, params):
+    cur.execute(
+        f"""
+        SELECT a.id, u.email, d.full_name, s.starts_at, s.ends_at
+        FROM appointments a
+        JOIN users u ON u.id = a.patient_user_id
+        JOIN slots s ON s.id = a.slot_id
+        JOIN doctors d ON d.id = s.doctor_id
+        WHERE a.status = 'scheduled'
+          AND {where_sql}
+        ORDER BY s.starts_at
+        """,
+        params,
+    )
+    return [
         {
             "appointment_id": row[0],
             "patient_email": row[1],
@@ -809,26 +854,17 @@ def _close_slots_for_period(cur, starts_on: date, ends_on: date, doctor_id=None)
         for row in cur.fetchall()
     ]
 
+
+def _close_slots_for_period(cur, starts_on: date, ends_on: date, doctor_id=None):
     if doctor_id is None:
-        cur.execute(
-            """
-            DELETE FROM slots s
-            WHERE s.starts_at::date BETWEEN %s AND %s
-              AND NOT EXISTS (SELECT 1 FROM appointments a WHERE a.slot_id=s.id)
-            """,
-            (starts_on, ends_on),
-        )
+        where_sql = "s.starts_at::date BETWEEN %s AND %s"
+        params = (starts_on, ends_on)
     else:
-        cur.execute(
-            """
-            DELETE FROM slots s
-            WHERE s.doctor_id=%s
-              AND s.starts_at::date BETWEEN %s AND %s
-              AND NOT EXISTS (SELECT 1 FROM appointments a WHERE a.slot_id=s.id)
-            """,
-            (doctor_id, starts_on, ends_on),
-        )
-    return cur.rowcount, scheduled_visits
+        where_sql = "s.doctor_id=%s AND s.starts_at::date BETWEEN %s AND %s"
+        params = (doctor_id, starts_on, ends_on)
+    scheduled_visits = _scheduled_visit_rows(cur, where_sql, params)
+    removed = _purge_slots_without_scheduled(cur, where_sql, params)
+    return removed, scheduled_visits
 
 
 @app.get("/admin/schedule")
@@ -872,51 +908,22 @@ def admin_schedule(request: Request):
     cur.execute("SELECT day, name FROM holidays ORDER BY day")
     holidays = [{"day": row[0], "name": row[1]} for row in cur.fetchall()]
     closure_report = request.session.pop("closure_report", None)
-    closure_visits = []
-    if closure_report:
-        if closure_report["doctor_id"] is None:
-            cur.execute(
-                """
-                SELECT a.id, u.email, d.full_name, s.starts_at, s.ends_at
-                FROM appointments a
-                JOIN users u ON u.id=a.patient_user_id
-                JOIN slots s ON s.id=a.slot_id
-                JOIN doctors d ON d.id=s.doctor_id
-                WHERE a.status='scheduled'
-                  AND s.starts_at::date BETWEEN %s AND %s
-                ORDER BY s.starts_at
-                """,
-                (closure_report["starts_on"], closure_report["ends_on"]),
+    hours_report = request.session.pop("hours_report", None)
+    manual_cancel_visits = _scheduled_visit_rows(
+        cur,
+        """
+        (
+            EXISTS (SELECT 1 FROM holidays h WHERE h.day = s.starts_at::date)
+            OR EXISTS (
+                SELECT 1 FROM time_off t
+                WHERE t.doctor_id = s.doctor_id
+                  AND s.starts_at::date BETWEEN t.starts_on AND t.ends_on
             )
-        else:
-            cur.execute(
-                """
-                SELECT a.id, u.email, d.full_name, s.starts_at, s.ends_at
-                FROM appointments a
-                JOIN users u ON u.id=a.patient_user_id
-                JOIN slots s ON s.id=a.slot_id
-                JOIN doctors d ON d.id=s.doctor_id
-                WHERE a.status='scheduled'
-                  AND s.doctor_id=%s
-                  AND s.starts_at::date BETWEEN %s AND %s
-                ORDER BY s.starts_at
-                """,
-                (
-                    closure_report["doctor_id"],
-                    closure_report["starts_on"],
-                    closure_report["ends_on"],
-                ),
-            )
-        closure_visits = [
-            {
-                "appointment_id": row[0],
-                "patient_email": row[1],
-                "doctor_name": row[2],
-                "starts_at": row[3],
-                "ends_at": row[4],
-            }
-            for row in cur.fetchall()
-        ]
+        )
+        """,
+        (),
+    )
+    outside_hours_visits = _scheduled_visit_rows(cur, _outside_hours_sql("s"), ())
     cur.close()
     conn.close()
     return templates.TemplateResponse(
@@ -929,7 +936,9 @@ def admin_schedule(request: Request):
             "time_off": time_off,
             "holidays": holidays,
             "closure_report": closure_report,
-            "closure_visits": closure_visits,
+            "hours_report": hours_report,
+            "manual_cancel_visits": manual_cancel_visits,
+            "outside_hours_visits": outside_hours_visits,
             "visit_cancelled": request.query_params.get("visit_cancelled"),
             "weekdays": ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"],
             "saved": request.query_params.get("saved"),
@@ -975,6 +984,29 @@ def admin_save_work_hours(
     cur.close()
     conn.close()
     return RedirectResponse("/admin/schedule?saved=work-hours", status_code=303)
+
+
+@app.post("/admin/doctors/{doctor_id}/apply-hours")
+def admin_apply_hours(request: Request, doctor_id: int):
+    if request.session.get("role") != "admin":
+        return RedirectResponse("/login", status_code=303)
+    conn = db()
+    cur = conn.cursor()
+    cur.execute("SELECT 1 FROM doctors WHERE id=%s", (doctor_id,))
+    if cur.fetchone() is None:
+        cur.close()
+        conn.close()
+        return RedirectResponse("/admin/schedule?error=doctor_not_found", status_code=303)
+    where_sql = f"s.doctor_id=%s AND {_outside_hours_sql('s')}"
+    removed = _purge_slots_without_scheduled(cur, where_sql, (doctor_id,))
+    conn.commit()
+    cur.close()
+    conn.close()
+    request.session["hours_report"] = {
+        "doctor_id": doctor_id,
+        "removed_slots": removed,
+    }
+    return RedirectResponse("/admin/schedule?saved=apply-hours", status_code=303)
 
 
 @app.post("/admin/time-off")
@@ -1099,8 +1131,9 @@ def generate_doctor_slots(
 
     created = 0
     skipped = 0
-    today = date.today()
-    now = datetime.now()
+    cur.execute("SELECT CURRENT_TIMESTAMP::timestamp")
+    now = cur.fetchone()[0]
+    today = now.date()
     current_date = from_date
     while current_date <= to_date:
         day_hours = [row for row in work_hours if row[0] == current_date.weekday()]

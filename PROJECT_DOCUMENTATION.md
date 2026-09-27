@@ -179,7 +179,7 @@ python3 experiments/concurrent_book.py 2 50
 python3 -m pytest -v tests/test_stage4.py
 ```
 
-Последний полный прогон завершился результатом `13 passed`. Generator/time-off regression можно запустить отдельно: `python3 -m pytest -v tests/test_stage4.py::test_admin_slot_generator_respects_time_off_and_role`.
+Последний полный прогон завершился результатом `16 passed, 1 skipped`. Generator/time-off regression можно запустить отдельно: `python3 -m pytest -v tests/test_stage4.py::test_admin_slot_generator_respects_time_off_and_role`.
 
 ## 5. Переменные окружения
 
@@ -241,6 +241,8 @@ seed_clinic()
 - Levon, 2026-10-03: `10:30-11:30`.
 
 Интервалы 3 октября частично пересекаются. Слота `10:15-10:45` и пары соседних интервалов в seed-данных нет; вложение и правило «встык разрешено» требуют добавить тестовые слоты вручную.
+
+Сидовые слоты 1–3 октября и генератор из `work_hours` — разные механизмы: сиды нужны для overlap-тестов и не пересобираются кнопкой Generate.
 
 Важно: seed врачей и слотов срабатывает только при пустой таблице `doctors`. Если volume уже содержит базу, новые seed-слоты автоматически не добавятся.
 
@@ -313,7 +315,7 @@ docker compose up --build -d
 | GET | `/me` | Кабинет текущего пользователя | Авторизованные |
 | GET | `/doctors` | Список врачей | Все |
 | GET | `/doctors/{doctor_id}/slots` | Слоты выбранного врача | Patient, Registrar |
-| POST | `/slots/{slot_id}/book` | Бронирование слота для текущего пациента или указанного registrar-пациента | Patient, Registrar |
+| POST | `/slots/{slot_id}/book` | Бронирование слота. Прошедший слот (`starts_at <= CURRENT_TIMESTAMP`) отклоняется как `error=past` | Patient, Registrar |
 | POST | `/appointments/{appointment_id}/cancel` | Отмена записи | Patient (только своя будущая), Registrar (любая scheduled) |
 | GET | `/my` | Записи текущего пациента | Patient |
 | GET | `/doctor/appointments` | Записи к текущему врачу | Doctor |
@@ -326,6 +328,7 @@ docker compose up --build -d
 | POST | `/admin/users/{user_id}/unblock` | Разблокировать пациента | Admin |
 | POST | `/admin/users/{user_id}/cancel-future-appointments` | Отменить будущие scheduled appointments пациента | Admin |
 | POST | `/admin/doctors/{doctor_id}/generate` | Идемпотентно сгенерировать слоты на период | Admin |
+| POST | `/admin/doctors/{doctor_id}/apply-hours` | Удалить свободные слоты вне текущего окна `work_hours`. Scheduled не отменяет | Admin |
 
 ## 9. База данных
 
@@ -375,7 +378,7 @@ Constraint `slots_no_overlap_per_doctor` использует `EXCLUDE USING gis
 В `book_slot()` выполняются проверки в следующем порядке:
 
 1. Проверяется сессия: бронировать может пациент или registrar.
-2. Проверяется существование слота.
+2. Проверяется существование слота. Если `starts_at <= CURRENT_TIMESTAMP` (часы Postgres, не `datetime.now()` контейнера), возвращается `error=past`.
 3. Для patient целевой аккаунт берётся из сессии; registrar указывает email пациента в форме. Находится пользователь с ролью `patient`.
 4. Проверяется, что целевой пациент не заблокирован.
 5. Выполняется PostgreSQL advisory lock для `patient_id`, чтобы сериализовать его одновременные бронирования.
@@ -383,7 +386,7 @@ Constraint `slots_no_overlap_per_doctor` использует `EXCLUDE USING gis
 7. Затем проверяется пересечение времени с другими запланированными записями этого пациента. Для конфликта возвращается `error=overlap`.
 8. Создаётся `INSERT` со статусом `scheduled` и фиксируется транзакция.
 
-Частичный unique index по `scheduled` остаётся защитой БД от конкурентной записи на один слот. При гонке только один INSERT пройдёт; проигравший запрос получает `unavailable`.
+Частичный unique index по `scheduled` остаётся защитой БД от конкурентной записи на один слот. При гонке только один INSERT пройдёт; `UniqueViolation` и `ExclusionViolation` показываются как `unavailable`. Любая другая ошибка INSERT логируется и возвращается как `error=could_not_book`, а не маскируется под занятый слот.
 
 Формула пересечения:
 
@@ -414,7 +417,7 @@ Python-overlap пациента остаётся отдельным правил
 
 Только Admin может открыть `/admin/schedule`, добавлять или обновлять work hours через `POST /admin/work-hours`, добавлять периоды отсутствия через `POST /admin/time-off`, сохранять общий holiday через `POST /admin/holidays` и запускать Generate через `POST /admin/doctors/{doctor_id}/generate`. Registrar и врач не имеют этих операций.
 
-Для генерации выбираются врач, `from_date` и `to_date` (включительно); endpoint ограничивает диапазон 90 днями. Для каждого дня генератор пропускает time off, holidays и дни без графика, затем нарезает `[start_time, end_time)` с шагом `slot_minutes`. Слоты в прошлом пропускаются. Повтор одинакового `work_hours` обновляет интервал этого weekday; повтор одинакового time-off периода не плодит запись, а holiday на тот же день обновляет название.
+Для генерации выбираются врач, `from_date` и `to_date` (включительно); endpoint ограничивает диапазон 90 днями. Для каждого дня генератор пропускает time off, holidays и дни без графика, затем нарезает `[start_time, end_time)` с шагом `slot_minutes`. Слоты в прошлом пропускаются по `CURRENT_TIMESTAMP` базы; Compose фиксирует `TZ=UTC` и у `db`, и у `api`. Повтор одинакового `work_hours` обновляет интервал этого weekday и сам слоты не удаляет. Кнопка `Apply schedule: remove free slots outside hours` отдельно удаляет свободные слоты вне нового окна; scheduled остаются в списке для ручной отмены. Повтор одинакового time-off периода не плодит запись, а holiday на тот же день обновляет название. Закрытие дня не отменяет scheduled: список `Needs manual cancellation` виден на `/admin/schedule`, пока визит не отменят вручную. Слот без scheduled удаляется, даже если на нём осталась только cancelled-история.
 
 Генерация идемпотентна по unique index `slots_doctor_start (doctor_id, starts_at)`. Дубликаты, конфликты с существующими слотами и срабатывания `slots_no_overlap_per_doctor` учитываются как skipped; savepoint позволяет продолжить генерацию остальных интервалов. В результате выводятся `Created N slots, skipped M`. Существующие seed-слоты не удаляются.
 

@@ -24,6 +24,10 @@
   <p><strong>Booking failed.</strong> Enter a patient email first.</p>
 {% elif error == "closed" %}
   <p><strong>Booking failed.</strong> The clinic is closed for this date.</p>
+{% elif error == "past" %}
+  <p><strong>Booking failed.</strong> This slot is in the past.</p>
+{% elif error == "could_not_book" %}
+  <p><strong>Booking failed.</strong> The appointment could not be booked. Try again or contact the clinic.</p>
 {% elif booked == "1" %}
   <p>Appointment booked successfully.</p>
 {% endif %}
@@ -48,6 +52,8 @@
         {% else %}
           Unavailable{% if s.closed %} — clinic closed{% endif %}
         {% endif %}
+      {% elif s.past %}
+        Past — unavailable
       {% elif s.closed %}
         Closed — unavailable
       {% else %}
