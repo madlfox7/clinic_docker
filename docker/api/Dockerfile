@@ -4,9 +4,9 @@ WORKDIR /app
 
 RUN useradd --system --uid 10001 app
 
-COPY requirements.txt .
+COPY app/requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
-COPY --chown=app:app . .
+COPY --chown=app:app app/ .
 
 EXPOSE 8000
 USER app

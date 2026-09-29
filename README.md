@@ -28,13 +28,14 @@ docker compose logs --tail=100 api
 ./tests/run_tests.sh
 ```
 
-Если уже находишься в `tests/`, команда короче:
+Скрипт устанавливает зависимости из `tests/requirements.txt`, переходит в корень репозитория, поднимает приложение и запускает stage 4 тесты. Он не удаляет Docker volume. Тесты временно создают/отменяют бронирования и блокируют/разблокируют `pat`, поэтому запускай их только против локальной dev-БД, не production.
+
+Для запуска тестов вручную установи зависимости и выполни `pytest` из корня репозитория:
 
 ```bash
-./run_tests.sh
+python3 -m pip install -r tests/requirements.txt
+pytest
 ```
-
-Скрипт устанавливает зависимости из `tests/requirements.txt`, поднимает приложение и запускает stage 4 тесты. Он не удаляет Docker volume. Тесты временно создают/отменяют бронирования и блокируют/разблокируют `pat`, поэтому запускай их только против локальной dev-БД, не production.
 
 ## Тестовые аккаунты
 
@@ -77,20 +78,32 @@ docker compose logs --tail=100 api
 
 Если time off или holiday добавлен после генерации, свободные слоты без appointment history удаляются. Уже scheduled-визиты не отменяются автоматически: Admin видит список пациентов/времени и персонал отменяет их отдельным действием. На закрытую дату Book запрещён.
 
-Подробная документация находится в [PROJECT_DOCUMENTATION.md](PROJECT_DOCUMENTATION.md).
+## Структура проекта
 
-
-api/
-  Dockerfile
-  requirements.txt
-  main.py
-  templates/
-    base.html
-    home.html
-    login.html
-    me.html
-    doctors.html
-    slots.html
-    my_appointments.html
-    doctor_appointments.html
-    admin_users.html
+```text
+clinic_docker/
+├── docker-compose.yml
+├── .env.example
+├── README.md
+├── app/
+│   ├── main.py
+│   ├── db.py
+│   ├── routes_auth.py
+│   ├── routes_booking.py
+│   ├── routes_admin.py
+│   ├── requirements.txt
+│   └── templates/
+├── db/
+│   └── init.sql
+├── docker/
+│   ├── api/Dockerfile
+│   ├── proxy/Dockerfile
+│   ├── proxy/nginx.conf
+│   └── db/Dockerfile
+├── tests/
+│   ├── requirements.txt
+│   ├── run_tests.sh
+│   └── test_stage4.py
+└── experiments/
+    └── concurrent_book.py
+```
