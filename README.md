@@ -1,109 +1,81 @@
 # Clinic Appointment Application
 
-Учебное приложение клиники на FastAPI, PostgreSQL и Nginx.
+FastAPI, PostgreSQL и Nginx.
 
-## Запуск
 
-В WSL из корня проекта:
 
 ```bash
 cp .env.example .env
 docker compose up --build -d
 ```
 
-Открыть: http://localhost:8080
+ http://localhost:8080
 
-Проверить контейнеры:
+(nginx only, for now without tls)
+
 
 ```bash
 docker compose ps
 docker compose logs --tail=100 api
 ```
 
-## Автотесты
-
-Из WSL в корне проекта:
-
-```bash
 ./tests/run_tests.sh
-```
 
-Скрипт устанавливает зависимости из `tests/requirements.txt`, переходит в корень репозитория, поднимает приложение и запускает stage 4 тесты. Он не удаляет Docker volume. Тесты временно создают/отменяют бронирования и блокируют/разблокируют `pat`, поэтому запускай их только против локальной dev-БД, не production.
+current tree:
 
-Для запуска тестов вручную установи зависимости и выполни `pytest` из корня репозитория:
-
-```bash
-python3 -m pip install -r tests/requirements.txt
-pytest
-```
-
-## Тестовые аккаунты
-
-Пароль для всех аккаунтов: `password123`.
-
-| Email | Role |
-|---|---|
-| `admin@clinic.local` | admin |
-| `doc@clinic.local` | doctor |
-| `doc2@clinic.local` | doctor |
-| `pat@clinic.local` | patient |
-| `pat2@clinic.local` | patient |
-| `reg@clinic.local` | registrar |
-
-## Основные возможности
-
-- просмотр врачей и свободных слотов;
-- главная страница гостя с адресом, телефоном и часами работы;
-- генерация слотов администратором на период из графика врача с учётом time off;
-- повторная генерация не создаёт дубли и пропускает занятые интервалы;
-- при добавлении time off/holiday свободные неиспользованные слоты снимаются, а booked-визиты показываются staff для ручной отмены;
-- отображение состояния слота отдельно для пациента: своя запись, чужая активная запись или свободно;
-- бронирование пациентом или registrar от имени пациента;
-- защита от двойного бронирования: один активный appointment на слот и запрет пересекающихся слотов одного врача в PostgreSQL;
-- overlap-проверка scheduled appointments одного пациента, включая слоты разных врачей;
-- соседние слоты врача встык разрешены (`[)` интервалы);
-- отмена только будущей собственной записи пациентом;
-- отмена scheduled-записи регистратором;
-- повторное бронирование слота после отмены; cancelled-записи сохраняются в истории, но не блокируют слот;
-- просмотр своих записей пациентом;
-- просмотр приёмов врача;
-- просмотр начала и окончания визита и флага `account blocked` в расписании врача;
-- блокировка/разблокировка пациентов администратором и отдельная отмена их будущих визитов.
-
-Для быстрой проверки этапа 4 используйте сценарий `Book -> Cancel -> Book` сначала тем же пациентом, затем `pat2`. Занятый слот должен вернуть `unavailable`; другой свободный слот с пересечением времени должен вернуть `overlap`.
-
-На странице слотов пациент видит `Your appointment` для своей записи, `Unavailable` для занятого другим пациентом слота и кнопку `Book appointment` для свободного. Registrar видит `Booked` для занятого слота и форму `Book for patient` для свободного. Имя или email другого пациента на странице слотов не показывается.
-
-Администратор может открыть `Schedule`: настроить часы работы врача и периоды time off, добавить общий holiday и сгенерировать слоты на период. Повторная генерация не создаёт дубли; уже занятые интервалы врача, holidays и time off пропускаются.
-
-Если time off или holiday добавлен после генерации, свободные слоты без appointment history удаляются. Уже scheduled-визиты не отменяются автоматически: Admin видит список пациентов/времени и персонал отменяет их отдельным действием. На закрытую дату Book запрещён.
-
-## Структура проекта
-
-```text
-clinic_docker/
-├── docker-compose.yml
-├── .env.example
 ├── README.md
-├── app/
-│   ├── main.py
+├── app
 │   ├── db.py
+│   ├── main.py
+│   ├── requirements.txt
+│   ├── routes_admin.py
 │   ├── routes_auth.py
 │   ├── routes_booking.py
-│   ├── routes_admin.py
-│   ├── requirements.txt
-│   └── templates/
-├── db/
+│   └── templates
+│       ├── admin_schedule.html
+│       ├── admin_users.html
+│       ├── base.html
+│       ├── doctor_appointments.html
+│       ├── doctors.html
+│       ├── home.html
+│       ├── login.html
+│       ├── me.html
+│       ├── my_appointments.html
+│       └── slots.html
+├── db
 │   └── init.sql
-├── docker/
-│   ├── api/Dockerfile
-│   ├── proxy/Dockerfile
-│   ├── proxy/nginx.conf
-│   └── db/Dockerfile
-├── tests/
-│   ├── requirements.txt
-│   ├── run_tests.sh
-│   └── test_stage4.py
-└── experiments/
-    └── concurrent_book.py
-```
+├── docker
+│   ├── api
+│   │   └── Dockerfile
+│   ├── db
+│   │   └── Dockerfile
+│   └── proxy
+│       ├── Dockerfile
+│       └── nginx.conf
+├── docker-compose.yml
+├── down_the_rabbit-hole.md
+├── experiments
+│   └── concurrent_book.py
+└── tests
+    ├── requirements.txt
+    ├── run_tests.sh
+    └── test_stage4.py
+
+Q1: TRAEFIK? (maybe, but instead of nginx, or with nginx(but why two proxies?)
+The lab uses Traefik for routing by hostname. I have a single hostname and one app.
+Is Nginx enough as reverse proxy or should I use Traefik? 
+If Traefik is required, should it replace nginx rather than sit in front of it?
+
+q2: Two Nginx containers (front / admin) ref: lab1
+In the lab, front and admin are two Nginx containers and two hostnames.
+Here done by application roles in Python, not by two web roots.
+Is role-based admin inside one application acceptable or I need  separate admin container/hostname?
+
+q3:PHP
+FastApi instead of PHP.... (+)
+
+
+
+
+Todo: retest app logic, rls implementation + test again(all the time) + some polishment and then backup, docker socket proxy .... 
++ DOCCUMENTATION (in armenian)
