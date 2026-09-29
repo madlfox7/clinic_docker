@@ -343,6 +343,7 @@ def test_admin_schedule_configuration_is_admin_only_and_repeatable():
 		assert page.status_code == 200
 		assert "Thanksgiving" in page.text
 		assert "Monday" in page.text
+		assert '<input name="name" type="text" required>' in page.text
 		doctor_match = re.search(r'<option value="(\d+)">Anna Ohanyan</option>', page.text)
 		assert doctor_match, "Anna missing from admin schedule controls"
 		doctor_id = doctor_match.group(1)
@@ -396,6 +397,62 @@ def psql(sql: str) -> str:
 		if line.isdigit() or line in ("scheduled", "cancelled"):
 			return line
 	return lines[-1] if lines else ""
+
+
+def test_database_rejects_overlapping_appointments_on_different_slots():
+	psql(
+		"""
+		DO $$
+		DECLARE
+			test_doctor_id INTEGER;
+			first_patient_id INTEGER;
+			second_patient_id INTEGER;
+			first_slot_id INTEGER;
+			second_slot_id INTEGER;
+			rejected_constraint TEXT;
+		BEGIN
+			SELECT id INTO test_doctor_id
+			FROM doctors WHERE full_name = 'Anna Ohanyan';
+			SELECT id INTO first_patient_id
+			FROM users WHERE email = 'pat@clinic.local';
+			SELECT id INTO second_patient_id
+			FROM users WHERE email = 'pat2@clinic.local';
+
+			INSERT INTO slots (doctor_id, starts_at, ends_at)
+			VALUES (test_doctor_id, '2035-06-10 08:00', '2035-06-10 08:30')
+			RETURNING id INTO first_slot_id;
+			INSERT INTO slots (doctor_id, starts_at, ends_at)
+			VALUES (test_doctor_id, '2035-06-10 09:00', '2035-06-10 09:30')
+			RETURNING id INTO second_slot_id;
+
+			INSERT INTO appointments
+				(slot_id, patient_user_id, doctor_id, starts_at, ends_at, status)
+			VALUES
+				(first_slot_id, first_patient_id, test_doctor_id,
+				 '2035-06-10 10:00', '2035-06-10 10:30', 'scheduled');
+
+			BEGIN
+				INSERT INTO appointments
+					(slot_id, patient_user_id, doctor_id, starts_at, ends_at, status)
+				VALUES
+					(second_slot_id, second_patient_id, test_doctor_id,
+					 '2035-06-10 10:15', '2035-06-10 10:45', 'scheduled');
+				RAISE EXCEPTION 'overlapping appointment was accepted';
+			EXCEPTION WHEN exclusion_violation THEN
+				GET STACKED DIAGNOSTICS rejected_constraint = CONSTRAINT_NAME;
+				IF rejected_constraint <> 'appointments_no_overlap_per_doctor' THEN
+					RAISE;
+				END IF;
+			END;
+
+			DELETE FROM appointments
+			WHERE slot_id IN (first_slot_id, second_slot_id);
+			DELETE FROM slots
+			WHERE id IN (first_slot_id, second_slot_id);
+		END
+		$$;
+		"""
+	)
 
 
 def test_past_slot_cannot_be_booked():
@@ -455,14 +512,18 @@ def test_closed_day_lists_scheduled_and_drops_cancelled_only_slot():
 	)
 	psql(
 		f"""
-		INSERT INTO appointments (slot_id, patient_user_id, status)
-		SELECT {int(free_id)}, id, 'cancelled' FROM users WHERE email = '{PAT}'
+		INSERT INTO appointments (slot_id, patient_user_id, status, doctor_id, starts_at, ends_at)
+		SELECT s.id, u.id, 'cancelled', s.doctor_id, s.starts_at, s.ends_at
+		FROM slots s JOIN users u ON u.email = '{PAT}'
+		WHERE s.id = {int(free_id)}
 		"""
 	)
 	psql(
 		f"""
-		INSERT INTO appointments (slot_id, patient_user_id, status)
-		SELECT {int(kept_id)}, id, 'scheduled' FROM users WHERE email = '{PAT2}'
+		INSERT INTO appointments (slot_id, patient_user_id, status, doctor_id, starts_at, ends_at)
+		SELECT s.id, u.id, 'scheduled', s.doctor_id, s.starts_at, s.ends_at
+		FROM slots s JOIN users u ON u.email = '{PAT2}'
+		WHERE s.id = {int(kept_id)}
 		"""
 	)
 	try:
@@ -519,8 +580,10 @@ def test_apply_hours_removes_free_slots_outside_window_only():
 	)
 	psql(
 		f"""
-		INSERT INTO appointments (slot_id, patient_user_id, status)
-		SELECT {int(kept_id)}, id, 'scheduled' FROM users WHERE email = '{PAT2}'
+		INSERT INTO appointments (slot_id, patient_user_id, status, doctor_id, starts_at, ends_at)
+		SELECT s.id, u.id, 'scheduled', s.doctor_id, s.starts_at, s.ends_at
+		FROM slots s JOIN users u ON u.email = '{PAT2}'
+		WHERE s.id = {int(kept_id)}
 		"""
 	)
 	try:

@@ -14,7 +14,7 @@ def home(request: Request):
 
 
 def _login_page(request: Request, error: str | None, status_code: int = 200):
-    # A failed attempt must not pretend the previous session was cleared.
+    # A failed attempt 
     return templates.TemplateResponse(
         "login.html",
         {
@@ -29,15 +29,12 @@ def _login_page(request: Request, error: str | None, status_code: int = 200):
 
 @router.get("/login")
 def login_form(request: Request):
-    # Stay on /login so role-restricted redirects still land on a stable
-    # "not permitted" page; just hide the credential form when already signed in.
     return _login_page(request, None)
 
 
 @router.post("/login")
 def login(request: Request, email: str = Form(...), password: str = Form(...)):
-    # Already signed in: do not collect a second set of credentials or
-    # replace the session. Log out first to switch accounts.
+    # Already signed in
     if request.session.get("email"):
         return _login_page(request, None)
     conn = db()

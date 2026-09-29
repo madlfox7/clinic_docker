@@ -54,7 +54,7 @@ def admin_users(request: Request):
 
 
 def _purge_slots_without_scheduled(cur, where_sql, params):
-    # Cancelled history must not keep a closed or out-of-hours slot on the calendar.
+   #cancelled 
     cur.execute(
         f"""
         DELETE FROM appointments a
@@ -86,7 +86,7 @@ def _purge_slots_without_scheduled(cur, where_sql, params):
 
 
 def _outside_hours_sql(alias="s"):
-    # work_hours.weekday is Python's Monday=0, not PostgreSQL DOW (Sunday=0).
+    # work_hours.weekday 
     return f"""
         NOT EXISTS (
             SELECT 1 FROM work_hours w

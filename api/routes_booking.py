@@ -244,8 +244,16 @@ def book_slot(request: Request, slot_id: int, patient_email: str = Form(None)):
 
     try:
         cur.execute(
-            "INSERT INTO appointments (slot_id, patient_user_id) VALUES (%s, %s)",
-            (slot_id, patient_id),
+            """
+            INSERT INTO appointments (
+                slot_id, patient_user_id, doctor_id, starts_at, ends_at
+            )
+            SELECT s.id, %s, s.doctor_id, s.starts_at, s.ends_at
+            FROM slots s
+            WHERE s.id = %s
+              AND s.starts_at > CURRENT_TIMESTAMP
+            """,
+            (patient_id, slot_id),
         )
         conn.commit()
     except (psycopg2.errors.UniqueViolation, psycopg2.errors.ExclusionViolation):

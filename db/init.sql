@@ -71,16 +71,66 @@ ON slots (doctor_id, starts_at);
 
 CREATE EXTENSION IF NOT EXISTS btree_gist;
 
+ALTER TABLE appointments
+  ADD COLUMN IF NOT EXISTS doctor_id INTEGER REFERENCES doctors(id),
+  ADD COLUMN IF NOT EXISTS starts_at TIMESTAMP,
+  ADD COLUMN IF NOT EXISTS ends_at TIMESTAMP;
+
+UPDATE appointments a
+SET
+  doctor_id = s.doctor_id,
+  starts_at = s.starts_at,
+  ends_at = s.ends_at
+FROM slots s
+WHERE s.id = a.slot_id
+  AND (a.doctor_id IS NULL OR a.starts_at IS NULL OR a.ends_at IS NULL);
+
+ALTER TABLE appointments
+  ALTER COLUMN doctor_id SET NOT NULL,
+  ALTER COLUMN starts_at SET NOT NULL,
+  ALTER COLUMN ends_at SET NOT NULL;
+
+ALTER TABLE appointments
+  ADD COLUMN IF NOT EXISTS period tsrange
+  GENERATED ALWAYS AS (tsrange(starts_at, ends_at, '[)')) STORED;
+
+DO $$
+BEGIN
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_constraint
+    WHERE conname = 'appointments_no_overlap_per_doctor'
+      AND conrelid = 'appointments'::regclass
+      AND contype = 'x'
+  ) THEN
+    ALTER TABLE appointments
+      ADD CONSTRAINT appointments_no_overlap_per_doctor
+      EXCLUDE USING gist (
+        doctor_id WITH =,
+        period WITH &&
+      )
+      WHERE (status = 'scheduled');
+  END IF;
+END
+$$;
+
 ALTER TABLE slots
   ADD COLUMN IF NOT EXISTS time_range tsrange
   GENERATED ALWAYS AS (tsrange(starts_at, ends_at, '[)')) STORED;
 
-ALTER TABLE slots
-  DROP CONSTRAINT IF EXISTS slots_no_overlap_per_doctor;
-
-ALTER TABLE slots
-  ADD CONSTRAINT slots_no_overlap_per_doctor
-  EXCLUDE USING gist (
-    doctor_id WITH =,
-    time_range WITH &&
-  );
+DO $$
+BEGIN
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_constraint
+    WHERE conname = 'slots_no_overlap_per_doctor'
+      AND conrelid = 'slots'::regclass
+      AND contype = 'x'
+  ) THEN
+    ALTER TABLE slots
+      ADD CONSTRAINT slots_no_overlap_per_doctor
+      EXCLUDE USING gist (
+        doctor_id WITH =,
+        time_range WITH &&
+      );
+  END IF;
+END
+$$;
