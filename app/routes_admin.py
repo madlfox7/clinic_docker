@@ -1,5 +1,6 @@
 from datetime import date, datetime, timedelta
 from datetime import time as datetime_time
+from typing import List
 
 import psycopg2
 from fastapi import APIRouter, Form, Request
@@ -254,6 +255,49 @@ def admin_save_work_hours(
     cur.close()
     conn.close()
     return RedirectResponse("/admin/schedule?saved=work-hours", status_code=303)
+
+
+@router.post("/admin/work-hours-bulk")
+def admin_save_work_hours_bulk(
+    request: Request,
+    doctor_id: int = Form(...),
+    weekdays: List[int] = Form(default=[]),
+    start_time: datetime_time = Form(...),
+    end_time: datetime_time = Form(...),
+    slot_minutes: int = Form(...),
+):
+    if request.session.get("role") != "admin":
+        return RedirectResponse("/login", status_code=303)
+    if start_time >= end_time or slot_minutes <= 0:
+        return RedirectResponse("/admin/schedule?error=invalid_work_hours", status_code=303)
+    selected = sorted({int(day) for day in weekdays if 0 <= int(day) <= 6})
+    if not selected:
+        return RedirectResponse("/admin/schedule?error=no_weekdays", status_code=303)
+
+    conn = db()
+    cur = conn.cursor()
+    cur.execute("SELECT 1 FROM doctors WHERE id=%s", (doctor_id,))
+    if cur.fetchone() is None:
+        cur.close()
+        conn.close()
+        return RedirectResponse("/admin/schedule?error=doctor_not_found", status_code=303)
+
+    for weekday in selected:
+        cur.execute(
+            """
+            INSERT INTO work_hours (doctor_id, weekday, start_time, end_time, slot_minutes)
+            VALUES (%s, %s, %s, %s, %s)
+            ON CONFLICT (doctor_id, weekday) DO UPDATE
+            SET start_time=EXCLUDED.start_time,
+                end_time=EXCLUDED.end_time,
+                slot_minutes=EXCLUDED.slot_minutes
+            """,
+            (doctor_id, weekday, start_time, end_time, slot_minutes),
+        )
+    conn.commit()
+    cur.close()
+    conn.close()
+    return RedirectResponse("/admin/schedule?saved=work-hours-bulk", status_code=303)
 
 
 @router.post("/admin/doctors/{doctor_id}/apply-hours")

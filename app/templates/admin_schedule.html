@@ -3,6 +3,7 @@
 <h1>Schedule management</h1>
 <p><a href="/admin/users">Manage patients</a></p>
 {% if saved == "work-hours" %}<p>Work hours saved. Free slots outside the new hours are not removed until you apply the schedule.</p>{% endif %}
+{% if saved == "work-hours-bulk" %}<p>Work hours saved for the selected days. Apply schedule if free slots must be removed.</p>{% endif %}
 {% if saved == "time-off" %}<p>Time off saved.</p>{% endif %}
 {% if saved == "holiday" %}<p>Holiday saved.</p>{% endif %}
 {% if saved == "apply-hours" %}<p>Applied schedule. Removed {{ hours_report.removed_slots if hours_report else 0 }} free slots outside work hours. Scheduled visits were not cancelled.</p>{% endif %}
@@ -53,7 +54,8 @@
 {% elif error == "invalid_work_hours" %}<p>Choose valid weekday and working hours.</p>
 {% elif error == "invalid_time_off" %}<p>End date must not be before start date.</p>
 {% elif error == "holiday_name_required" %}<p>Enter a holiday name.</p>
-{% elif error == "doctor_not_found" %}<p>Doctor not found.</p>{% endif %}
+{% elif error == "doctor_not_found" %}<p>Doctor not found.</p>
+{% elif error == "no_weekdays" %}<p>Select at least one weekday.</p>{% endif %}
 
 <h2>Weekly work hours</h2>
 <table>
@@ -88,6 +90,30 @@
   <label>Slot minutes <input name="slot_minutes" type="number" min="1" value="30" required></label>
   <button type="submit">Save work hours</button>
 </form>
+
+<h3>Apply the same hours to several days</h3>
+<form method="post" action="/admin/work-hours-bulk">
+  <label>Doctor
+    <select name="doctor_id" required>
+      {% for doctor in doctors %}
+        <option value="{{ doctor.id }}">{{ doctor.full_name }}</option>
+      {% endfor %}
+    </select>
+  </label>
+  <p>Days</p>
+  {% for name in weekdays %}
+    <label>
+      <input type="checkbox" name="weekdays" value="{{ loop.index0 }}"
+        {% if loop.index0 < 5 %}checked{% endif %}>
+      {{ name }}
+    </label>
+  {% endfor %}
+  <label>Start <input name="start_time" type="time" value="09:00" required></label>
+  <label>End <input name="end_time" type="time" value="18:00" required></label>
+  <label>Slot minutes <input name="slot_minutes" type="number" min="1" value="30" required></label>
+  <button type="submit">Save hours for selected days</button>
+</form>
+
 {% for doctor in doctors %}
   <form method="post" action="/admin/doctors/{{ doctor.id }}/apply-hours">
     <button type="submit">Apply schedule: remove free slots outside hours ({{ doctor.full_name }})</button>
