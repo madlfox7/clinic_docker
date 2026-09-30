@@ -350,10 +350,10 @@ def test_admin_schedule_configuration_is_admin_only_and_repeatable():
 
 		for path, data in (
 			(
-				"/admin/work-hours",
+				"/admin/work-hours-bulk",
 				{
 					"doctor_id": doctor_id,
-					"weekday": "0",
+					"weekdays": ["0"],
 					"start_time": "09:00",
 					"end_time": "12:00",
 					"slot_minutes": "30",

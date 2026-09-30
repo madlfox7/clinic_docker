@@ -1,7 +1,7 @@
 from fastapi import APIRouter, Form, Request
 from fastapi.responses import RedirectResponse
 
-from db import db, pwd, templates
+from db import MAX_EMAIL_LENGTH, MAX_PASSWORD_LENGTH, db, pwd, templates, within_length
 
 router = APIRouter()
 
@@ -37,6 +37,8 @@ def login(request: Request, email: str = Form(...), password: str = Form(...)):
     # Already signed in
     if request.session.get("email"):
         return _login_page(request, None)
+    if not within_length(email, MAX_EMAIL_LENGTH) or not within_length(password, MAX_PASSWORD_LENGTH):
+        return _login_page(request, "Invalid email or password", 401)
     conn = db()
     cur = conn.cursor()
     cur.execute(

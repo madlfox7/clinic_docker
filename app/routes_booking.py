@@ -2,15 +2,18 @@ import psycopg2
 from fastapi import APIRouter, Form, Request
 from fastapi.responses import RedirectResponse
 
-from db import db, log, templates
+from db import MAX_EMAIL_LENGTH, db, log, parse_strict_int, templates, within_length
 
 router = APIRouter()
 
 @router.get("/doctors/{doctor_id}/slots")
-def doctor_slots(request: Request, doctor_id: int):
+def doctor_slots(request: Request, doctor_id: str):
     role = request.session.get("role")
     if role not in ("patient", "registrar"):
         return RedirectResponse("/login", status_code=303)
+    doctor_id = parse_strict_int(doctor_id, min_value=1)
+    if doctor_id is None:
+        return RedirectResponse("/doctors", status_code=303)
     error = request.query_params.get("error")
     booked = request.query_params.get("booked")
     cancelled = request.query_params.get("cancelled")
@@ -47,7 +50,7 @@ def doctor_slots(request: Request, doctor_id: int):
         and conflict_appointment_id
         and conflict_patient_id
         and role == "registrar"
-        and conflict_patient_id.isdigit()
+        and parse_strict_int(conflict_patient_id, min_value=1) is not None
     ):
         cur.execute(
             """
@@ -149,11 +152,14 @@ def doctor_slots(request: Request, doctor_id: int):
 
 
 @router.post("/slots/{slot_id}/book")
-def book_slot(request: Request, slot_id: int, patient_email: str = Form(None)):
+def book_slot(request: Request, slot_id: str, patient_email: str = Form(None)):
     email = request.session.get("email")
     role = request.session.get("role")
     if role not in ("patient", "registrar") or not email:
         return RedirectResponse("/login", status_code=303)
+    slot_id = parse_strict_int(slot_id, min_value=1)
+    if slot_id is None:
+        return RedirectResponse("/doctors", status_code=303)
     conn = db()
     cur = conn.cursor()
     cur.execute(
@@ -195,6 +201,12 @@ def book_slot(request: Request, slot_id: int, patient_email: str = Form(None)):
             conn.close()
             return RedirectResponse(
                 f"/doctors/{doctor_id}/slots?error=patient_required", status_code=303
+            )
+        if not within_length(target_email, MAX_EMAIL_LENGTH):
+            cur.close()
+            conn.close()
+            return RedirectResponse(
+                f"/doctors/{doctor_id}/slots?error=patient_not_found", status_code=303
             )
     cur.execute(
         "SELECT id, role, blocked FROM users WHERE email=%s",
@@ -275,11 +287,16 @@ def book_slot(request: Request, slot_id: int, patient_email: str = Form(None)):
 
 
 @router.post("/appointments/{appointment_id}/cancel")
-def cancel_appointment(request: Request, appointment_id: int):
+def cancel_appointment(request: Request, appointment_id: str):
     email = request.session.get("email")
     role = request.session.get("role")
     if role not in ("patient", "registrar", "admin") or not email:
         return RedirectResponse("/login", status_code=303)
+    appointment_id = parse_strict_int(appointment_id, min_value=1)
+    if appointment_id is None:
+        if role == "patient":
+            return RedirectResponse("/my?cancel_error=1", status_code=303)
+        return RedirectResponse("/doctors", status_code=303)
     conn = db()
     cur = conn.cursor()
     cur.execute(

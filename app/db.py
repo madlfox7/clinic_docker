@@ -11,6 +11,40 @@ pwd = CryptContext(schemes=["bcrypt"], deprecated="auto")
 log = logging.getLogger("clinic")
 templates = Jinja2Templates(directory="templates")
 
+PG_INT_MIN = -2_147_483_648
+PG_INT_MAX = 2_147_483_647
+MAX_SLOT_MINUTES = 24 * 60
+MAX_EMAIL_LENGTH = 254
+MAX_PASSWORD_LENGTH = 72  # bcrypt only hashes the first 72 bytes and raises past that
+MAX_TEXT_LENGTH = 200
+
+
+def within_length(raw, max_length: int) -> bool:
+    """Reject non-str or input whose UTF-8 byte length exceeds max_length, so oversized
+    payloads (10-50KB manual input) never reach bcrypt or the database unbounded."""
+    return isinstance(raw, str) and len(raw.encode("utf-8")) <= max_length
+
+
+def parse_strict_int(raw, min_value: int = PG_INT_MIN, max_value: int = PG_INT_MAX):
+    """Strict int parsing (like ft_atoi with no leniency): rejects None, empty, whitespace,
+    signs without digits, and any non-digit characters instead of trusting str/int coercion."""
+    if not isinstance(raw, str):
+        return None
+    if raw == "" or raw != raw.strip():
+        return None
+    body = raw
+    negative = False
+    if raw[0] in "+-":
+        body = raw[1:]
+        negative = raw[0] == "-"
+    if body == "" or not body.isdigit():
+        return None
+    value = -int(body) if negative else int(body)
+    if not min_value <= value <= max_value:
+        return None
+    return value
+
+
 SEED_USERS = [
     ("admin@clinic.local", "password123", "admin"),
     ("doc@clinic.local", "password123", "doctor"),
