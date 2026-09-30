@@ -79,3 +79,10 @@ FastApi instead of PHP.... (+)
 
 Todo: retest app logic, rls implementation + test again(all the time) + some polishment and then backup, docker socket proxy .... 
 + DOCCUMENTATION (in armenian)
+
+TODO DRAFT for business logic: all is ok in working hours graffic and slot generation, but in api, I have work hours, and it can be changed with save work hours and input of start end hours for each day, its fine, but I also want a small thing in admin like general work hours apply, or one thing taht apply for all days, or weekends? 
+so you can set days like its doen and hours and also with general like all 7 days mon-sat or sun, or where week ends and like option for general schedule time changer , so mon - fri(or sun or sat) start input as for one day and end as like in one day case.
+
+
+TODO: RLS and clean  up
+
