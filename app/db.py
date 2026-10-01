@@ -1,6 +1,7 @@
 import logging
 import os
 from datetime import date
+from pathlib import Path
 
 import psycopg2
 from fastapi.templating import Jinja2Templates
@@ -74,120 +75,23 @@ def seed_users():
     conn.close()
 
 
+def _schema_sql_path() -> Path:
+    here = Path(__file__).resolve().parent
+    candidates = (
+        here / "schema" / "init.sql",
+        here.parent / "db" / "init.sql",
+    )
+    for path in candidates:
+        if path.is_file():
+            return path
+    raise FileNotFoundError("db/init.sql is not available to ensure_schema")
+
+
 def ensure_schema():
+    sql = _schema_sql_path().read_text(encoding="utf-8")
     conn = db()
     cur = conn.cursor()
-    cur.execute(
-        """
-                ALTER TABLE users
-                ADD COLUMN IF NOT EXISTS blocked BOOLEAN NOT NULL DEFAULT FALSE;
-                CREATE TABLE IF NOT EXISTS doctors (
-                    id SERIAL PRIMARY KEY,
-                    user_id INTEGER UNIQUE REFERENCES users(id),
-                    full_name TEXT NOT NULL,
-                    specialty TEXT NOT NULL,
-                    experience_years INTEGER NOT NULL DEFAULT 0
-                );
-                CREATE TABLE IF NOT EXISTS slots (
-                    id SERIAL PRIMARY KEY,
-                    doctor_id INTEGER NOT NULL REFERENCES doctors(id),
-                    starts_at TIMESTAMP NOT NULL,
-                    ends_at TIMESTAMP NOT NULL
-                );
-                CREATE TABLE IF NOT EXISTS work_hours (
-                    id SERIAL PRIMARY KEY,
-                    doctor_id INTEGER NOT NULL REFERENCES doctors(id),
-                    weekday INTEGER NOT NULL CHECK (weekday BETWEEN 0 AND 6),
-                    start_time TIME NOT NULL,
-                    end_time TIME NOT NULL,
-                    slot_minutes INTEGER NOT NULL CHECK (slot_minutes > 0),
-                    UNIQUE (doctor_id, weekday)
-                );
-                CREATE TABLE IF NOT EXISTS time_off (
-                    id SERIAL PRIMARY KEY,
-                    doctor_id INTEGER NOT NULL REFERENCES doctors(id),
-                    starts_on DATE NOT NULL,
-                    ends_on DATE NOT NULL,
-                    CHECK (ends_on >= starts_on)
-                );
-                CREATE TABLE IF NOT EXISTS holidays (
-                    day DATE PRIMARY KEY,
-                    name TEXT NOT NULL
-                );
-                CREATE TABLE IF NOT EXISTS appointments (
-                    id SERIAL PRIMARY KEY,
-                    slot_id INTEGER NOT NULL REFERENCES slots(id),
-                    patient_user_id INTEGER NOT NULL REFERENCES users(id),
-                    status TEXT NOT NULL DEFAULT 'scheduled'
-                );
-                ALTER TABLE appointments DROP CONSTRAINT IF EXISTS appointments_slot_id_key;
-                DROP INDEX IF EXISTS appointments_slot_id_key;
-                CREATE UNIQUE INDEX IF NOT EXISTS appointments_one_scheduled_per_slot
-                    ON appointments (slot_id)
-                    WHERE status = 'scheduled';
-                CREATE EXTENSION IF NOT EXISTS btree_gist;
-                ALTER TABLE appointments
-                    ADD COLUMN IF NOT EXISTS doctor_id INTEGER REFERENCES doctors(id),
-                    ADD COLUMN IF NOT EXISTS starts_at TIMESTAMP,
-                    ADD COLUMN IF NOT EXISTS ends_at TIMESTAMP;
-                UPDATE appointments a
-                SET doctor_id = s.doctor_id,
-                    starts_at = s.starts_at,
-                    ends_at = s.ends_at
-                FROM slots s
-                WHERE s.id = a.slot_id
-                  AND (a.doctor_id IS NULL OR a.starts_at IS NULL OR a.ends_at IS NULL);
-                ALTER TABLE appointments
-                    ALTER COLUMN doctor_id SET NOT NULL,
-                    ALTER COLUMN starts_at SET NOT NULL,
-                    ALTER COLUMN ends_at SET NOT NULL;
-                ALTER TABLE appointments
-                    ADD COLUMN IF NOT EXISTS period tsrange
-                    GENERATED ALWAYS AS (tsrange(starts_at, ends_at, '[)')) STORED;
-                DO $$
-                BEGIN
-                    IF NOT EXISTS (
-                        SELECT 1 FROM pg_constraint
-                        WHERE conname = 'appointments_no_overlap_per_doctor'
-                          AND conrelid = 'appointments'::regclass
-                          AND contype = 'x'
-                    ) THEN
-                        ALTER TABLE appointments
-                            ADD CONSTRAINT appointments_no_overlap_per_doctor
-                            EXCLUDE USING gist (
-                                doctor_id WITH =,
-                                period WITH &&
-                            )
-                            WHERE (status = 'scheduled');
-                    END IF;
-                END
-                $$;
-                CREATE UNIQUE INDEX IF NOT EXISTS slots_doctor_start
-                    ON slots (doctor_id, starts_at);
-                CREATE UNIQUE INDEX IF NOT EXISTS time_off_doctor_period
-                    ON time_off (doctor_id, starts_on, ends_on);
-                ALTER TABLE slots
-                    ADD COLUMN IF NOT EXISTS time_range tsrange
-                    GENERATED ALWAYS AS (tsrange(starts_at, ends_at, '[)')) STORED;
-                DO $$
-                BEGIN
-                    IF NOT EXISTS (
-                        SELECT 1 FROM pg_constraint
-                        WHERE conname = 'slots_no_overlap_per_doctor'
-                          AND conrelid = 'slots'::regclass
-                          AND contype = 'x'
-                    ) THEN
-                        ALTER TABLE slots
-                            ADD CONSTRAINT slots_no_overlap_per_doctor
-                            EXCLUDE USING gist (
-                                doctor_id WITH =,
-                                time_range WITH &&
-                            );
-                    END IF;
-                END
-                $$;
-                """
-        )
+    cur.execute(sql)
     conn.commit()
     cur.close()
     conn.close()
@@ -203,28 +107,12 @@ def seed_clinic():
         cur.execute("SELECT id FROM users WHERE email=%s", ("doc2@clinic.local",))
         d2 = cur.fetchone()[0]
         cur.execute(
-            "INSERT INTO doctors (user_id, full_name, specialty, experience_years) VALUES (%s,%s,%s,%s) RETURNING id",
+            "INSERT INTO doctors (user_id, full_name, specialty, experience_years) VALUES (%s,%s,%s,%s)",
             (d1, "Anna Ohanyan", "Therapist", 8),
         )
-        id1 = cur.fetchone()[0]
         cur.execute(
-            "INSERT INTO doctors (user_id, full_name, specialty, experience_years) VALUES (%s,%s,%s,%s) RETURNING id",
+            "INSERT INTO doctors (user_id, full_name, specialty, experience_years) VALUES (%s,%s,%s,%s)",
             (d2, "Levon Petrosyan", "Dentist", 5),
-        )
-        id2 = cur.fetchone()[0]
-        cur.execute(
-            """
-            INSERT INTO slots (doctor_id, starts_at, ends_at) VALUES
-            (%s, '2026-10-01 09:00', '2026-10-01 09:30'),
-            (%s, '2026-10-01 10:00', '2026-10-01 10:30'),
-            (%s, '2026-10-01 11:00', '2026-10-01 11:30'),
-            (%s, '2026-10-02 09:00', '2026-10-02 09:30'),
-            (%s, '2026-10-01 09:00', '2026-10-01 09:30'),
-            (%s, '2026-10-01 10:00', '2026-10-01 10:30'),
-            (%s, '2026-10-03 10:00', '2026-10-03 11:00'),
-            (%s, '2026-10-03 10:30', '2026-10-03 11:30')
-            """,
-            (id1, id1, id1, id1, id2, id2, id1, id2),
         )
         conn.commit()
 
@@ -285,7 +173,108 @@ def seed_work_schedule():
         """,
         (date(2026, 11, 26), "Thanksgiving"),
     )
+    seed_future_slots(cur)
     conn.commit()
     cur.close()
     conn.close()
+
+
+def seed_future_slots(cur):
+   
+    cur.execute(
+        """
+        WITH clock AS (
+            SELECT (CURRENT_TIMESTAMP AT TIME ZONE 'UTC') AS now_utc
+        ),
+        horizon AS (
+            SELECT ((SELECT now_utc FROM clock)::date + n) AS day
+            FROM generate_series(0, 21) AS n
+        ),
+        windows AS (
+            SELECT d.id AS doctor_id,
+                   h.day,
+                   (h.day + w.start_time) AS window_start,
+                   (h.day + w.end_time) AS window_end,
+                   w.slot_minutes
+            FROM doctors d
+            JOIN horizon h ON true
+            JOIN work_hours w
+              ON w.doctor_id = d.id
+             AND w.weekday = (EXTRACT(ISODOW FROM h.day)::int - 1)
+            WHERE w.end_time > w.start_time
+              AND NOT EXISTS (SELECT 1 FROM holidays hol WHERE hol.day = h.day)
+              AND NOT EXISTS (
+                  SELECT 1 FROM time_off t
+                  WHERE t.doctor_id = d.id
+                    AND h.day BETWEEN t.starts_on AND t.ends_on
+              )
+        ),
+        grid AS (
+            SELECT w.doctor_id,
+                   gs AS starts_at,
+                   gs + make_interval(mins => w.slot_minutes) AS ends_at
+            FROM windows w
+            JOIN clock c ON true
+            CROSS JOIN LATERAL generate_series(
+                w.window_start,
+                w.window_end - make_interval(mins => w.slot_minutes),
+                make_interval(mins => w.slot_minutes)
+            ) AS gs
+            WHERE gs > c.now_utc
+        ),
+        shared_starts AS (
+            SELECT starts_at, ends_at
+            FROM grid
+            GROUP BY starts_at, ends_at
+            HAVING count(DISTINCT doctor_id) = (SELECT count(*) FROM doctors)
+        ),
+        shared_limited AS (
+            SELECT g.doctor_id, g.starts_at, g.ends_at
+            FROM grid g
+            WHERE (g.starts_at, g.ends_at) IN (
+                SELECT starts_at, ends_at
+                FROM shared_starts
+                ORDER BY starts_at
+                LIMIT 4
+            )
+        ),
+        extras AS (
+            SELECT g.doctor_id, g.starts_at, g.ends_at
+            FROM grid g
+            WHERE (
+                NOT EXISTS (SELECT 1 FROM shared_starts)
+                OR g.starts_at >= (SELECT min(starts_at) FROM shared_starts)
+            )
+              AND NOT EXISTS (
+                  SELECT 1 FROM shared_limited s
+                  WHERE s.doctor_id = g.doctor_id
+                    AND g.starts_at < s.ends_at
+                    AND g.ends_at > s.starts_at
+              )
+        ),
+        extras_limited AS (
+            SELECT doctor_id, starts_at, ends_at
+            FROM (
+                SELECT e.doctor_id, e.starts_at, e.ends_at,
+                       row_number() OVER (PARTITION BY e.doctor_id ORDER BY e.starts_at) AS n
+                FROM extras e
+            ) ranked
+            WHERE n <= 2
+        ),
+        planned AS (
+            SELECT doctor_id, starts_at, ends_at FROM shared_limited
+            UNION
+            SELECT doctor_id, starts_at, ends_at FROM extras_limited
+        )
+        INSERT INTO slots (doctor_id, starts_at, ends_at)
+        SELECT p.doctor_id, p.starts_at, p.ends_at
+        FROM planned p
+        WHERE NOT EXISTS (
+            SELECT 1 FROM slots s
+            WHERE s.doctor_id = p.doctor_id
+              AND s.starts_at > (CURRENT_TIMESTAMP AT TIME ZONE 'UTC')
+        )
+        ON CONFLICT (doctor_id, starts_at) DO NOTHING
+        """
+    )
 

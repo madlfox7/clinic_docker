@@ -7,6 +7,7 @@ RUN useradd --system --uid 10001 app
 COPY app/requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 COPY --chown=app:app app/ .
+COPY --chown=app:app db/init.sql /app/schema/init.sql
 
 EXPOSE 8000
 USER app
