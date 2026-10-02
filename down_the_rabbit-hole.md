@@ -166,7 +166,7 @@ python3 experiments/concurrent_book.py 2 50
 - `appointments_one_scheduled_per_slot` гарантирует не более одной активной записи на один `slot_id`.
 - `slots_no_overlap_per_doctor` — PostgreSQL `EXCLUDE USING gist` по `doctor_id` и generated `time_range`; два слота одного врача не могут пересекаться.
 - Диапазон слота полуоткрытый (`[)`) — начало включено, конец исключён, поэтому соседние визиты встык разрешены.
-- Overlap одного пациента между слотами разных врачей по-прежнему проверяется в Python в `book_slot()`.
+- `appointments_no_overlap_per_patient` — `EXCLUDE USING gist` по `patient_user_id` и `period` для `status = 'scheduled'`. Пересечение одного пациента у разных врачей отклоняется базой, даже если Python-проверка в `book_slot()` не сработала.
 
 Результаты одновременного бронирования одного свободного slot `2` (Anna, 2026-10-01 10:00), дата проверки — 2026-09-27:
 
@@ -411,7 +411,7 @@ AND existing.ends_at > requested.starts_at
 
 Проверяются только записи со статусом `scheduled`. Отменённая запись не блокирует новое время.
 
-Python-overlap пациента остаётся отдельным правилом: один пациент не может записаться на пересекающиеся интервалы у разных врачей. Exclusion constraint ограничивает только расписание одного врача, а partial unique index — две живые записи на один slot_id.
+Python-проверка overlap в `book_slot()` остаётся и по-прежнему возвращает `error=overlap`. Если её обойти, `appointments_no_overlap_per_patient` отклоняет вторую scheduled-запись того же пациента. `ExclusionViolation` этого constraint показывается как `error=overlap`, остальные exclusion/unique — как `unavailable`, без 500. Сессия хранит `user_id`; роль и `blocked` на защищённых маршрутах читаются из `users`, а не из cookie.
 
 Важно: после отмены слот считается свободным немедленно. Проверки доступности и списка слотов исключают записи со статусом `cancelled`, поэтому другой пациент может забронировать тот же слот после успешной отмены, не встречая ложного `unavailable` или `taken` статуса.
 

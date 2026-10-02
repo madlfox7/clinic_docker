@@ -7,13 +7,19 @@ from fastapi import APIRouter, Form, Request
 from fastapi.responses import RedirectResponse
 
 from db import MAX_SLOT_MINUTES, MAX_TEXT_LENGTH, db, parse_strict_int, templates, within_length
+from routes_auth import require_user
+
+
+
+
 
 router = APIRouter()
 
 @router.get("/admin/users")
 def admin_users(request: Request):
-    if request.session.get("role") != "admin":
-        return RedirectResponse("/login", status_code=303)
+    admin_user, denied = require_user(request, "admin")
+    if denied:
+        return denied
     conn = db()
     cur = conn.cursor()
     cur.execute(
@@ -140,8 +146,9 @@ def _close_slots_for_period(cur, starts_on: date, ends_on: date, doctor_id=None)
 
 @router.get("/admin/schedule")
 def admin_schedule(request: Request):
-    if request.session.get("role") != "admin":
-        return RedirectResponse("/login", status_code=303)
+    admin_user, denied = require_user(request, "admin")
+    if denied:
+        return denied
     conn = db()
     cur = conn.cursor()
     cur.execute("SELECT id, full_name FROM doctors ORDER BY full_name")
@@ -201,7 +208,7 @@ def admin_schedule(request: Request):
         "admin_schedule.html",
         {
             "request": request,
-            "role": request.session.get("role") or "guest",
+            "role": admin_user["role"],
             "doctors": doctors,
             "work_hours": work_hours,
             "time_off": time_off,
@@ -229,8 +236,9 @@ def admin_save_work_hours_bulk(
     end_time: datetime_time = Form(...),
     slot_minutes: str = Form(...),
 ):
-    if request.session.get("role") != "admin":
-        return RedirectResponse("/login", status_code=303)
+    admin_user, denied = require_user(request, "admin")
+    if denied:
+        return denied
     parsed_doctor_id = parse_strict_int(doctor_id, min_value=1)
     parsed_slot_minutes = parse_strict_int(slot_minutes, min_value=1, max_value=MAX_SLOT_MINUTES)
     if parsed_doctor_id is None or parsed_slot_minutes is None:
@@ -271,8 +279,9 @@ def admin_save_work_hours_bulk(
 
 @router.post("/admin/doctors/{doctor_id}/apply-hours")
 def admin_apply_hours(request: Request, doctor_id: str):
-    if request.session.get("role") != "admin":
-        return RedirectResponse("/login", status_code=303)
+    admin_user, denied = require_user(request, "admin")
+    if denied:
+        return denied
     doctor_id = parse_strict_int(doctor_id, min_value=1)
     if doctor_id is None:
         return RedirectResponse("/admin/schedule?error=doctor_not_found", status_code=303)
@@ -302,8 +311,9 @@ def admin_add_time_off(
     starts_on: date = Form(...),
     ends_on: date = Form(...),
 ):
-    if request.session.get("role") != "admin":
-        return RedirectResponse("/login", status_code=303)
+    admin_user, denied = require_user(request, "admin")
+    if denied:
+        return denied
     doctor_id = parse_strict_int(doctor_id, min_value=1)
     if doctor_id is None:
         return RedirectResponse("/admin/schedule?error=doctor_not_found", status_code=303)
@@ -344,8 +354,9 @@ def admin_save_holiday(
     holiday_day: date = Form(...),
     name: str = Form(...),
 ):
-    if request.session.get("role") != "admin":
-        return RedirectResponse("/login", status_code=303)
+    admin_user, denied = require_user(request, "admin")
+    if denied:
+        return denied
     holiday_name = name.strip()
     if not holiday_name:
         return RedirectResponse("/admin/schedule?error=holiday_name_required", status_code=303)
@@ -382,8 +393,9 @@ def generate_doctor_slots(
     from_date: date = Form(...),
     to_date: date = Form(...),
 ):
-    if request.session.get("role") != "admin":
-        return RedirectResponse("/login", status_code=303)
+    admin_user, denied = require_user(request, "admin")
+    if denied:
+        return denied
     doctor_id = parse_strict_int(doctor_id, min_value=1)
     if doctor_id is None:
         return RedirectResponse("/admin/schedule?error=doctor_not_found", status_code=303)
@@ -483,8 +495,9 @@ def generate_doctor_slots(
 
 @router.post("/admin/users/{user_id}/block")
 def block_user(request: Request, user_id: str):
-    if request.session.get("role") != "admin":
-        return RedirectResponse("/login", status_code=303)
+    admin_user, denied = require_user(request, "admin")
+    if denied:
+        return denied
     user_id = parse_strict_int(user_id, min_value=1)
     if user_id is None:
         return RedirectResponse("/admin/users", status_code=303)
@@ -502,8 +515,9 @@ def block_user(request: Request, user_id: str):
 
 @router.post("/admin/users/{user_id}/unblock")
 def unblock_user(request: Request, user_id: str):
-    if request.session.get("role") != "admin":
-        return RedirectResponse("/login", status_code=303)
+    admin_user, denied = require_user(request, "admin")
+    if denied:
+        return denied
     user_id = parse_strict_int(user_id, min_value=1)
     if user_id is None:
         return RedirectResponse("/admin/users", status_code=303)
@@ -521,8 +535,9 @@ def unblock_user(request: Request, user_id: str):
 
 @router.post("/admin/users/{user_id}/cancel-future-appointments")
 def cancel_future_appointments(request: Request, user_id: str):
-    if request.session.get("role") != "admin":
-        return RedirectResponse("/login", status_code=303)
+    admin_user, denied = require_user(request, "admin")
+    if denied:
+        return denied
     user_id = parse_strict_int(user_id, min_value=1)
     if user_id is None:
         return RedirectResponse("/admin/users", status_code=303)

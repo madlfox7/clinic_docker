@@ -257,7 +257,12 @@ def test_admin_can_cancel_future_appointments_separately_from_block():
 			user_id = block_match.group(1)
 			admin.post(f"/admin/users/{user_id}/block")
 
-			assert appointment_id in appointment_ids(pat.get("/my").text)
+			blocked_page = pat.get("/my")
+			assert blocked_page.status_code == 403
+			assert "Account is blocked" in blocked_page.text
+			assert psql(
+				f"SELECT status FROM appointments WHERE id = {int(appointment_id)}"
+			) == "scheduled"
 			doctor_schedule = doc.get("/doctor/appointments").text
 			assert PAT in doctor_schedule
 			assert "scheduled, account blocked" in doctor_schedule
@@ -276,12 +281,19 @@ def test_admin_can_cancel_future_appointments_separately_from_block():
 				f"/admin/users/{user_id}/cancel-future-appointments"
 			)
 			assert "future_cancelled=1" in str(cancelled.url)
+			assert psql(
+				f"SELECT status FROM appointments WHERE id = {int(appointment_id)}"
+			) == "cancelled"
+			admin.post(f"/admin/users/{user_id}/unblock")
+			login(pat, PAT)
 			assert appointment_id not in appointment_ids(pat.get("/my").text)
 			assert "(cancelled)" in pat.get("/my").text
 			assert "/admin/users" in cancelled.url.path
 		finally:
 			if user_id:
 				admin.post(f"/admin/users/{user_id}/unblock")
+			psql("UPDATE users SET blocked = FALSE WHERE email = 'pat@clinic.local'")
+			login(pat, PAT)
 			if appointment_id in appointment_ids(pat.get("/my").text):
 				pat.post(f"/appointments/{appointment_id}/cancel")
 
@@ -629,3 +641,136 @@ def test_apply_hours_removes_free_slots_outside_window_only():
 				ON CONFLICT (doctor_id, starts_at) DO NOTHING
 				"""
 			)
+
+
+def test_patient_overlap_rejected_by_exclusion_without_python_select():
+	"""Same patient, overlapping slots at two doctors, rejected by the DB constraint.
+
+	The insert goes straight to PostgreSQL, so it still fails if the Python
+	SELECT overlap check in book_slot() is removed.
+	"""
+	psql(
+		"""
+		DO $$
+		DECLARE
+			anna_id INTEGER;
+			levon_id INTEGER;
+			patient_id INTEGER;
+			anna_slot_id INTEGER;
+			levon_slot_id INTEGER;
+			rejected_constraint TEXT;
+		BEGIN
+			SELECT id INTO anna_id FROM doctors WHERE full_name = 'Anna Ohanyan';
+			SELECT id INTO levon_id FROM doctors WHERE full_name = 'Levon Petrosyan';
+			SELECT id INTO patient_id FROM users WHERE email = 'pat@clinic.local';
+
+			INSERT INTO slots (doctor_id, starts_at, ends_at)
+			VALUES (anna_id, '2036-04-07 10:00', '2036-04-07 11:00')
+			RETURNING id INTO anna_slot_id;
+			INSERT INTO slots (doctor_id, starts_at, ends_at)
+			VALUES (levon_id, '2036-04-07 10:30', '2036-04-07 11:30')
+			RETURNING id INTO levon_slot_id;
+
+			INSERT INTO appointments
+				(slot_id, patient_user_id, doctor_id, starts_at, ends_at, status)
+			VALUES
+				(anna_slot_id, patient_id, anna_id,
+				 '2036-04-07 10:00', '2036-04-07 11:00', 'scheduled');
+
+			BEGIN
+				INSERT INTO appointments
+					(slot_id, patient_user_id, doctor_id, starts_at, ends_at, status)
+				VALUES
+					(levon_slot_id, patient_id, levon_id,
+					 '2036-04-07 10:30', '2036-04-07 11:30', 'scheduled');
+				RAISE EXCEPTION 'overlapping patient appointment was accepted';
+			EXCEPTION WHEN exclusion_violation THEN
+				GET STACKED DIAGNOSTICS rejected_constraint = CONSTRAINT_NAME;
+				IF rejected_constraint <> 'appointments_no_overlap_per_patient' THEN
+					RAISE EXCEPTION 'expected appointments_no_overlap_per_patient, got %', rejected_constraint;
+				END IF;
+			END;
+
+			DELETE FROM appointments
+			WHERE slot_id IN (anna_slot_id, levon_slot_id);
+			DELETE FROM slots
+			WHERE id IN (anna_slot_id, levon_slot_id);
+		END
+		$$;
+		"""
+	)
+
+	anna_slot = psql(
+		"""
+		INSERT INTO slots (doctor_id, starts_at, ends_at)
+		SELECT id, TIMESTAMP '2036-05-05 10:00', TIMESTAMP '2036-05-05 11:00'
+		FROM doctors WHERE full_name = 'Anna Ohanyan'
+		RETURNING id
+		"""
+	)
+	levon_slot = psql(
+		"""
+		INSERT INTO slots (doctor_id, starts_at, ends_at)
+		SELECT id, TIMESTAMP '2036-05-05 10:30', TIMESTAMP '2036-05-05 11:30'
+		FROM doctors WHERE full_name = 'Levon Petrosyan'
+		RETURNING id
+		"""
+	)
+	try:
+		with client() as pat:
+			login(pat, PAT)
+			first = pat.post(f"/slots/{int(anna_slot)}/book")
+			assert first.status_code == 200
+			assert first.status_code != 500
+			second = pat.post(f"/slots/{int(levon_slot)}/book")
+			assert second.status_code != 500
+			page = str(second.url) + second.text.lower()
+			assert "overlap" in page or "unavailable" in page
+			assert psql(
+				f"""
+				SELECT count(*)
+				FROM appointments
+				WHERE slot_id IN ({int(anna_slot)}, {int(levon_slot)})
+				  AND status = 'scheduled'
+				"""
+			) == "1"
+	finally:
+		psql(
+			f"""
+			DELETE FROM appointments
+			WHERE slot_id IN ({int(anna_slot)}, {int(levon_slot)});
+			DELETE FROM slots
+			WHERE id IN ({int(anna_slot)}, {int(levon_slot)});
+			"""
+		)
+
+
+def test_session_role_and_block_come_from_database():
+	with client() as pat:
+		login(pat, PAT)
+		me = pat.get("/me")
+		assert "Role: patient" in me.text
+		psql("UPDATE users SET role = 'admin' WHERE email = 'pat@clinic.local'")
+		try:
+			me = pat.get("/me")
+			assert "Role: admin" in me.text
+			assert "Role: patient" not in me.text
+			admin_page = pat.get("/admin/users")
+			assert admin_page.status_code == 200
+			assert "Manage patients" in admin_page.text
+			mine = pat.get("/my")
+			assert "/login" in str(mine.url)
+		finally:
+			psql("UPDATE users SET role = 'patient' WHERE email = 'pat@clinic.local'")
+
+		psql("UPDATE users SET blocked = TRUE WHERE email = 'pat@clinic.local'")
+		try:
+			blocked = pat.get("/my")
+			assert blocked.status_code == 403
+			assert "Account is blocked" in blocked.text
+			assert "Role: patient" not in blocked.text
+			again = pat.post("/slots/1/book")
+			assert again.status_code != 500
+			assert "/login" in str(again.url) or again.status_code == 403
+		finally:
+			psql("UPDATE users SET blocked = FALSE, role = 'patient' WHERE email = 'pat@clinic.local'")

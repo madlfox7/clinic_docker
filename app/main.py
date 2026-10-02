@@ -8,7 +8,13 @@ from routes_admin import router as admin_router
 from routes_auth import router as auth_router
 from routes_booking import router as booking_router
 
+
+
 SESSION_SECRET = os.environ.get("SESSION_SECRET", "dev-secret-change-me")
+
+
+
+
 
 app = FastAPI()
 app.add_middleware(SessionMiddleware, secret_key=SESSION_SECRET)

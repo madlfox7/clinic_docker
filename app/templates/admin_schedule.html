@@ -1,15 +1,31 @@
 {% extends "base.html" %}
 {% block content %}
+
+
 <h1>Schedule management</h1>
 <p><a href="/admin/users">Manage patients</a></p>
-{% if saved == "work-hours-bulk" %}<p>Work hours saved for the selected days. Free slots outside the new hours are not removed until you apply the schedule.</p>{% endif %}
-{% if saved == "time-off" %}<p>Time off saved.</p>{% endif %}
-{% if saved == "holiday" %}<p>Holiday saved.</p>{% endif %}
-{% if saved == "apply-hours" %}<p>Applied schedule. Removed {{ hours_report.removed_slots if hours_report else 0 }} free slots outside work hours. Scheduled visits were not cancelled.</p>{% endif %}
-{% if visit_cancelled == "1" %}<p>Appointment cancelled. The closed date remains unavailable.</p>{% endif %}
-{% if generated is not none %}<p>Created {{ generated }} slots, skipped {{ skipped }}.</p>{% endif %}
+
+<!-- Success checks & msgs -->
+{% if saved == "work-hours-bulk" %}
+<p>Work hours saved for the selected days. Free slots outside the new hours are not removed until 
+  you apply the schedule.</p>{% endif %}
+{% if saved == "time-off" %}
+<p>Time off saved.</p>{% endif %}
+{% if saved == "holiday" %}
+<p>Holiday saved.</p>{% endif %}
+{% if saved == "apply-hours" %}
+<p>Applied schedule. Removed {{ hours_report.removed_slots if hours_report else 0 }} free slots outside work hours.
+   Scheduled visits were not cancelled.</p>{% endif %}
+{% if visit_cancelled == "1" %}
+<p>Appointment cancelled. The closed date remains unavailable.</p>{% endif %}
+{% if generated is not none %}
+<p>Created {{ generated }} slots, skipped {{ skipped }}.</p>{% endif %}
 {% if closure_report %}
-  <p>Removed {{ closure_report.removed_slots }} free slots in the closed period. Scheduled visits were not cancelled.</p>
+
+
+
+  <p>Removed {{ closure_report.removed_slots }} free slots in the closed period. 
+    Scheduled visits were not cancelled.</p>
 {% endif %}
 <section>
   <h2>Needs manual cancellation</h2>
@@ -48,6 +64,8 @@
   {% else %}
     <p>No scheduled visits outside work hours.</p>
   {% endif %}
+
+  <!-- error msgs -->
 </section>
 {% if error == "invalid_range" %}<p>Choose a valid date range of no more than 90 days.</p>
 {% elif error == "invalid_work_hours" %}<p>Choose valid working hours.</p>
@@ -58,6 +76,8 @@
 {% elif error == "invalid_id" %}<p>Enter a valid whole number.</p>
 {% elif error == "text_too_long" %}<p>That text is too long.</p>{% endif %}
 
+
+<!-- graphic -->
 <h2>Weekly work hours</h2>
 <table>
   <thead><tr><th>Doctor</th><th>Weekday</th><th>Start</th><th>End</th><th>Slot minutes</th></tr></thead>
@@ -135,7 +155,8 @@
 
 <h2>Generate slots</h2>
 <p>Seed slots for 1–3 October are separate from this generator and are not rebuilt here.</p>
-<p>Monday is weekday 0. Existing slots, holidays, time off and past intervals are skipped. Past uses the database clock, not the container clock.</p>
+<p>Monday is weekday 0. Existing slots, holidays, time off and past intervals are skipped.
+     Past uses the database clock, not the container clock.</p>
 {% for doctor in doctors %}
   <form method="post" action="/admin/doctors/{{ doctor.id }}/generate">
     <strong>{{ doctor.full_name }}</strong>

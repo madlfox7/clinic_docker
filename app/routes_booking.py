@@ -3,14 +3,34 @@ from fastapi import APIRouter, Form, Request
 from fastapi.responses import RedirectResponse
 
 from db import MAX_EMAIL_LENGTH, db, log, parse_strict_int, templates, within_length
+from routes_auth import require_user
+
+
+
+
 
 router = APIRouter()
 
+
+def _overlap_redirect(doctor_id, patient_id, conflict_id):
+    if conflict_id:
+        return RedirectResponse(
+            f"/doctors/{doctor_id}/slots?error=overlap&conflict_appointment_id={conflict_id}&conflict_patient_id={patient_id}",
+            status_code=303,
+        )
+    return RedirectResponse(
+        f"/doctors/{doctor_id}/slots?error=overlap&conflict_patient_id={patient_id}",
+        status_code=303,
+    )
+
+
 @router.get("/doctors/{doctor_id}/slots")
 def doctor_slots(request: Request, doctor_id: str):
-    role = request.session.get("role")
-    if role not in ("patient", "registrar"):
-        return RedirectResponse("/login", status_code=303)
+    user, denied = require_user(request, "patient", "registrar")
+    if denied:
+        return denied
+    role = user["role"]
+    email = user["email"]
     doctor_id = parse_strict_int(doctor_id, min_value=1)
     if doctor_id is None:
         return RedirectResponse("/doctors", status_code=303)
@@ -24,7 +44,6 @@ def doctor_slots(request: Request, doctor_id: str):
     cur.execute("SELECT id, full_name FROM doctors WHERE id=%s", (doctor_id,))
     doc = cur.fetchone()
     conflict_appointment_id = request.query_params.get("conflict_appointment_id")
-    email = request.session.get("email")
     conflict_patient_id = request.query_params.get("conflict_patient_id")
     if error == "overlap" and conflict_appointment_id and role == "patient" and email:
         cur.execute(
@@ -146,17 +165,18 @@ def doctor_slots(request: Request, doctor_id: str):
             "cancelled": cancelled,
             "cancel_error": cancel_error,
             "conflict": conflict,
-            "role": role or "guest",
+            "role": role,
         },
     )
 
 
 @router.post("/slots/{slot_id}/book")
 def book_slot(request: Request, slot_id: str, patient_email: str = Form(None)):
-    email = request.session.get("email")
-    role = request.session.get("role")
-    if role not in ("patient", "registrar") or not email:
-        return RedirectResponse("/login", status_code=303)
+    user, denied = require_user(request, "patient", "registrar")
+    if denied:
+        return denied
+    email = user["email"]
+    role = user["role"]
     slot_id = parse_strict_int(slot_id, min_value=1)
     if slot_id is None:
         return RedirectResponse("/doctors", status_code=303)
@@ -249,10 +269,7 @@ def book_slot(request: Request, slot_id: str, patient_email: str = Form(None)):
     if conflict_row:
         cur.close()
         conn.close()
-        return RedirectResponse(
-            f"/doctors/{doctor_id}/slots?error=overlap&conflict_appointment_id={conflict_row[0]}&conflict_patient_id={patient_id}",
-            status_code=303,
-        )
+        return _overlap_redirect(doctor_id, patient_id, conflict_row[0])
 
     try:
         cur.execute(
@@ -268,10 +285,37 @@ def book_slot(request: Request, slot_id: str, patient_email: str = Form(None)):
             (patient_id, slot_id),
         )
         conn.commit()
-    except (psycopg2.errors.UniqueViolation, psycopg2.errors.ExclusionViolation):
+    except psycopg2.errors.UniqueViolation:
         conn.rollback()
         cur.close()
         conn.close()
+        return RedirectResponse(f"/doctors/{doctor_id}/slots?error=unavailable", status_code=303)
+    except psycopg2.errors.ExclusionViolation as exc:
+        conn.rollback()
+        constraint = exc.diag.constraint_name if exc.diag is not None else None
+        conflict_id = None
+        if constraint == "appointments_no_overlap_per_patient":
+            try:
+                cur.execute(
+                    """
+                    SELECT a.id
+                    FROM appointments a
+                    WHERE a.patient_user_id = %s
+                      AND a.status = 'scheduled'
+                      AND a.starts_at < %s
+                      AND a.ends_at > %s
+                    """,
+                    (patient_id, ends_at, starts_at),
+                )
+                row = cur.fetchone()
+                conflict_id = row[0] if row else None
+            except Exception:
+                log.exception("could not load patient overlap for slot %s", slot_id)
+                conn.rollback()
+        cur.close()
+        conn.close()
+        if constraint == "appointments_no_overlap_per_patient":
+            return _overlap_redirect(doctor_id, patient_id, conflict_id)
         return RedirectResponse(f"/doctors/{doctor_id}/slots?error=unavailable", status_code=303)
     except Exception:
         log.exception("could not book slot %s", slot_id)
@@ -288,10 +332,11 @@ def book_slot(request: Request, slot_id: str, patient_email: str = Form(None)):
 
 @router.post("/appointments/{appointment_id}/cancel")
 def cancel_appointment(request: Request, appointment_id: str):
-    email = request.session.get("email")
-    role = request.session.get("role")
-    if role not in ("patient", "registrar", "admin") or not email:
-        return RedirectResponse("/login", status_code=303)
+    user, denied = require_user(request, "patient", "registrar", "admin")
+    if denied:
+        return denied
+    email = user["email"]
+    role = user["role"]
     appointment_id = parse_strict_int(appointment_id, min_value=1)
     if appointment_id is None:
         if role == "patient":
@@ -367,10 +412,11 @@ def cancel_appointment(request: Request, appointment_id: str):
 
 @router.get("/my")
 def my_appointments(request: Request):
-    email = request.session.get("email")
-    role = request.session.get("role")
-    if role != "patient" or not email:
-        return RedirectResponse("/login", status_code=303)
+    user, denied = require_user(request, "patient")
+    if denied:
+        return denied
+    email = user["email"]
+    role = user["role"]
     cancelled = request.query_params.get("cancelled")
     cancel_error = request.query_params.get("cancel_error")
     conn = db()
@@ -406,7 +452,7 @@ def my_appointments(request: Request):
         {
             "request": request,
             "items": items,
-            "role": role or "guest",
+            "role": role,
             "cancelled": cancelled,
             "cancel_error": cancel_error,
         },
@@ -415,10 +461,11 @@ def my_appointments(request: Request):
 
 @router.get("/doctor/appointments")
 def doctor_appointments(request: Request):
-    email = request.session.get("email")
-    role = request.session.get("role")
-    if role != "doctor" or not email:
-        return RedirectResponse("/login", status_code=303)
+    user, denied = require_user(request, "doctor")
+    if denied:
+        return denied
+    email = user["email"]
+    role = user["role"]
     conn = db()
     cur = conn.cursor()
     cur.execute(
@@ -448,6 +495,5 @@ def doctor_appointments(request: Request):
     conn.close()
     return templates.TemplateResponse(
         "doctor_appointments.html",
-        {"request": request, "items": items, "role": role or "guest"},
+        {"request": request, "items": items, "role": role},
     )
-

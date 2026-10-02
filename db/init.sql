@@ -7,6 +7,7 @@ CREATE TABLE IF NOT EXISTS users (
   blocked BOOLEAN NOT NULL DEFAULT FALSE
 );
 
+
 ALTER TABLE users
 ADD COLUMN IF NOT EXISTS blocked BOOLEAN NOT NULL DEFAULT FALSE;
 
@@ -114,6 +115,25 @@ BEGIN
 END
 $$;
 
+DO $$
+BEGIN
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_constraint
+    WHERE conname = 'appointments_no_overlap_per_patient'
+      AND conrelid = 'appointments'::regclass
+      AND contype = 'x'
+  ) THEN
+    ALTER TABLE appointments
+      ADD CONSTRAINT appointments_no_overlap_per_patient
+      EXCLUDE USING gist (
+        patient_user_id WITH =,
+        period WITH &&
+      )
+      WHERE (status = 'scheduled');
+  END IF;
+END
+$$;
+
 ALTER TABLE slots
   ADD COLUMN IF NOT EXISTS time_range tsrange
   GENERATED ALWAYS AS (tsrange(starts_at, ends_at, '[)')) STORED;
@@ -135,3 +155,4 @@ BEGIN
   END IF;
 END
 $$;
+

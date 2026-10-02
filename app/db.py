@@ -7,6 +7,9 @@ import psycopg2
 from fastapi.templating import Jinja2Templates
 from passlib.context import CryptContext
 
+
+
+
 DATABASE_URL = os.environ["DATABASE_URL"]
 pwd = CryptContext(schemes=["bcrypt"], deprecated="auto")
 log = logging.getLogger("clinic")
@@ -16,7 +19,7 @@ PG_INT_MIN = -2_147_483_648
 PG_INT_MAX = 2_147_483_647
 MAX_SLOT_MINUTES = 24 * 60
 MAX_EMAIL_LENGTH = 254
-MAX_PASSWORD_LENGTH = 72  # bcrypt only hashes the first 72 bytes and raises past that
+MAX_PASSWORD_LENGTH = 72  # hashes <=72 bytes, other bytes ignored
 MAX_TEXT_LENGTH = 200
 
 
@@ -24,6 +27,7 @@ def within_length(raw, max_length: int) -> bool:
     """Reject non-str or input whose UTF-8 byte length exceeds max_length, so oversized
     payloads (10-50KB manual input) never reach bcrypt or the database unbounded."""
     return isinstance(raw, str) and len(raw.encode("utf-8")) <= max_length
+
 
 
 def parse_strict_int(raw, min_value: int = PG_INT_MIN, max_value: int = PG_INT_MAX):
@@ -58,6 +62,51 @@ SEED_USERS = [
 
 def db():
     return psycopg2.connect(DATABASE_URL)
+
+#
+def load_session_user(request):
+    """Re-read id, email, role and blocked from users.
+
+    The signed cookie is only a user id. Role is never taken from the session.
+    Returns (user, status): status is 'ok', 'anonymous', 'missing', or 'blocked'.
+    A missing or blocked account clears the session.
+    """
+    raw_id = request.session.get("user_id")
+    has_auth_cookie = (
+        raw_id is not None
+        or request.session.get("email")
+        or request.session.get("role")
+    )
+    if type(raw_id) is not int or raw_id < 1:
+        if has_auth_cookie:
+            request.session.clear()
+            return None, "missing"
+        return None, "anonymous"
+    conn = db()
+    try:
+        cur = conn.cursor()
+        cur.execute(
+            "SELECT id, email, role, blocked FROM users WHERE id=%s",
+            (raw_id,),
+        )
+        row = cur.fetchone()
+        cur.close()
+    finally:
+        conn.close()
+    if not row:
+        request.session.clear()
+        return None, "missing"
+    if row[3]:
+        request.session.clear()
+        return None, "blocked"
+    request.session.pop("role", None)
+    request.session["email"] = row[1]
+    return {
+        "id": row[0],
+        "email": row[1],
+        "role": row[2],
+        "blocked": False,
+    }, "ok"
 
 
 def seed_users():
@@ -115,7 +164,6 @@ def seed_clinic():
             (d2, "Levon Petrosyan", "Dentist", 5),
         )
         conn.commit()
-
     cur.close()
     conn.close()
 
@@ -177,6 +225,9 @@ def seed_work_schedule():
     conn.commit()
     cur.close()
     conn.close()
+
+
+
 
 
 def seed_future_slots(cur):

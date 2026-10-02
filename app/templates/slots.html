@@ -1,7 +1,11 @@
 {% extends "base.html" %}
 {% block content %}
+
+
 <h1>Slots: {{ doctor.full_name }}</h1>
 {% if error == "overlap" %}
+
+<!-- Booking checks & error msgs -->
   <script>
     window.alert("Your appointment times overlap.");
   </script>
@@ -11,6 +15,8 @@
     <p>Cause: appointment times overlap.</p>
   {% endif %}
 {% elif error == "unavailable" %}
+
+
   <script>
     window.alert("This slot is no longer available. Please choose another slot.");
   </script>
