@@ -5,6 +5,13 @@ from pathlib import Path
 import httpx
 import pytest
 
+from tests.clinical_notes import (
+	NOTE_DOCTOR1_PATIENT_A,
+	NOTE_DOCTOR2_PATIENT_B,
+	cleanup_cross_doctor_notes,
+	insert_cross_doctor_notes,
+)
+
 ROOT = Path(__file__).resolve().parents[1]
 
 BASE = "http://localhost:8080"
@@ -774,3 +781,117 @@ def test_session_role_and_block_come_from_database():
 			assert "/login" in str(again.url) or again.status_code == 403
 		finally:
 			psql("UPDATE users SET blocked = FALSE, role = 'patient' WHERE email = 'pat@clinic.local'")
+
+
+def test_visit_notes_keep_medical_text_off_appointment_status():
+	assert psql(
+		"""
+		SELECT count(*)
+		FROM information_schema.columns
+		WHERE table_schema = 'public'
+		  AND table_name = 'appointments'
+		  AND column_name IN ('body', 'diagnosis', 'prescription')
+		"""
+	) == "0"
+	assert psql(
+		"""
+		SELECT string_agg(column_name, ',' ORDER BY ordinal_position)
+		FROM information_schema.columns
+		WHERE table_schema = 'public' AND table_name = 'visit_notes'
+		"""
+	) == "id,appointment_id,doctor_id,patient_user_id,body"
+	assert psql(
+		"""
+		SELECT string_agg(column_name, ',' ORDER BY ordinal_position)
+		FROM information_schema.columns
+		WHERE table_schema = 'public' AND table_name = 'prescriptions'
+		"""
+	) == "id,appointment_id,doctor_id,patient_user_id,body"
+	assert psql(
+		"""
+		SELECT count(*)
+		FROM pg_class
+		WHERE relname IN (
+			'appointments', 'visit_notes', 'prescriptions',
+			'slots', 'work_hours', 'time_off', 'holidays'
+		)
+		  AND relrowsecurity
+		"""
+	) == "0"
+
+	created = insert_cross_doctor_notes()
+	try:
+		assert psql(
+			f"""
+			SELECT u.email || '|' || du.email || '|' || a.status
+			FROM visit_notes n
+			JOIN appointments a ON a.id = n.appointment_id
+			JOIN users u ON u.id = n.patient_user_id
+			JOIN doctors d ON d.id = n.doctor_id
+			JOIN users du ON du.id = d.user_id
+			WHERE n.id = {created['note_a_id']}
+			"""
+		) == "pat@clinic.local|doc@clinic.local|scheduled"
+		assert psql(
+			f"""
+			SELECT u.email || '|' || du.email
+			FROM visit_notes n
+			JOIN users u ON u.id = n.patient_user_id
+			JOIN doctors d ON d.id = n.doctor_id
+			JOIN users du ON du.id = d.user_id
+			WHERE n.id = {created['note_b_id']}
+			"""
+		) == "pat2@clinic.local|doc2@clinic.local"
+		assert psql(
+			f"SELECT status FROM appointments WHERE id = {created['appointment_a_id']}"
+		) == "scheduled"
+		assert NOTE_DOCTOR1_PATIENT_A not in psql(
+			f"SELECT status FROM appointments WHERE id = {created['appointment_a_id']}"
+		)
+		assert psql(
+			f"SELECT body FROM visit_notes WHERE id = {created['note_a_id']}"
+		) == NOTE_DOCTOR1_PATIENT_A
+		assert psql(
+			f"SELECT body FROM visit_notes WHERE id = {created['note_b_id']}"
+		) == NOTE_DOCTOR2_PATIENT_B
+
+		psql(
+			f"""
+			DO $$
+			BEGIN
+				INSERT INTO visit_notes (appointment_id, doctor_id, patient_user_id, body)
+				SELECT appointment_id, doctor_id, patient_user_id, 'second note'
+				FROM visit_notes
+				WHERE id = {created['note_a_id']};
+				RAISE EXCEPTION 'second visit note was accepted';
+			EXCEPTION WHEN unique_violation THEN
+				NULL;
+			END
+			$$;
+			"""
+		)
+		assert psql(
+			f"""
+			SELECT count(*) FROM visit_notes
+			WHERE appointment_id = {created['appointment_a_id']}
+			"""
+		) == "1"
+
+		psql(
+			f"""
+			INSERT INTO prescriptions (appointment_id, doctor_id, patient_user_id, body)
+			SELECT appointment_id, doctor_id, patient_user_id, 'rx-1'
+			FROM visit_notes WHERE id = {created['note_a_id']};
+			INSERT INTO prescriptions (appointment_id, doctor_id, patient_user_id, body)
+			SELECT appointment_id, doctor_id, patient_user_id, 'rx-2'
+			FROM visit_notes WHERE id = {created['note_a_id']};
+			"""
+		)
+		assert psql(
+			f"""
+			SELECT count(*) FROM prescriptions
+			WHERE appointment_id = {created['appointment_a_id']}
+			"""
+		) == "2"
+	finally:
+		cleanup_cross_doctor_notes()

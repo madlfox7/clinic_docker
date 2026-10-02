@@ -155,4 +155,21 @@ BEGIN
   END IF;
 END
 $$;
+----------------------------
+CREATE TABLE IF NOT EXISTS visit_notes (
+  id SERIAL PRIMARY KEY,
+  appointment_id INTEGER NOT NULL REFERENCES appointments(id),
+  doctor_id INTEGER NOT NULL REFERENCES doctors(id),
+  patient_user_id INTEGER NOT NULL REFERENCES users(id),
+  body TEXT NOT NULL,
+  UNIQUE (appointment_id)
+);
+
+CREATE TABLE IF NOT EXISTS prescriptions (
+  id SERIAL PRIMARY KEY,
+  appointment_id INTEGER NOT NULL REFERENCES appointments(id),
+  doctor_id INTEGER NOT NULL REFERENCES doctors(id),
+  patient_user_id INTEGER NOT NULL REFERENCES users(id),
+  body TEXT NOT NULL
+);
 
