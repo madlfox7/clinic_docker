@@ -1,4 +1,8 @@
 
+
+
+
+--not now
 CREATE TABLE IF NOT EXISTS users (
   id SERIAL PRIMARY KEY,
   email TEXT UNIQUE NOT NULL,
@@ -10,6 +14,8 @@ CREATE TABLE IF NOT EXISTS users (
 
 ALTER TABLE users
 ADD COLUMN IF NOT EXISTS blocked BOOLEAN NOT NULL DEFAULT FALSE;
+
+
 
 CREATE TABLE IF NOT EXISTS doctors (
   id SERIAL PRIMARY KEY,
@@ -52,6 +58,8 @@ CREATE TABLE IF NOT EXISTS holidays (
   name TEXT NOT NULL
 );
 
+
+--this one for rls
 CREATE TABLE IF NOT EXISTS appointments (
   id SERIAL PRIMARY KEY,
   slot_id INTEGER NOT NULL REFERENCES slots(id),
@@ -156,6 +164,12 @@ BEGIN
 END
 $$;
 ----------------------------
+
+
+
+
+---this one for rls
+
 CREATE TABLE IF NOT EXISTS visit_notes (
   id SERIAL PRIMARY KEY,
   appointment_id INTEGER NOT NULL REFERENCES appointments(id),
@@ -165,6 +179,8 @@ CREATE TABLE IF NOT EXISTS visit_notes (
   UNIQUE (appointment_id)
 );
 
+
+--this one for rls
 CREATE TABLE IF NOT EXISTS prescriptions (
   id SERIAL PRIMARY KEY,
   appointment_id INTEGER NOT NULL REFERENCES appointments(id),

@@ -2,12 +2,18 @@
 
 FastAPI, PostgreSQL и Nginx.
 
+API подключается к PostgreSQL ролью `clinic_api`; `POSTGRES_USER` остаётся для миграций и администрирования. Одноразовый сервис `migrate` применяет схему и права до запуска API. На этом этапе политики RLS не включаются.
+
 
 
 ```bash
 cp .env.example .env
+# Замените CLINIC_API_PASSWORD на случайный URL-safe пароль, например:
+openssl rand -hex 32
 docker compose up --build -d
 ```
+
+Скопируйте сгенерированный пароль в `CLINIC_API_PASSWORD` внутри `.env`. Не добавляйте `.env` в Git и не передавайте `POSTGRES_PASSWORD` контейнеру API. На существующем `db_data` миграция создаёт роль и выдаёт права без удаления тома.
 
  http://localhost:8080
 
@@ -85,4 +91,3 @@ so you can set days like its doen and hours and also with general like all 7 day
 
 
 TODO: RLS and clean  up
-

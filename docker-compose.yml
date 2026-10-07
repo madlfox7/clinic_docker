@@ -18,20 +18,44 @@ services:
       timeout: 3s
       retries: 10
 
-  api:
+  migrate:
     build:
       context: .
-      dockerfile: docker/api/Dockerfile
+      dockerfile: docker/db/Dockerfile
     env_file: .env
     environment:
       TZ: UTC
-      DATABASE_URL: postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB}
+      PGPASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}
+      CLINIC_API_PASSWORD: ${CLINIC_API_PASSWORD:?Set CLINIC_API_PASSWORD in .env}
     networks:
-      - frontend
       - backend
     depends_on:
       db:
         condition: service_healthy
+    entrypoint: ["/bin/sh", "-ec"]
+    command:
+      - |
+        psql -X -v ON_ERROR_STOP=1 -h db -U "$$POSTGRES_USER" -d "$$POSTGRES_DB" \
+          -f /docker-entrypoint-initdb.d/init.sql
+        psql -X -v ON_ERROR_STOP=1 -h db -U "$$POSTGRES_USER" -d "$$POSTGRES_DB" \
+          -f /docker-entrypoint-initdb.d/roles.sql
+        psql -X -v ON_ERROR_STOP=1 -h db -U "$$POSTGRES_USER" -d "$$POSTGRES_DB" \
+          -f /migrations/set_api_password.sql
+
+  api:
+    build:
+      context: .
+      dockerfile: docker/api/Dockerfile
+    environment:
+      TZ: UTC
+      SESSION_SECRET: ${SESSION_SECRET:-dev-secret-change-me}
+      DATABASE_URL: postgresql://clinic_api:${CLINIC_API_PASSWORD:?Set CLINIC_API_PASSWORD in .env}@db:5432/${POSTGRES_DB:?Set POSTGRES_DB in .env}
+    networks:
+      - frontend
+      - backend
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
     restart: unless-stopped
 
   proxy:

@@ -193,26 +193,27 @@ python3 -m pytest -v tests/test_stage4.py
 POSTGRES_USER=clinic
 POSTGRES_PASSWORD=change_me
 POSTGRES_DB=clinic
+CLINIC_API_PASSWORD=change_me_api
 SESSION_SECRET=dev-secret-change-me
 HOST_UID=1000
 HOST_GID=1000
 ```
 
-Для реального окружения необходимо заменить пароль базы и `SESSION_SECRET` на секретные значения.
+Для реального окружения необходимо заменить пароли базы и API, а также `SESSION_SECRET` на секретные значения.
 
 ## 6. Инициализация приложения
 
-При старте FastAPI выполняется:
+Сервис `migrate` подключается к PostgreSQL как `POSTGRES_USER` и до запуска API применяет `db/init.sql`, создаёт роль `clinic_api` и выдаёт ей права на чтение и изменение данных. На новом volume `db/init.sql` и `db/roles.sql` также выполняются стандартным entrypoint PostgreSQL. Для уже заполненного volume их повторно применяет `migrate`; данные volume не удаляются.
+
+API использует только `clinic_api`: эта роль не является суперпользователем, не имеет `BYPASSRLS` и не может создавать объекты в схеме `public`. Пароль берётся из `CLINIC_API_PASSWORD` в локальном `.env`; полный `.env` API-контейнеру не передаётся. Политики RLS на этом этапе не включены.
+
+При старте FastAPI выполняются только сиды:
 
 ```text
-ensure_schema()
 seed_users()
 seed_clinic()
+seed_work_schedule()
 ```
-
-### `ensure_schema()`
-
-Добавляет колонку `users.blocked`, если ее еще нет, создает таблицы и применяет ограничения слотов/appointments. При старте также удаляется прежнее глобальное `appointments_slot_id_key`, создаётся partial unique index по активным appointments и мигрируется `slots.time_range` с exclusion constraint. Эта миграция применяется и к существующему volume без удаления данных. В `db/init.sql` описана та же схема для новой базы.
 
 ### `seed_users()`
 

@@ -1,7 +1,6 @@
 import logging
 import os
 from datetime import date
-from pathlib import Path
 
 import psycopg2
 from fastapi.templating import Jinja2Templates
@@ -119,28 +118,6 @@ def seed_users():
                 "INSERT INTO users (email, password_hash, role) VALUES (%s, %s, %s)",
                 (email, pwd.hash(raw), role),
             )
-    conn.commit()
-    cur.close()
-    conn.close()
-
-
-def _schema_sql_path() -> Path:
-    here = Path(__file__).resolve().parent
-    candidates = (
-        here / "schema" / "init.sql",
-        here.parent / "db" / "init.sql",
-    )
-    for path in candidates:
-        if path.is_file():
-            return path
-    raise FileNotFoundError("db/init.sql is not available to ensure_schema")
-
-
-def ensure_schema():
-    sql = _schema_sql_path().read_text(encoding="utf-8")
-    conn = db()
-    cur = conn.cursor()
-    cur.execute(sql)
     conn.commit()
     cur.close()
     conn.close()
@@ -328,4 +305,3 @@ def seed_future_slots(cur):
         ON CONFLICT (doctor_id, starts_at) DO NOTHING
         """
     )
-
