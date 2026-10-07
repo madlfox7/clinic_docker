@@ -27,7 +27,7 @@ SECURITY DEFINER
 SET search_path = pg_catalog, public, pg_temp
 AS $function$
   SELECT u.id, u.email, u.blocked
-  FROM public.users AS u
+  FROM public.users AS u 
   JOIN public.doctors AS d ON d.user_id = doc_user_id
   WHERE doc_user_id = NULLIF(current_setting('app.user_id', true), '')::int
     AND public.is_own_patient(d.id, u.id);
@@ -43,7 +43,9 @@ GRANT SELECT ON public.doctors, public.slots, public.work_hours, public.time_off
   TO app_guest, app_patient, app_doctor, app_registrar, app_admin;
 
 GRANT SELECT, INSERT, UPDATE ON public.appointments
-  TO app_patient, app_registrar, app_admin;
+  TO app_patient, app_registrar;
+GRANT SELECT, UPDATE ON public.appointments TO app_admin;
+REVOKE INSERT ON public.appointments FROM app_admin;
 GRANT SELECT ON public.appointments TO app_doctor;
 GRANT USAGE, SELECT ON SEQUENCE public.appointments_id_seq
   TO app_patient, app_registrar;
@@ -62,34 +64,37 @@ DROP POLICY IF EXISTS doctor_appointments ON public.appointments;
 DROP POLICY IF EXISTS registrar_appointments ON public.appointments;
 DROP POLICY IF EXISTS admin_appointments ON public.appointments;
 DROP POLICY IF EXISTS admin_cancel ON public.appointments;
+DROP POLICY IF EXISTS appointments_patient ON public.appointments;
+DROP POLICY IF EXISTS appointments_doctor ON public.appointments;
+DROP POLICY IF EXISTS appointments_registrar ON public.appointments;
+DROP POLICY IF EXISTS appointments_admin_cancel ON public.appointments;
+DROP POLICY IF EXISTS appointments_admin_update ON public.appointments;
 
-CREATE POLICY patient_appointments ON public.appointments
+CREATE POLICY appointments_patient ON public.appointments
   FOR ALL TO app_patient
   USING (patient_user_id = current_setting('app.user_id', true)::int)
   WITH CHECK (patient_user_id = current_setting('app.user_id', true)::int);
 
-CREATE POLICY doctor_appointments ON public.appointments
+CREATE POLICY appointments_doctor ON public.appointments
   FOR SELECT TO app_doctor
   USING (
-    doctor_id = (
+    doctor_id IN (
       SELECT id
       FROM public.doctors
       WHERE user_id = current_setting('app.user_id', true)::int
     )
-    AND status = 'scheduled'
-    AND starts_at > CURRENT_TIMESTAMP - INTERVAL '12 months'
   );
 
-CREATE POLICY registrar_appointments ON public.appointments
+CREATE POLICY appointments_registrar ON public.appointments
   FOR ALL TO app_registrar
   USING (true)
   WITH CHECK (true);
 
-CREATE POLICY admin_appointments ON public.appointments
+CREATE POLICY appointments_admin_cancel ON public.appointments
   FOR SELECT TO app_admin
   USING (true);
 
-CREATE POLICY admin_cancel ON public.appointments
+CREATE POLICY appointments_admin_update ON public.appointments
   FOR UPDATE TO app_admin
   USING (true)
   WITH CHECK (true);
