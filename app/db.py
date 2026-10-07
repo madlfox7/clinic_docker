@@ -14,6 +14,14 @@ pwd = CryptContext(schemes=["bcrypt"], deprecated="auto")
 log = logging.getLogger("clinic")
 templates = Jinja2Templates(directory="templates")
 
+ROLE_BY_APP = {
+    "guest": "app_guest",
+    "patient": "app_patient",
+    "doctor": "app_doctor",
+    "registrar": "app_registrar",
+    "admin": "app_admin",
+}
+
 PG_INT_MIN = -2_147_483_648
 PG_INT_MAX = 2_147_483_647
 MAX_SLOT_MINUTES = 24 * 60
@@ -61,6 +69,32 @@ SEED_USERS = [
 
 def db():
     return psycopg2.connect(DATABASE_URL)
+
+
+def _set_db_context(conn, role, user_id):
+    try:
+        with conn.cursor() as cur:
+            cur.execute("SELECT set_config('role', %s, true)", (role,))
+            cur.execute(
+                "SELECT set_config('app.user_id', %s, true)",
+                (str(user_id),),
+            )
+    except psycopg2.Error:
+        conn.close()
+        raise
+
+
+def set_db_context(conn, user):
+    role = ROLE_BY_APP[user["role"]]
+    _set_db_context(conn, role, user["id"])
+
+
+def db_as(user):
+    role = ROLE_BY_APP[user["role"]]
+    conn = db()
+    _set_db_context(conn, role, user["id"])
+    return conn
+
 
 #
 def load_session_user(request):

@@ -2,7 +2,15 @@ import psycopg2
 from fastapi import APIRouter, Form, Request
 from fastapi.responses import RedirectResponse
 
-from db import MAX_EMAIL_LENGTH, db, log, parse_strict_int, templates, within_length
+from db import (
+    MAX_EMAIL_LENGTH,
+    db_as,
+    log,
+    parse_strict_int,
+    set_db_context,
+    templates,
+    within_length,
+)
 from routes_auth import require_user
 
 
@@ -30,7 +38,6 @@ def doctor_slots(request: Request, doctor_id: str):
     if denied:
         return denied
     role = user["role"]
-    email = user["email"]
     doctor_id = parse_strict_int(doctor_id, min_value=1)
     if doctor_id is None:
         return RedirectResponse("/doctors", status_code=303)
@@ -39,23 +46,22 @@ def doctor_slots(request: Request, doctor_id: str):
     cancelled = request.query_params.get("cancelled")
     cancel_error = request.query_params.get("cancel_error")
     conflict = None
-    conn = db()
+    conn = db_as(user)
     cur = conn.cursor()
     cur.execute("SELECT id, full_name FROM doctors WHERE id=%s", (doctor_id,))
     doc = cur.fetchone()
     conflict_appointment_id = request.query_params.get("conflict_appointment_id")
     conflict_patient_id = request.query_params.get("conflict_patient_id")
-    if error == "overlap" and conflict_appointment_id and role == "patient" and email:
+    if error == "overlap" and conflict_appointment_id and role == "patient":
         cur.execute(
             """
             SELECT d.full_name, s.starts_at, s.ends_at
             FROM appointments a
             JOIN slots s ON s.id = a.slot_id
             JOIN doctors d ON d.id = s.doctor_id
-            JOIN users u ON u.id = a.patient_user_id
-            WHERE a.id=%s AND u.email=%s AND a.status='scheduled'
+            WHERE a.id=%s AND a.patient_user_id=%s AND a.status='scheduled'
             """,
-            (conflict_appointment_id, email),
+            (conflict_appointment_id, user["id"]),
         )
         row = cur.fetchone()
         if row:
@@ -100,10 +106,9 @@ def doctor_slots(request: Request, doctor_id: str):
              EXISTS(
                  SELECT 1
                  FROM appointments a
-                 JOIN users u ON u.id = a.patient_user_id
                  WHERE a.slot_id = s.id
                 AND a.status = 'scheduled'
-                AND u.email = %s
+                AND a.patient_user_id = %s
                              ) AS mine,
                              (
                                      SELECT a.id
@@ -127,7 +132,7 @@ def doctor_slots(request: Request, doctor_id: str):
         WHERE s.doctor_id=%s
         ORDER BY s.starts_at
         """,
-         (email, doctor_id),
+         (user["id"], doctor_id),
     )
     rows = cur.fetchall()
     cur.close()
@@ -180,7 +185,7 @@ def book_slot(request: Request, slot_id: str, patient_email: str = Form(None)):
     slot_id = parse_strict_int(slot_id, min_value=1)
     if slot_id is None:
         return RedirectResponse("/doctors", status_code=303)
-    conn = db()
+    conn = db_as(user)
     cur = conn.cursor()
     cur.execute(
         """
@@ -228,20 +233,27 @@ def book_slot(request: Request, slot_id: str, patient_email: str = Form(None)):
             return RedirectResponse(
                 f"/doctors/{doctor_id}/slots?error=patient_not_found", status_code=303
             )
-    cur.execute(
-        "SELECT id, role, blocked FROM users WHERE email=%s",
-        (target_email,),
-    )
-    target = cur.fetchone()
-    if not target or target[1] != "patient":
-        cur.close()
-        conn.close()
-        return RedirectResponse(f"/doctors/{doctor_id}/slots?error=patient_not_found", status_code=303)
-    patient_id = target[0]
-    if target[2]:
-        cur.close()
-        conn.close()
-        return RedirectResponse(f"/doctors/{doctor_id}/slots?error=patient_blocked", status_code=303)
+    if role == "patient":
+        patient_id = user["id"]
+    else:
+        cur.execute(
+            "SELECT id, role, blocked FROM users WHERE email=%s",
+            (target_email,),
+        )
+        target = cur.fetchone()
+        if not target or target[1] != "patient":
+            cur.close()
+            conn.close()
+            return RedirectResponse(
+                f"/doctors/{doctor_id}/slots?error=patient_not_found", status_code=303
+            )
+        patient_id = target[0]
+        if target[2]:
+            cur.close()
+            conn.close()
+            return RedirectResponse(
+                f"/doctors/{doctor_id}/slots?error=patient_blocked", status_code=303
+            )
     cur.execute("SELECT pg_advisory_xact_lock(%s)", (patient_id,))
 
     cur.execute(
@@ -292,6 +304,7 @@ def book_slot(request: Request, slot_id: str, patient_email: str = Form(None)):
         return RedirectResponse(f"/doctors/{doctor_id}/slots?error=unavailable", status_code=303)
     except psycopg2.errors.ExclusionViolation as exc:
         conn.rollback()
+        set_db_context(conn, user)
         constraint = exc.diag.constraint_name if exc.diag is not None else None
         conflict_id = None
         if constraint == "appointments_no_overlap_per_patient":
@@ -335,14 +348,13 @@ def cancel_appointment(request: Request, appointment_id: str):
     user, denied = require_user(request, "patient", "registrar", "admin")
     if denied:
         return denied
-    email = user["email"]
     role = user["role"]
     appointment_id = parse_strict_int(appointment_id, min_value=1)
     if appointment_id is None:
         if role == "patient":
             return RedirectResponse("/my?cancel_error=1", status_code=303)
         return RedirectResponse("/doctors", status_code=303)
-    conn = db()
+    conn = db_as(user)
     cur = conn.cursor()
     cur.execute(
         """
@@ -376,15 +388,11 @@ def cancel_appointment(request: Request, appointment_id: str):
               AND a.patient_user_id=%s
               AND a.status='scheduled'
               AND EXISTS (
-                  SELECT 1 FROM users u
-                  WHERE u.id=a.patient_user_id AND u.email=%s
-              )
-              AND EXISTS (
                   SELECT 1 FROM slots s
                   WHERE s.id=a.slot_id AND s.starts_at > CURRENT_TIMESTAMP
               )
             """,
-            (appointment_id, patient_user_id, email),
+            (appointment_id, user["id"]),
         )
     else:
         cur.execute(
@@ -415,24 +423,22 @@ def my_appointments(request: Request):
     user, denied = require_user(request, "patient")
     if denied:
         return denied
-    email = user["email"]
     role = user["role"]
     cancelled = request.query_params.get("cancelled")
     cancel_error = request.query_params.get("cancel_error")
-    conn = db()
+    conn = db_as(user)
     cur = conn.cursor()
     cur.execute(
         """
          SELECT a.id, d.full_name, s.starts_at, s.ends_at, a.status,
-             s.starts_at > CURRENT_TIMESTAMP AS cancellable
-        FROM appointments a
-        JOIN slots s ON s.id=a.slot_id
-        JOIN doctors d ON d.id=s.doctor_id
-        JOIN users u ON u.id=a.patient_user_id
-        WHERE u.email=%s
-        ORDER BY s.starts_at
-        """,
-        (email,),
+              s.starts_at > CURRENT_TIMESTAMP AS cancellable
+         FROM appointments a
+         JOIN slots s ON s.id=a.slot_id
+         JOIN doctors d ON d.id=s.doctor_id
+         WHERE a.patient_user_id=%s
+         ORDER BY s.starts_at
+         """,
+         (user["id"],),
     )
     items = [
         {
@@ -464,22 +470,20 @@ def doctor_appointments(request: Request):
     user, denied = require_user(request, "doctor")
     if denied:
         return denied
-    email = user["email"]
     role = user["role"]
-    conn = db()
+    conn = db_as(user)
     cur = conn.cursor()
     cur.execute(
         """
-        SELECT u.email, s.starts_at, s.ends_at, a.status, u.blocked
+        SELECT dp.email, s.starts_at, s.ends_at, a.status, dp.blocked
         FROM appointments a
         JOIN slots s ON s.id=a.slot_id
         JOIN doctors d ON d.id=s.doctor_id
-        JOIN users u ON u.id=a.patient_user_id
-        JOIN users du ON du.id=d.user_id
-        WHERE du.email=%s
+        JOIN public.doctor_patients(%s) dp ON dp.id=a.patient_user_id
+        WHERE d.user_id=%s
         ORDER BY s.starts_at
         """,
-        (email,),
+        (user["id"], user["id"]),
     )
     items = [
         {

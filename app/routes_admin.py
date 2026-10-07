@@ -6,7 +6,14 @@ import psycopg2
 from fastapi import APIRouter, Form, Request
 from fastapi.responses import RedirectResponse
 
-from db import MAX_SLOT_MINUTES, MAX_TEXT_LENGTH, db, parse_strict_int, templates, within_length
+from db import (
+    MAX_SLOT_MINUTES,
+    MAX_TEXT_LENGTH,
+    db_as,
+    parse_strict_int,
+    templates,
+    within_length,
+)
 from routes_auth import require_user
 
 
@@ -20,7 +27,7 @@ def admin_users(request: Request):
     admin_user, denied = require_user(request, "admin")
     if denied:
         return denied
-    conn = db()
+    conn = db_as(admin_user)
     cur = conn.cursor()
     cur.execute(
         """
@@ -149,7 +156,7 @@ def admin_schedule(request: Request):
     admin_user, denied = require_user(request, "admin")
     if denied:
         return denied
-    conn = db()
+    conn = db_as(admin_user)
     cur = conn.cursor()
     cur.execute("SELECT id, full_name FROM doctors ORDER BY full_name")
     doctors = [{"id": row[0], "full_name": row[1]} for row in cur.fetchall()]
@@ -251,7 +258,7 @@ def admin_save_work_hours_bulk(
     if not selected:
         return RedirectResponse("/admin/schedule?error=no_weekdays", status_code=303)
 
-    conn = db()
+    conn = db_as(admin_user)
     cur = conn.cursor()
     cur.execute("SELECT 1 FROM doctors WHERE id=%s", (doctor_id,))
     if cur.fetchone() is None:
@@ -285,7 +292,7 @@ def admin_apply_hours(request: Request, doctor_id: str):
     doctor_id = parse_strict_int(doctor_id, min_value=1)
     if doctor_id is None:
         return RedirectResponse("/admin/schedule?error=doctor_not_found", status_code=303)
-    conn = db()
+    conn = db_as(admin_user)
     cur = conn.cursor()
     cur.execute("SELECT 1 FROM doctors WHERE id=%s", (doctor_id,))
     if cur.fetchone() is None:
@@ -319,7 +326,7 @@ def admin_add_time_off(
         return RedirectResponse("/admin/schedule?error=doctor_not_found", status_code=303)
     if starts_on > ends_on:
         return RedirectResponse("/admin/schedule?error=invalid_time_off", status_code=303)
-    conn = db()
+    conn = db_as(admin_user)
     cur = conn.cursor()
     cur.execute("SELECT 1 FROM doctors WHERE id=%s", (doctor_id,))
     if cur.fetchone() is None:
@@ -362,7 +369,7 @@ def admin_save_holiday(
         return RedirectResponse("/admin/schedule?error=holiday_name_required", status_code=303)
     if not within_length(holiday_name, MAX_TEXT_LENGTH):
         return RedirectResponse("/admin/schedule?error=text_too_long", status_code=303)
-    conn = db()
+    conn = db_as(admin_user)
     cur = conn.cursor()
     cur.execute(
         """
@@ -402,7 +409,7 @@ def generate_doctor_slots(
     if from_date > to_date or (to_date - from_date).days > 90:
         return RedirectResponse("/admin/schedule?error=invalid_range", status_code=303)
 
-    conn = db()
+    conn = db_as(admin_user)
     cur = conn.cursor()
     cur.execute("SELECT 1 FROM doctors WHERE id=%s", (doctor_id,))
     if cur.fetchone() is None:
@@ -501,7 +508,7 @@ def block_user(request: Request, user_id: str):
     user_id = parse_strict_int(user_id, min_value=1)
     if user_id is None:
         return RedirectResponse("/admin/users", status_code=303)
-    conn = db()
+    conn = db_as(admin_user)
     cur = conn.cursor()
     cur.execute(
         "UPDATE users SET blocked=TRUE WHERE id=%s AND role='patient'",
@@ -521,7 +528,7 @@ def unblock_user(request: Request, user_id: str):
     user_id = parse_strict_int(user_id, min_value=1)
     if user_id is None:
         return RedirectResponse("/admin/users", status_code=303)
-    conn = db()
+    conn = db_as(admin_user)
     cur = conn.cursor()
     cur.execute(
         "UPDATE users SET blocked=FALSE WHERE id=%s AND role='patient'",
@@ -541,7 +548,7 @@ def cancel_future_appointments(request: Request, user_id: str):
     user_id = parse_strict_int(user_id, min_value=1)
     if user_id is None:
         return RedirectResponse("/admin/users", status_code=303)
-    conn = db()
+    conn = db_as(admin_user)
     cur = conn.cursor()
     cur.execute(
         """

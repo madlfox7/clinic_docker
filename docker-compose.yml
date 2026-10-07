@@ -40,6 +40,8 @@ services:
         psql -X -v ON_ERROR_STOP=1 -h db -U "$$POSTGRES_USER" -d "$$POSTGRES_DB" \
           -f /docker-entrypoint-initdb.d/roles.sql
         psql -X -v ON_ERROR_STOP=1 -h db -U "$$POSTGRES_USER" -d "$$POSTGRES_DB" \
+          -f /migrations/rls.sql
+        psql -X -v ON_ERROR_STOP=1 -h db -U "$$POSTGRES_USER" -d "$$POSTGRES_DB" \
           -f /migrations/set_api_password.sql
 
   api:

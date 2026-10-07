@@ -16,7 +16,38 @@ ALTER ROLE clinic_api
   NOSUPERUSER
   NOBYPASSRLS
   NOCREATEDB
-  NOCREATEROLE;
+  NOCREATEROLE
+  NOINHERIT;
+
+DO $$
+DECLARE
+  role_name text;
+BEGIN
+  FOREACH role_name IN ARRAY ARRAY[
+    'app_guest',
+    'app_patient',
+    'app_doctor',
+    'app_registrar',
+    'app_admin'
+  ]
+  LOOP
+    IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = role_name) THEN
+      EXECUTE format(
+        'CREATE ROLE %I NOLOGIN NOSUPERUSER NOBYPASSRLS NOCREATEDB NOCREATEROLE NOINHERIT',
+        role_name
+      );
+    END IF;
+    EXECUTE format(
+      'ALTER ROLE %I NOLOGIN NOSUPERUSER NOBYPASSRLS NOCREATEDB NOCREATEROLE NOINHERIT',
+      role_name
+    );
+  END LOOP;
+END
+$$;
+
+GRANT app_guest, app_patient, app_doctor, app_registrar, app_admin
+  TO clinic_api
+  WITH INHERIT FALSE, SET TRUE;
 
 DO $$
 BEGIN
