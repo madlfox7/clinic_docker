@@ -48,5 +48,5 @@ if [ "$ready" != true ]; then
   exit 1
 fi
 
-echo "Running stage 4 tests against the local database. Tests create and cancel temporary appointments."
-"$TEST_PYTHON" -m pytest -v tests/test_stage4.py "$@"
+echo "Running stage 4 and RLS boundary tests against the local database."
+"$TEST_PYTHON" -m pytest -v tests/test_stage4.py tests/test_rls_boundary.py "$@"
