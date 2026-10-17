@@ -39,25 +39,34 @@ GRANT EXECUTE ON FUNCTION public.doctor_patients(integer) TO app_doctor;
 GRANT USAGE ON SCHEMA public
   TO app_guest, app_patient, app_doctor, app_registrar, app_admin;
 
-GRANT SELECT ON public.doctors, public.slots, public.work_hours, public.time_off, public.holidays
-  TO app_guest, app_patient, app_doctor, app_registrar, app_admin;
+GRANT SELECT ON public.doctors TO app_guest, app_patient, app_doctor, app_registrar, app_admin;
+GRANT SELECT ON public.slots, public.work_hours, public.time_off, public.holidays
+  TO app_patient, app_registrar;
+GRANT SELECT ON public.slots TO app_doctor, app_admin;
 
-GRANT SELECT, INSERT, UPDATE ON public.appointments
-  TO app_patient, app_registrar;
-GRANT SELECT, UPDATE ON public.appointments TO app_admin;
-REVOKE INSERT ON public.appointments FROM app_admin;
-GRANT SELECT ON public.appointments TO app_doctor;
-GRANT USAGE, SELECT ON SEQUENCE public.appointments_id_seq
-  TO app_patient, app_registrar;
+GRANT SELECT, UPDATE (status) ON public.appointments TO app_patient, app_registrar;
+GRANT INSERT (slot_id, patient_user_id, doctor_id, starts_at, ends_at)
+  ON public.appointments TO app_patient, app_registrar;
+GRANT SELECT ON public.appointments TO app_doctor, app_admin;
+GRANT UPDATE (status), DELETE ON public.appointments TO app_admin;
+GRANT USAGE, SELECT ON SEQUENCE public.appointments_id_seq TO app_patient, app_registrar;
 
 GRANT SELECT ON public.visit_notes, public.prescriptions TO app_patient;
 GRANT SELECT, INSERT, UPDATE ON public.visit_notes, public.prescriptions TO app_doctor;
 GRANT USAGE, SELECT ON SEQUENCE public.visit_notes_id_seq, public.prescriptions_id_seq
   TO app_doctor;
-GRANT SELECT ON public.visit_notes, public.prescriptions TO app_admin;
 
-GRANT SELECT (id, email, role, blocked) ON public.users TO app_registrar, app_admin;
+GRANT SELECT (id, email, role, blocked) ON public.users TO app_registrar;
+GRANT SELECT (id, email, role, blocked) ON public.users TO app_admin;
 GRANT UPDATE (blocked) ON public.users TO app_admin;
+
+GRANT SELECT ON public.work_hours, public.time_off, public.holidays TO app_admin;
+GRANT INSERT, UPDATE ON public.work_hours TO app_admin;
+GRANT INSERT ON public.time_off TO app_admin;
+GRANT INSERT, UPDATE ON public.holidays TO app_admin;
+GRANT INSERT (doctor_id, starts_at, ends_at), DELETE ON public.slots TO app_admin;
+GRANT USAGE, SELECT ON SEQUENCE public.slots_id_seq, public.work_hours_id_seq,
+  public.time_off_id_seq TO app_admin;
 
 DROP POLICY IF EXISTS patient_appointments ON public.appointments;
 DROP POLICY IF EXISTS doctor_appointments ON public.appointments;
@@ -69,6 +78,7 @@ DROP POLICY IF EXISTS appointments_doctor ON public.appointments;
 DROP POLICY IF EXISTS appointments_registrar ON public.appointments;
 DROP POLICY IF EXISTS appointments_admin_cancel ON public.appointments;
 DROP POLICY IF EXISTS appointments_admin_update ON public.appointments;
+DROP POLICY IF EXISTS appointments_admin_delete ON public.appointments;
 
 CREATE POLICY appointments_patient ON public.appointments
   FOR ALL TO app_patient
@@ -98,6 +108,9 @@ CREATE POLICY appointments_admin_update ON public.appointments
   FOR UPDATE TO app_admin
   USING (true)
   WITH CHECK (true);
+CREATE POLICY appointments_admin_delete ON public.appointments
+  FOR DELETE TO app_admin
+  USING (status = 'cancelled');
 
 DROP POLICY IF EXISTS patient_notes ON public.visit_notes;
 DROP POLICY IF EXISTS doctor_notes ON public.visit_notes;

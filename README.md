@@ -4,7 +4,9 @@ FastAPI, PostgreSQL и Nginx.
 
 API подключается к PostgreSQL ролью `clinic_api`; `POSTGRES_USER` остаётся для миграций и администрирования. Одноразовый сервис `migrate` применяет схему, роли и RLS-политики до запуска API. Роли `app_guest`, `app_patient`, `app_doctor`, `app_registrar` и `app_admin` используются как контексты доступа.
 
-RLS включён для `appointments`, `visit_notes` и `prescriptions`; `users` пока не защищена RLS, чтобы работали вход и проверка сессии. Для защищённых запросов API использует `db_as(user)`: на отдельном соединении транзакционно устанавливаются `SET ROLE` и `app.user_id`. Вход, проверка сессии и публичный список врачей продолжают использовать `clinic_api`. Врач получает данные пациентов только через ограниченную функцию `doctor_patients()`, а не прямым чтением `users`.
+API подключается только как `clinic_api`; схема, миграции и сид выполняются от имени владельца `clinic`. Для защищённых запросов `db_as(user)` в транзакции задаёт `SET LOCAL ROLE app_*` (роль выбирается только из белого списка) и `app.user_id`. RLS включён на `appointments`, `visit_notes` и `prescriptions`. Врач получает данные пациентов только через ограниченную функцию `doctor_patients()`, а не прямым чтением `users`.
+
+Для повторения проверки «сломанный SELECT» без фильтра по пользователю запустите `./tests/run_tests.sh tests/test_rls_boundary.py`: тест проверяет `SELECT id, patient_user_id FROM appointments` и `visit_notes` под пациентом, видимость записей врача, а также отказ регистратора и администратора в `SELECT body FROM visit_notes`.
 
 
 

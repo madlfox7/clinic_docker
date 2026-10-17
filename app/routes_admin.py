@@ -72,7 +72,7 @@ def _purge_slots_without_scheduled(cur, where_sql, params):
     cur.execute(
         f"""
         DELETE FROM appointments a
-        WHERE a.status <> 'scheduled'
+        WHERE a.status = 'cancelled'
           AND a.slot_id IN (
               SELECT s.id
               FROM slots s
@@ -91,7 +91,7 @@ def _purge_slots_without_scheduled(cur, where_sql, params):
         WHERE {where_sql}
           AND NOT EXISTS (
               SELECT 1 FROM appointments a
-              WHERE a.slot_id = s.id AND a.status = 'scheduled'
+              WHERE a.slot_id = s.id
           )
         """,
         params,

@@ -9,7 +9,7 @@ from passlib.context import CryptContext
 
 
 
-DATABASE_URL = os.environ["DATABASE_URL"]
+DATABASE_URL = os.environ.get("DATABASE_URL")
 pwd = CryptContext(schemes=["bcrypt"], deprecated="auto")
 log = logging.getLogger("clinic")
 templates = Jinja2Templates(directory="templates")
@@ -68,13 +68,22 @@ SEED_USERS = [
 
 
 def db():
-    return psycopg2.connect(DATABASE_URL)
+    if DATABASE_URL:
+        return psycopg2.connect(DATABASE_URL)
+    return psycopg2.connect(
+        host=os.environ["PGHOST"],
+        dbname=os.environ["PGDATABASE"],
+        user=os.environ["PGUSER"],
+        password=os.environ["PGPASSWORD"],
+    )
 
 
 def _set_db_context(conn, role, user_id):
+    if role not in ROLE_BY_APP.values():
+        raise ValueError("Unknown application database role")
     try:
         with conn.cursor() as cur:
-            cur.execute("SELECT set_config('role', %s, true)", (role,))
+            cur.execute(f"SET LOCAL ROLE {role}")
             cur.execute(
                 "SELECT set_config('app.user_id', %s, true)",
                 (str(user_id),),

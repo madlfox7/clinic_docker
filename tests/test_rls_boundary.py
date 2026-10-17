@@ -7,6 +7,7 @@ ROOT = Path(__file__).resolve().parents[1]
 PATIENT_A = "pat@clinic.local"
 DOCTOR = "doc@clinic.local"
 ADMIN = "admin@clinic.local"
+REGISTRAR = "reg@clinic.local"
 
 
 def compose_exec(service: str, command: list[str], *, input_text: str = "") -> str:
@@ -99,6 +100,7 @@ def test_rls_boundary_for_app_roles():
                 RETURNING id
             )
             SELECT appointment_a.id, appointment_b.id,
+                   (SELECT id FROM note_a), (SELECT id FROM note_b),
                    (SELECT id FROM slot_a), (SELECT id FROM slot_b),
                    identities.patient_a, identities.patient_b
             FROM appointment_a CROSS JOIN appointment_b
@@ -110,6 +112,8 @@ def test_rls_boundary_for_app_roles():
     (
         appointment_a,
         appointment_b,
+        note_a,
+        note_b,
         slot_a,
         slot_b,
         patient_a_id,
@@ -135,32 +139,60 @@ patient_a = get_user("pat@clinic.local")
 patient_b = get_user("pat2@clinic.local")
 doctor = get_user("doc@clinic.local")
 admin = get_user("admin@clinic.local")
+registrar = get_user("reg@clinic.local")
+
+conn = db()
+try:
+    with conn.cursor() as cur:
+        cur.execute("SELECT id FROM doctors WHERE user_id = %s", (doctor["id"],))
+        doctor_id = cur.fetchone()[0]
+finally:
+    conn.close()
 
 conn = db_as(patient_a)
 try:
     with conn.cursor() as cur:
-        cur.execute("SELECT * FROM appointments")
-        patient_rows = [(row[0], row[2]) for row in cur.fetchall()]
+        cur.execute("SELECT id, patient_user_id FROM appointments")
+        patient_appointments = cur.fetchall()
+        cur.execute("SELECT id, patient_user_id FROM visit_notes")
+        patient_notes = cur.fetchall()
 finally:
     conn.close()
 
 conn = db()
 try:
     with conn.cursor() as cur:
-        cur.execute("SELECT * FROM appointments")
-        api_rows = cur.fetchall()
+        try:
+            cur.execute("SELECT * FROM appointments")
+        except psycopg2.errors.InsufficientPrivilege:
+            api_access_denied = True
+        else:
+            api_access_denied = False
 finally:
     conn.close()
 
-conn = db_as(admin)
+conn = db_as(doctor)
 try:
     with conn.cursor() as cur:
-        cur.execute("SELECT * FROM visit_notes")
-        admin_notes = cur.fetchall()
-        cur.execute("SELECT * FROM prescriptions")
-        admin_prescriptions = cur.fetchall()
+        cur.execute("SELECT id, doctor_id FROM visit_notes")
+        doctor_notes = cur.fetchall()
 finally:
     conn.close()
+
+def body_denied(user):
+    conn = db_as(user)
+    try:
+        with conn.cursor() as cur:
+            try:
+                cur.execute("SELECT body FROM visit_notes")
+            except psycopg2.errors.InsufficientPrivilege:
+                return True
+            return False
+    finally:
+        conn.close()
+
+registrar_body_denied = body_denied(registrar)
+admin_body_denied = body_denied(admin)
 
 conn = db_as(doctor)
 try:
@@ -183,12 +215,15 @@ finally:
     conn.close()
 
 print(json.dumps({
-    "patient_rows": patient_rows,
+    "patient_appointments": patient_appointments,
+    "patient_notes": patient_notes,
+    "doctor_notes": doctor_notes,
+    "doctor_id": doctor_id,
     "patient_a_id": patient_a["id"],
     "patient_b_id": patient_b["id"],
-    "api_row_count": len(api_rows),
-    "admin_note_count": len(admin_notes),
-    "admin_prescription_count": len(admin_prescriptions),
+    "api_access_denied": api_access_denied,
+    "registrar_body_denied": registrar_body_denied,
+    "admin_body_denied": admin_body_denied,
     "direct_email_denied": direct_email_denied,
     "doctor_patient_emails": doctor_patient_emails,
 }))
@@ -198,11 +233,19 @@ print(json.dumps({
         result = json.loads(compose_exec("api", ["python", "-"], input_text=api_script))
         assert result["patient_a_id"] == patient_a_id
         assert result["patient_b_id"] == patient_b_id
-        assert [appointment_a, patient_a_id] in result["patient_rows"]
-        assert all(row_id != appointment_b for row_id, _ in result["patient_rows"])
-        assert result["api_row_count"] == 0
-        assert result["admin_note_count"] == 0
-        assert result["admin_prescription_count"] == 0
+        assert [appointment_a, patient_a_id] in result["patient_appointments"]
+        assert [note_a, patient_a_id] in result["patient_notes"]
+        assert all(patient_id == patient_a_id for _, patient_id in result["patient_appointments"])
+        assert all(patient_id == patient_a_id for _, patient_id in result["patient_notes"])
+        assert all(row_id != appointment_b for row_id, _ in result["patient_appointments"])
+        assert all(row_id != note_b for row_id, _ in result["patient_notes"])
+        assert result["doctor_notes"]
+        assert all(doctor_id == result["doctor_id"] for _, doctor_id in result["doctor_notes"])
+        assert note_a in [row_id for row_id, _ in result["doctor_notes"]]
+        assert note_b not in [row_id for row_id, _ in result["doctor_notes"]]
+        assert result["api_access_denied"] is True
+        assert result["registrar_body_denied"] is True
+        assert result["admin_body_denied"] is True
         assert result["direct_email_denied"] is True
         assert PATIENT_A in result["doctor_patient_emails"]
     finally:

@@ -49,6 +49,11 @@ GRANT app_guest, app_patient, app_doctor, app_registrar, app_admin
   TO clinic_api
   WITH INHERIT FALSE, SET TRUE;
 
+REVOKE ALL PRIVILEGES ON ALL TABLES IN SCHEMA public
+  FROM app_guest, app_patient, app_doctor, app_registrar, app_admin;
+REVOKE ALL PRIVILEGES ON ALL SEQUENCES IN SCHEMA public
+  FROM app_guest, app_patient, app_doctor, app_registrar, app_admin;
+
 DO $$
 BEGIN
   EXECUTE format(
@@ -60,10 +65,12 @@ $$;
 
 GRANT USAGE ON SCHEMA public TO clinic_api;
 REVOKE CREATE ON SCHEMA public FROM PUBLIC;
-GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO clinic_api;
-GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public TO clinic_api;
+REVOKE ALL PRIVILEGES ON ALL TABLES IN SCHEMA public FROM clinic_api;
+REVOKE ALL PRIVILEGES ON ALL SEQUENCES IN SCHEMA public FROM clinic_api;
+GRANT SELECT (id, email, password_hash, role, blocked) ON public.users TO clinic_api;
+GRANT SELECT ON public.doctors TO clinic_api;
 
 ALTER DEFAULT PRIVILEGES IN SCHEMA public
-  GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO clinic_api;
+  REVOKE ALL ON TABLES FROM clinic_api;
 ALTER DEFAULT PRIVILEGES IN SCHEMA public
-  GRANT USAGE, SELECT ON SEQUENCES TO clinic_api;
+  REVOKE ALL ON SEQUENCES FROM clinic_api;

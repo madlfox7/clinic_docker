@@ -56,9 +56,26 @@ services:
       - frontend
       - backend
     depends_on:
-      migrate:
+      seed:
         condition: service_completed_successfully
     restart: unless-stopped
+
+  seed:
+    build:
+      context: .
+      dockerfile: docker/api/Dockerfile
+    environment:
+      TZ: UTC
+      PGHOST: db
+      PGUSER: ${POSTGRES_USER:?Set POSTGRES_USER in .env}
+      PGPASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}
+      PGDATABASE: ${POSTGRES_DB:?Set POSTGRES_DB in .env}
+    networks:
+      - backend
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    command: ["python", "seed.py"]
 
   proxy:
     build:
