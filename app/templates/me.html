@@ -7,14 +7,15 @@
 <p>Role: {{ role }}</p>
 {% if role == "patient" %}
   <p>Patient: here will be only your appointments.</p>
-  <p><a href="/doctors">Doctors</a> | <a href="/my">My appointments</a></p>
+  <p><a href="/doctors">Doctors</a> | <a href="/my">My appointments</a> | <a href="/my/records">My medical records</a></p>
 {% elif role == "doctor" %}
   <p>Doctor: here will be only your patients.</p>
-  <p><a href="/doctors">Doctors</a> | <a href="/doctor/appointments">My appointments</a></p>
+  <p><a href="/doctor/appointments">My appointments</a> | <a href="/doctor/calendar">My calendar</a></p>
 {% elif role == "registrar" %}
   <p>Registrar: here will be the general schedule.</p>
+  <p><a href="/doctors">Doctors</a> | <a href="/registrar/appointments">Appointments by day</a></p>
 {% elif role == "admin" %}
   <p>Admin: users and logs. Medical texts are not available.</p>
-  <p><a href="/admin/users">Manage patients</a> | <a href="/admin/schedule">Manage schedule</a></p>
+  <p><a href="/admin/users">Manage patients</a> | <a href="/admin/schedule">Manage schedule</a> | <a href="/admin/audit">Audit log</a></p>
 {% endif %}
 {% endblock %}

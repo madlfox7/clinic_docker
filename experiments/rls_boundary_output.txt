@@ -1,0 +1,32 @@
+Regression: unfiltered SELECTs under app roles
+Context: db_as() sets SET LOCAL ROLE and app.user_id in one transaction.
+Patient SQL: SELECT id, patient_user_id FROM appointments;
+Patient result: [[2, 4]]
+Patient SQL: SELECT id, patient_user_id FROM visit_notes;
+Patient result: [[1, 4]]
+Patient SQL: SELECT id, patient_user_id FROM prescriptions;
+Patient result: [[1, 4]]
+Doctor SQL: SELECT id, doctor_id FROM visit_notes;
+Doctor result: [[1, 1]]
+Doctor SQL: SELECT id, doctor_id FROM prescriptions;
+Doctor result: [[1, 1]]
+Doctor SQL: SELECT id, doctor_id FROM slots;
+Doctor result: [[15, 1]]
+Doctor time-off/schedule writes denied: True, True
+Registrar SQL: SELECT body FROM visit_notes;
+Registrar result: permission denied
+Registrar SQL: SELECT body FROM prescriptions;
+Registrar result: permission denied
+Admin SQL: SELECT body FROM visit_notes;
+Admin result: permission denied
+Admin SQL: SELECT body FROM prescriptions;
+Admin result: permission denied
+Patient/registrar audit SELECT denied: True, True
+Patient sees another patient's slot as taken: True
+Valid free-slot insert accepted: True
+Spoofed and occupied-slot inserts accepted: False, False
+Arbitrary status denied: True
+Patient cancel/restore rowcounts: 1, 0
+Blocked patient's insert denied: True
+Registrar insert for blocked patient denied: True
+Patient page: booked slot renders unavailable without a booking action.

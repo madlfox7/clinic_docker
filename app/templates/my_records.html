@@ -1,0 +1,17 @@
+{% extends "base.html" %}
+{% block content %}
+
+<h1>My medical records</h1>
+<p><a href="/my">Back to my appointments</a></p>
+<ul>
+  {% for record in records %}
+    <li>
+      <strong>{{ record.record_type }}</strong> — {{ record.doctor_name }} —
+      {{ record.starts_at.strftime("%Y-%m-%d %H:%M") }}:
+      <pre>{{ record.body }}</pre>
+    </li>
+  {% else %}
+    <li>No medical records yet.</li>
+  {% endfor %}
+</ul>
+{% endblock %}

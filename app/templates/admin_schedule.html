@@ -13,6 +13,10 @@
 <p>Time off saved.</p>{% endif %}
 {% if saved == "holiday" %}
 <p>Holiday saved.</p>{% endif %}
+{% if time_off_request_decision == "approved" %}
+<p>Time-off request approved; the period was added to the doctor schedule.</p>{% endif %}
+{% if time_off_request_decision == "rejected" %}
+<p>Time-off request rejected.</p>{% endif %}
 {% if saved == "apply-hours" %}
 <p>Applied schedule. Removed {{ hours_report.removed_slots if hours_report else 0 }} free slots outside work hours.
    Scheduled visits were not cancelled.</p>{% endif %}
@@ -75,6 +79,8 @@
 {% elif error == "no_weekdays" %}<p>Select at least one weekday.</p>
 {% elif error == "invalid_id" %}<p>Enter a valid whole number.</p>
 {% elif error == "text_too_long" %}<p>That text is too long.</p>{% endif %}
+{% if error == "invalid_time_off_request" %}<p>Invalid time-off request decision.</p>
+{% elif error == "time_off_request_not_pending" %}<p>This request has already been decided or is unavailable.</p>{% endif %}
 
 
 <!-- graphic -->
@@ -96,6 +102,7 @@
   </tbody>
 </table>
 <form method="post" action="/admin/work-hours-bulk">
+  <p><strong>Warning:</strong> Current hours are not preloaded. Saving replaces the existing hours for each selected weekday with the same values below. Review the schedule above before saving.</p>
   <label>Doctor
     <select name="doctor_id" required>
       {% for doctor in doctors %}
@@ -124,6 +131,35 @@
 {% endfor %}
 
 <h2>Time off</h2>
+<h3>Doctor requests</h3>
+<table>
+  <thead><tr><th>Doctor</th><th>Dates</th><th>Comment</th><th>Status</th><th>Requested</th><th>Decision</th></tr></thead>
+  <tbody>
+  {% for item in time_off_requests %}
+    <tr>
+      <td>{{ item.doctor_name }} ({{ item.doctor_email }})</td>
+      <td>{{ item.starts_on }}–{{ item.ends_on }}</td>
+      <td>{{ item.comment }}</td>
+      <td>{{ item.status }}</td>
+      <td>{{ item.created_at.strftime("%Y-%m-%d %H:%M") }}</td>
+      <td>
+        {% if item.status == "pending" %}
+          <form method="post" action="/admin/time-off-requests/{{ item.id }}/decision" style="display:inline">
+            <input type="hidden" name="decision" value="approve">
+            <button type="submit">Approve</button>
+          </form>
+          <form method="post" action="/admin/time-off-requests/{{ item.id }}/decision" style="display:inline">
+            <input type="hidden" name="decision" value="reject">
+            <button type="submit">Reject</button>
+          </form>
+        {% endif %}
+      </td>
+    </tr>
+  {% else %}
+    <tr><td colspan="6">No time-off requests.</td></tr>
+  {% endfor %}
+  </tbody>
+</table>
 <ul>
   {% for item in time_off %}
     <li>{{ item.doctor_name }} — {{ item.starts_on }} to {{ item.ends_on }}</li>

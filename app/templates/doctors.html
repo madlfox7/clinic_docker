@@ -7,8 +7,8 @@
   {% for d in doctors %}
     <li>
       {{ d.full_name }} — {{ d.specialty }}, {{ d.experience_years }} years of experience
-      {% if role == "patient" or role == "registrar" %}
-        — <a href="/doctors/{{ d.id }}/slots">available slots</a>
+      {% if role in ("patient", "registrar", "admin") %}
+        — <a href="/doctors/{{ d.id }}/slots">{% if role == "admin" %}view slots{% else %}available slots{% endif %}</a>
       {% endif %}
     </li>
   {% endfor %}

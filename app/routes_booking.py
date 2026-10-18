@@ -7,6 +7,7 @@ from db import (
     db_as,
     log,
     parse_strict_int,
+    record_audit_event,
     set_db_context,
     templates,
     within_length,
@@ -34,7 +35,7 @@ def _overlap_redirect(doctor_id, patient_id, conflict_id):
 
 @router.get("/doctors/{doctor_id}/slots")
 def doctor_slots(request: Request, doctor_id: str):
-    user, denied = require_user(request, "patient", "registrar")
+    user, denied = require_user(request, "patient", "registrar", "admin")
     if denied:
         return denied
     role = user["role"]
@@ -97,12 +98,7 @@ def doctor_slots(request: Request, doctor_id: str):
     cur.execute(
         """
         SELECT s.id, s.starts_at, s.ends_at,
-               EXISTS(
-                   SELECT 1
-                   FROM appointments a
-                   WHERE a.slot_id = s.id
-                     AND a.status = 'scheduled'
-             ) AS taken,
+               public.scheduled_slot_is_taken(s.id) AS taken,
              EXISTS(
                  SELECT 1
                  FROM appointments a
@@ -293,9 +289,19 @@ def book_slot(request: Request, slot_id: str, patient_email: str = Form(None)):
             FROM slots s
             WHERE s.id = %s
               AND s.starts_at > CURRENT_TIMESTAMP
+            RETURNING id
             """,
             (patient_id, slot_id),
         )
+        appointment_row = cur.fetchone()
+        if not appointment_row:
+            conn.rollback()
+            cur.close()
+            conn.close()
+            return RedirectResponse(
+                f"/doctors/{doctor_id}/slots?error=unavailable", status_code=303
+            )
+        record_audit_event(cur, "appointment.book", "appointment", appointment_row[0])
         conn.commit()
     except psycopg2.errors.UniqueViolation:
         conn.rollback()
@@ -359,10 +365,10 @@ def cancel_appointment(request: Request, appointment_id: str):
     cur.execute(
         """
          SELECT s.doctor_id, a.patient_user_id,
-             s.starts_at > CURRENT_TIMESTAMP AS is_future
+              s.starts_at > CURRENT_TIMESTAMP AS is_future, a.status
         FROM appointments a
         JOIN slots s ON s.id=a.slot_id
-        WHERE a.id=%s AND a.status='scheduled'
+         WHERE a.id=%s
         """,
         (appointment_id,),
     )
@@ -374,7 +380,18 @@ def cancel_appointment(request: Request, appointment_id: str):
             return RedirectResponse("/my?cancel_error=1", status_code=303)
         return RedirectResponse("/doctors", status_code=303)
 
-    doctor_id, patient_user_id, is_future = appointment
+    doctor_id, patient_user_id, is_future, appointment_status = appointment
+    if appointment_status != "scheduled":
+        cur.close()
+        conn.close()
+        if role == "patient":
+            return RedirectResponse("/my?cancel_error=1", status_code=303)
+        if role == "registrar":
+            return RedirectResponse(
+                f"/doctors/{doctor_id}/slots?cancel_error=1", status_code=303
+            )
+        return RedirectResponse("/doctors", status_code=303)
+
     if role == "patient":
         if not is_future:
             cur.close()
@@ -404,6 +421,8 @@ def cancel_appointment(request: Request, appointment_id: str):
             (appointment_id,),
         )
     updated = cur.rowcount
+    if updated:
+        record_audit_event(cur, "appointment.cancel", "appointment", appointment_id)
     conn.commit()
     cur.close()
     conn.close()
@@ -475,7 +494,7 @@ def doctor_appointments(request: Request):
     cur = conn.cursor()
     cur.execute(
         """
-        SELECT dp.email, s.starts_at, s.ends_at, a.status, dp.blocked
+        SELECT a.id, dp.email, s.starts_at, s.ends_at, a.status, dp.blocked
         FROM appointments a
         JOIN slots s ON s.id=a.slot_id
         JOIN doctors d ON d.id=s.doctor_id
@@ -487,11 +506,12 @@ def doctor_appointments(request: Request):
     )
     items = [
         {
-            "patient_email": r[0],
-            "starts_at": r[1],
-            "ends_at": r[2],
-            "status": r[3],
-            "patient_blocked": r[4],
+            "id": r[0],
+            "patient_email": r[1],
+            "starts_at": r[2],
+            "ends_at": r[3],
+            "status": r[4],
+            "patient_blocked": r[5],
         }
         for r in cur.fetchall()
     ]

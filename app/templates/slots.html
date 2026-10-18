@@ -55,6 +55,9 @@
           <form method="post" action="/appointments/{{ s.appointment_id }}/cancel" style="display:inline">
             <button type="submit">Cancel appointment</button>
           </form>
+        {% elif role == "admin" %}
+          Booked
+          {% if s.closed %}<strong>Clinic closed — staff action required.</strong>{% endif %}
         {% else %}
           Unavailable{% if s.closed %} — clinic closed{% endif %}
         {% endif %}
@@ -68,6 +71,8 @@
             <input name="patient_email" type="email" placeholder="patient@clinic.local" required>
             <button type="submit">Book for patient</button>
           </form>
+        {% elif role == "admin" %}
+          Available
         {% else %}
           <form method="post" action="/slots/{{ s.id }}/book" style="display:inline">
             <button type="submit">Book appointment</button>

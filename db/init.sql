@@ -53,6 +53,28 @@ CREATE TABLE IF NOT EXISTS time_off (
 CREATE UNIQUE INDEX IF NOT EXISTS time_off_doctor_period
 ON time_off (doctor_id, starts_on, ends_on);
 
+CREATE TABLE IF NOT EXISTS time_off_requests (
+  id SERIAL PRIMARY KEY,
+  doctor_id INTEGER NOT NULL REFERENCES doctors(id),
+  starts_on DATE NOT NULL,
+  ends_on DATE NOT NULL,
+  comment TEXT NOT NULL CHECK (
+    length(btrim(comment)) BETWEEN 1 AND 200
+  ),
+  status TEXT NOT NULL DEFAULT 'pending'
+    CHECK (status IN ('pending', 'approved', 'rejected')),
+  created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  decided_by INTEGER REFERENCES users(id),
+  decided_at TIMESTAMP,
+  CHECK (ends_on >= starts_on),
+  CHECK (
+    (status = 'pending' AND decided_by IS NULL AND decided_at IS NULL)
+    OR
+    (status IN ('approved', 'rejected')
+      AND decided_by IS NOT NULL AND decided_at IS NOT NULL)
+  )
+);
+
 CREATE TABLE IF NOT EXISTS holidays (
   day DATE PRIMARY KEY,
   name TEXT NOT NULL
@@ -65,7 +87,22 @@ CREATE TABLE IF NOT EXISTS appointments (
   slot_id INTEGER NOT NULL REFERENCES slots(id),
   patient_user_id INTEGER NOT NULL REFERENCES users(id),
   status TEXT NOT NULL DEFAULT 'scheduled'
+    CHECK (status IN ('scheduled', 'cancelled'))
 );
+
+DO $$
+BEGIN
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_constraint
+    WHERE conname = 'appointments_status_check'
+      AND conrelid = 'public.appointments'::regclass
+  ) THEN
+    ALTER TABLE public.appointments
+      ADD CONSTRAINT appointments_status_check
+      CHECK (status IN ('scheduled', 'cancelled'));
+  END IF;
+END
+$$;
 
 ALTER TABLE appointments
 DROP CONSTRAINT IF EXISTS appointments_slot_id_key;
@@ -189,3 +226,15 @@ CREATE TABLE IF NOT EXISTS prescriptions (
   body TEXT NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS audit_events (
+  id BIGSERIAL PRIMARY KEY,
+  actor_user_id INTEGER NOT NULL REFERENCES users(id),
+  actor_role TEXT NOT NULL CHECK (actor_role IN ('admin', 'doctor', 'patient', 'registrar')),
+  action TEXT NOT NULL CHECK (length(action) BETWEEN 1 AND 80),
+  target_type TEXT NOT NULL CHECK (length(target_type) BETWEEN 1 AND 80),
+  target_id INTEGER,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE INDEX IF NOT EXISTS audit_events_created_at_idx
+  ON audit_events (created_at DESC, id DESC);

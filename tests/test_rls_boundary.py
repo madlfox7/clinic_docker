@@ -1,13 +1,16 @@
 import json
+import os
 import subprocess
 from pathlib import Path
+
+import httpx
 
 
 ROOT = Path(__file__).resolve().parents[1]
 PATIENT_A = "pat@clinic.local"
 DOCTOR = "doc@clinic.local"
 ADMIN = "admin@clinic.local"
-REGISTRAR = "reg@clinic.local"
+TEST_BASE = os.environ.get("CLINIC_TEST_BASE", "http://localhost:8080")
 
 
 def compose_exec(service: str, command: list[str], *, input_text: str = "") -> str:
@@ -22,7 +25,7 @@ def compose_exec(service: str, command: list[str], *, input_text: str = "") -> s
     return completed.stdout.strip()
 
 
-def test_rls_boundary_for_app_roles():
+def test_unfiltered_broken_selects_obey_role_rls():
     fixture = compose_exec(
         "db",
         [
@@ -48,6 +51,13 @@ def test_rls_boundary_for_app_roles():
                 SELECT doctor_a, start_a, start_a + INTERVAL '30 minutes'
                 FROM identities, times
                 RETURNING id, doctor_id, starts_at, ends_at
+            ),
+            slot_c AS (
+                INSERT INTO slots (doctor_id, starts_at, ends_at)
+                SELECT doctor_a, start_a + INTERVAL '4 hours',
+                       start_a + INTERVAL '4 hours 30 minutes'
+                FROM identities, times
+                RETURNING id
             ),
             slot_b AS (
                 INSERT INTO slots (doctor_id, starts_at, ends_at)
@@ -101,7 +111,9 @@ def test_rls_boundary_for_app_roles():
             )
             SELECT appointment_a.id, appointment_b.id,
                    (SELECT id FROM note_a), (SELECT id FROM note_b),
+                   (SELECT id FROM prescription_a), (SELECT id FROM prescription_b),
                    (SELECT id FROM slot_a), (SELECT id FROM slot_b),
+                   (SELECT id FROM slot_c),
                    identities.patient_a, identities.patient_b
             FROM appointment_a CROSS JOIN appointment_b
             CROSS JOIN prescription_a CROSS JOIN prescription_b
@@ -114,13 +126,16 @@ def test_rls_boundary_for_app_roles():
         appointment_b,
         note_a,
         note_b,
+        prescription_a,
+        prescription_b,
         slot_a,
         slot_b,
+        slot_c,
         patient_a_id,
         patient_b_id,
     ) = map(int, fixture.split("|"))
 
-    api_script = """
+    api_script = '''
 import json
 import psycopg2
 from db import db, db_as
@@ -138,6 +153,7 @@ def get_user(email):
 patient_a = get_user("pat@clinic.local")
 patient_b = get_user("pat2@clinic.local")
 doctor = get_user("doc@clinic.local")
+doctor_b = get_user("doc2@clinic.local")
 admin = get_user("admin@clinic.local")
 registrar = get_user("reg@clinic.local")
 
@@ -146,6 +162,8 @@ try:
     with conn.cursor() as cur:
         cur.execute("SELECT id FROM doctors WHERE user_id = %s", (doctor["id"],))
         doctor_id = cur.fetchone()[0]
+        cur.execute("SELECT id FROM doctors WHERE user_id = %s", (doctor_b["id"],))
+        doctor_b_id = cur.fetchone()[0]
 finally:
     conn.close()
 
@@ -156,6 +174,10 @@ try:
         patient_appointments = cur.fetchall()
         cur.execute("SELECT id, patient_user_id FROM visit_notes")
         patient_notes = cur.fetchall()
+        cur.execute("SELECT id, patient_user_id FROM prescriptions")
+        patient_prescriptions = cur.fetchall()
+        cur.execute("SELECT public.scheduled_slot_is_taken(%s)", (__SLOT_B_ID__,))
+        other_patient_slot_taken = cur.fetchone()[0]
 finally:
     conn.close()
 
@@ -176,8 +198,61 @@ try:
     with conn.cursor() as cur:
         cur.execute("SELECT id, doctor_id FROM visit_notes")
         doctor_notes = cur.fetchall()
+        cur.execute("SELECT id, doctor_id FROM prescriptions")
+        doctor_prescriptions = cur.fetchall()
+        cur.execute(
+            "SELECT id, doctor_id FROM slots WHERE id IN (%s, %s) ORDER BY id",
+            (__SLOT_A_ID__, __SLOT_B_ID__),
+        )
+        doctor_slots = cur.fetchall()
 finally:
     conn.close()
+
+def doctor_cannot_insert_time_off(user, target_doctor_id):
+    conn = db_as(user)
+    try:
+        with conn.cursor() as cur:
+            try:
+                cur.execute(
+                    """
+                    INSERT INTO time_off (doctor_id, starts_on, ends_on)
+                    VALUES (%s, CURRENT_DATE + 400, CURRENT_DATE + 400)
+                    """,
+                    (target_doctor_id,),
+                )
+            except psycopg2.errors.InsufficientPrivilege:
+                return True
+            return False
+    finally:
+        conn.rollback()
+        conn.close()
+
+doctor_cannot_edit_schedule = doctor_cannot_insert_time_off(doctor, doctor_id)
+
+def doctor_cannot_request_other_doctor_time_off(user, target_doctor_id):
+    conn = db_as(user)
+    try:
+        with conn.cursor() as cur:
+            try:
+                cur.execute(
+                    """
+                    INSERT INTO time_off_requests
+                        (doctor_id, starts_on, ends_on, comment)
+                    VALUES (%s, CURRENT_DATE + 400, CURRENT_DATE + 400,
+                            'rls-boundary-other-doctor')
+                    """,
+                    (target_doctor_id,),
+                )
+            except psycopg2.errors.InsufficientPrivilege:
+                return True
+            return False
+    finally:
+        conn.rollback()
+        conn.close()
+
+doctor_cannot_request_for_other = doctor_cannot_request_other_doctor_time_off(
+    doctor, doctor_b_id
+)
 
 def body_denied(user):
     conn = db_as(user)
@@ -186,13 +261,112 @@ def body_denied(user):
             try:
                 cur.execute("SELECT body FROM visit_notes")
             except psycopg2.errors.InsufficientPrivilege:
+                return "permission denied"
+            return cur.fetchall()
+    finally:
+        conn.close()
+
+registrar_body_result = body_denied(registrar)
+admin_body_result = body_denied(admin)
+
+def prescription_body_denied(user):
+    conn = db_as(user)
+    try:
+        with conn.cursor() as cur:
+            try:
+                cur.execute("SELECT body FROM prescriptions")
+            except psycopg2.errors.InsufficientPrivilege:
+                return "permission denied"
+            return cur.fetchall()
+    finally:
+        conn.close()
+
+registrar_prescription_body_result = prescription_body_denied(registrar)
+admin_prescription_body_result = prescription_body_denied(admin)
+
+def audit_select_denied(user):
+    conn = db_as(user)
+    try:
+        with conn.cursor() as cur:
+            try:
+                cur.execute("SELECT id FROM audit_events")
+            except psycopg2.errors.InsufficientPrivilege:
                 return True
             return False
     finally:
         conn.close()
 
-registrar_body_denied = body_denied(registrar)
-admin_body_denied = body_denied(admin)
+patient_audit_select_denied = audit_select_denied(patient_a)
+registrar_audit_select_denied = audit_select_denied(registrar)
+
+def patient_insert(sql, params):
+    conn = db_as(patient_a)
+    try:
+        with conn.cursor() as cur:
+            cur.execute(sql, params)
+            inserted = cur.fetchone()
+        conn.rollback()
+        return inserted is not None
+    except psycopg2.errors.InsufficientPrivilege:
+        conn.rollback()
+        return False
+    finally:
+        conn.close()
+
+valid_free_slot_insert_allowed = patient_insert(
+    """
+    INSERT INTO appointments (slot_id, patient_user_id, doctor_id, starts_at, ends_at)
+    SELECT id, %s, doctor_id, starts_at, ends_at FROM slots WHERE id = %s
+    RETURNING id
+    """,
+    (patient_a["id"], __FREE_SLOT_ID__),
+)
+spoofed_slot_insert_allowed = patient_insert(
+    """
+    INSERT INTO appointments (slot_id, patient_user_id, doctor_id, starts_at, ends_at)
+    SELECT id, %s, %s, starts_at, ends_at FROM slots WHERE id = %s
+    RETURNING id
+    """,
+    (patient_a["id"], doctor_b_id, __FREE_SLOT_ID__),
+)
+occupied_slot_insert_allowed = patient_insert(
+    """
+    INSERT INTO appointments (slot_id, patient_user_id, doctor_id, starts_at, ends_at)
+    SELECT id, %s, doctor_id, starts_at, ends_at FROM slots WHERE id = %s
+    RETURNING id
+    """,
+    (patient_a["id"], __SLOT_B_ID__),
+)
+
+conn = db_as(patient_a)
+try:
+    with conn.cursor() as cur:
+        try:
+            cur.execute("UPDATE appointments SET status='done' WHERE id=%s", (__APPOINTMENT_A_ID__,))
+        except (psycopg2.errors.InsufficientPrivilege, psycopg2.errors.CheckViolation):
+            arbitrary_status_denied = True
+        else:
+            arbitrary_status_denied = False
+finally:
+    conn.rollback()
+    conn.close()
+
+conn = db_as(patient_a)
+try:
+    with conn.cursor() as cur:
+        cur.execute(
+            "UPDATE appointments SET status='cancelled' WHERE id=%s",
+            (__APPOINTMENT_A_ID__,),
+        )
+        patient_cancelled = cur.rowcount
+        cur.execute(
+            "UPDATE appointments SET status='scheduled' WHERE id=%s",
+            (__APPOINTMENT_A_ID__,),
+        )
+        patient_restored = cur.rowcount
+finally:
+    conn.rollback()
+    conn.close()
 
 conn = db_as(doctor)
 try:
@@ -217,17 +391,40 @@ finally:
 print(json.dumps({
     "patient_appointments": patient_appointments,
     "patient_notes": patient_notes,
+    "patient_prescriptions": patient_prescriptions,
     "doctor_notes": doctor_notes,
+    "doctor_prescriptions": doctor_prescriptions,
+    "doctor_slots": doctor_slots,
     "doctor_id": doctor_id,
+    "doctor_b_id": doctor_b_id,
+    "doctor_cannot_edit_schedule": doctor_cannot_edit_schedule,
+    "doctor_cannot_request_for_other": doctor_cannot_request_for_other,
     "patient_a_id": patient_a["id"],
     "patient_b_id": patient_b["id"],
     "api_access_denied": api_access_denied,
-    "registrar_body_denied": registrar_body_denied,
-    "admin_body_denied": admin_body_denied,
+    "registrar_body_result": registrar_body_result,
+    "admin_body_result": admin_body_result,
+    "registrar_prescription_body_result": registrar_prescription_body_result,
+    "admin_prescription_body_result": admin_prescription_body_result,
+    "patient_audit_select_denied": patient_audit_select_denied,
+    "registrar_audit_select_denied": registrar_audit_select_denied,
+    "other_patient_slot_taken": other_patient_slot_taken,
+    "valid_free_slot_insert_allowed": valid_free_slot_insert_allowed,
+    "spoofed_slot_insert_allowed": spoofed_slot_insert_allowed,
+    "occupied_slot_insert_allowed": occupied_slot_insert_allowed,
+    "arbitrary_status_denied": arbitrary_status_denied,
+    "patient_cancelled": patient_cancelled,
+    "patient_restored": patient_restored,
     "direct_email_denied": direct_email_denied,
     "doctor_patient_emails": doctor_patient_emails,
 }))
-"""
+'''
+    api_script = (
+        api_script.replace("__SLOT_B_ID__", str(slot_b))
+        .replace("__FREE_SLOT_ID__", str(slot_c))
+        .replace("__APPOINTMENT_A_ID__", str(appointment_a))
+        .replace("__SLOT_A_ID__", str(slot_a))
+    )
 
     try:
         result = json.loads(compose_exec("api", ["python", "-"], input_text=api_script))
@@ -235,19 +432,165 @@ print(json.dumps({
         assert result["patient_b_id"] == patient_b_id
         assert [appointment_a, patient_a_id] in result["patient_appointments"]
         assert [note_a, patient_a_id] in result["patient_notes"]
+        assert [prescription_a, patient_a_id] in result["patient_prescriptions"]
         assert all(patient_id == patient_a_id for _, patient_id in result["patient_appointments"])
         assert all(patient_id == patient_a_id for _, patient_id in result["patient_notes"])
+        assert all(patient_id == patient_a_id for _, patient_id in result["patient_prescriptions"])
         assert all(row_id != appointment_b for row_id, _ in result["patient_appointments"])
         assert all(row_id != note_b for row_id, _ in result["patient_notes"])
+        assert all(row_id != prescription_b for row_id, _ in result["patient_prescriptions"])
         assert result["doctor_notes"]
         assert all(doctor_id == result["doctor_id"] for _, doctor_id in result["doctor_notes"])
         assert note_a in [row_id for row_id, _ in result["doctor_notes"]]
         assert note_b not in [row_id for row_id, _ in result["doctor_notes"]]
+        assert prescription_a in [row_id for row_id, _ in result["doctor_prescriptions"]]
+        assert prescription_b not in [row_id for row_id, _ in result["doctor_prescriptions"]]
+        assert all(
+            doctor_id == result["doctor_id"]
+            for _, doctor_id in result["doctor_prescriptions"]
+        )
+        assert [slot_a, result["doctor_id"]] in result["doctor_slots"]
+        assert all(doctor_id == result["doctor_id"] for _, doctor_id in result["doctor_slots"])
+        assert all(slot_id != slot_b for slot_id, _ in result["doctor_slots"])
+        assert result["doctor_cannot_edit_schedule"] is True
+        assert result["doctor_cannot_request_for_other"] is True
         assert result["api_access_denied"] is True
-        assert result["registrar_body_denied"] is True
-        assert result["admin_body_denied"] is True
+        assert result["registrar_body_result"] in ("permission denied", [])
+        assert result["admin_body_result"] in ("permission denied", [])
+        assert result["registrar_prescription_body_result"] in ("permission denied", [])
+        assert result["admin_prescription_body_result"] in ("permission denied", [])
+        assert result["patient_audit_select_denied"] is True
+        assert result["registrar_audit_select_denied"] is True
+        assert result["other_patient_slot_taken"] is True
+        assert result["valid_free_slot_insert_allowed"] is True
+        assert result["spoofed_slot_insert_allowed"] is False
+        assert result["occupied_slot_insert_allowed"] is False
+        assert result["arbitrary_status_denied"] is True
+        assert result["patient_cancelled"] == 1
+        assert result["patient_restored"] == 0
         assert result["direct_email_denied"] is True
         assert PATIENT_A in result["doctor_patient_emails"]
+
+        with httpx.Client(base_url=TEST_BASE, follow_redirects=True, timeout=10.0) as client:
+            login = client.post(
+                "/login",
+                data={"email": PATIENT_A, "password": "password123"},
+            )
+            assert login.status_code == 200
+            page = client.get(f"/doctors/{result['doctor_b_id']}/slots")
+            assert page.status_code == 200
+            assert f'action="/slots/{slot_b}/book"' not in page.text
+            assert "Unavailable" in page.text
+
+        compose_exec(
+            "db",
+            [
+                "psql", "-X", "-q", "-v", "ON_ERROR_STOP=1",
+                "-U", "clinic", "-d", "clinic", "-c",
+                f"UPDATE users SET blocked=TRUE WHERE id={patient_a_id}",
+            ],
+        )
+        blocked_script = '''
+import json
+import psycopg2
+from db import db, db_as
+
+conn = db()
+try:
+    with conn.cursor() as cur:
+        cur.execute("SELECT id, role FROM users WHERE email=%s", ("pat@clinic.local",))
+        row = cur.fetchone()
+        patient = {"id": row[0], "role": row[1]}
+        cur.execute("SELECT id, role FROM users WHERE email=%s", ("reg@clinic.local",))
+        row = cur.fetchone()
+        registrar = {"id": row[0], "role": row[1]}
+finally:
+    conn.close()
+
+def blocked_patient_insert_denied_as(user, patient_id):
+    conn = db_as(user)
+    try:
+        with conn.cursor() as cur:
+            try:
+                cur.execute(
+                    """
+                    INSERT INTO appointments (slot_id, patient_user_id, doctor_id, starts_at, ends_at)
+                    SELECT id, %s, doctor_id, starts_at, ends_at
+                    FROM slots WHERE id = __FREE_SLOT_ID__
+                    """,
+                    (patient_id,),
+                )
+            except psycopg2.errors.InsufficientPrivilege:
+                return True
+            return False
+    finally:
+        conn.rollback()
+        conn.close()
+
+blocked_insert_denied = blocked_patient_insert_denied_as(patient, patient["id"])
+registrar_blocked_insert_denied = blocked_patient_insert_denied_as(
+    registrar, patient["id"]
+)
+
+print(json.dumps({
+    "blocked_insert_denied": blocked_insert_denied,
+    "registrar_blocked_insert_denied": registrar_blocked_insert_denied,
+}))
+'''.replace("__FREE_SLOT_ID__", str(slot_c))
+        try:
+            blocked_result = json.loads(
+                compose_exec("api", ["python", "-"], input_text=blocked_script)
+            )
+        finally:
+            compose_exec(
+                "db",
+                [
+                    "psql", "-X", "-q", "-v", "ON_ERROR_STOP=1",
+                    "-U", "clinic", "-d", "clinic", "-c",
+                    f"UPDATE users SET blocked=FALSE WHERE id={patient_a_id}",
+                ],
+            )
+        assert blocked_result["blocked_insert_denied"] is True
+        assert blocked_result["registrar_blocked_insert_denied"] is True
+
+        report = [
+            "Regression: unfiltered SELECTs under app roles",
+            "Context: db_as() sets SET LOCAL ROLE and app.user_id in one transaction.",
+            "Patient SQL: SELECT id, patient_user_id FROM appointments;",
+            f"Patient result: {result['patient_appointments']}",
+            "Patient SQL: SELECT id, patient_user_id FROM visit_notes;",
+            f"Patient result: {result['patient_notes']}",
+            "Patient SQL: SELECT id, patient_user_id FROM prescriptions;",
+            f"Patient result: {result['patient_prescriptions']}",
+            "Doctor SQL: SELECT id, doctor_id FROM visit_notes;",
+            f"Doctor result: {result['doctor_notes']}",
+            "Doctor SQL: SELECT id, doctor_id FROM prescriptions;",
+            f"Doctor result: {result['doctor_prescriptions']}",
+            "Doctor SQL: SELECT id, doctor_id FROM slots;",
+            f"Doctor result: {result['doctor_slots']}",
+            f"Doctor time-off/schedule writes denied: {result['doctor_cannot_edit_schedule']}, {result['doctor_cannot_request_for_other']}",
+            "Registrar SQL: SELECT body FROM visit_notes;",
+            f"Registrar result: {result['registrar_body_result']}",
+            "Registrar SQL: SELECT body FROM prescriptions;",
+            f"Registrar result: {result['registrar_prescription_body_result']}",
+            "Admin SQL: SELECT body FROM visit_notes;",
+            f"Admin result: {result['admin_body_result']}",
+            "Admin SQL: SELECT body FROM prescriptions;",
+            f"Admin result: {result['admin_prescription_body_result']}",
+            f"Patient/registrar audit SELECT denied: {result['patient_audit_select_denied']}, {result['registrar_audit_select_denied']}",
+            f"Patient sees another patient's slot as taken: {result['other_patient_slot_taken']}",
+            f"Valid free-slot insert accepted: {result['valid_free_slot_insert_allowed']}",
+            f"Spoofed and occupied-slot inserts accepted: {result['spoofed_slot_insert_allowed']}, {result['occupied_slot_insert_allowed']}",
+            f"Arbitrary status denied: {result['arbitrary_status_denied']}",
+            f"Patient cancel/restore rowcounts: {result['patient_cancelled']}, {result['patient_restored']}",
+            f"Blocked patient's insert denied: {blocked_result['blocked_insert_denied']}",
+            f"Registrar insert for blocked patient denied: {blocked_result['registrar_blocked_insert_denied']}",
+            "Patient page: booked slot renders unavailable without a booking action.",
+        ]
+        (ROOT / "experiments" / "rls_boundary_output.txt").write_text(
+            "\n".join(report) + "\n",
+            encoding="utf-8",
+        )
     finally:
         compose_exec(
             "db",
@@ -258,7 +601,8 @@ print(json.dumps({
                 DELETE FROM prescriptions WHERE appointment_id IN ({appointment_a}, {appointment_b});
                 DELETE FROM visit_notes WHERE appointment_id IN ({appointment_a}, {appointment_b});
                 DELETE FROM appointments WHERE id IN ({appointment_a}, {appointment_b});
-                DELETE FROM slots WHERE id IN ({slot_a}, {slot_b});
+                DELETE FROM appointments WHERE slot_id = {slot_c};
+                DELETE FROM slots WHERE id IN ({slot_a}, {slot_b}, {slot_c});
                 """,
             ],
         )

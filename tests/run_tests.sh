@@ -11,6 +11,7 @@ if ! command -v docker >/dev/null 2>&1; then
 fi
 
 TEST_PYTHON=python3
+TEST_BASE_URL="${CLINIC_TEST_BASE:-http://localhost:8080}"
 if { [ ! -x "$VENV_DIR/bin/python" ] || [ ! -f "$VENV_DIR/bin/activate" ]; } \
   && python3 -m venv "$VENV_DIR" >/dev/null 2>&1 \
   && [ -x "$VENV_DIR/bin/python" ] && [ -f "$VENV_DIR/bin/activate" ]; then
@@ -32,10 +33,10 @@ fi
 echo "Starting the local clinic stack (database volume will be preserved)..."
 docker compose up -d --build
 
-echo "Waiting for http://localhost:8080 ..."
+echo "Waiting for $TEST_BASE_URL ..."
 ready=false
 for attempt in $(seq 1 30); do
-  if "$TEST_PYTHON" -c 'import urllib.request; urllib.request.urlopen("http://localhost:8080/", timeout=1)' >/dev/null 2>&1; then
+  if CLINIC_TEST_BASE="$TEST_BASE_URL" "$TEST_PYTHON" -c 'import os, urllib.request; urllib.request.urlopen(os.environ["CLINIC_TEST_BASE"] + "/", timeout=1)' >/dev/null 2>&1; then
     ready=true
     break
   fi
@@ -43,7 +44,7 @@ for attempt in $(seq 1 30); do
 done
 
 if [ "$ready" != true ]; then
-  echo "The clinic app did not become available at http://localhost:8080." >&2
+  echo "The clinic app did not become available at $TEST_BASE_URL." >&2
   docker compose logs --tail=40 api
   exit 1
 fi

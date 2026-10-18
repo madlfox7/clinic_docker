@@ -1,0 +1,48 @@
+{% extends "base.html" %}
+{% block content %}
+
+<h1>Clinical records</h1>
+<p>{{ appointment.patient_email }} — {{ appointment.doctor_name }}</p>
+<p>{{ appointment.starts_at.strftime("%Y-%m-%d %H:%M") }}–{{ appointment.ends_at.strftime("%H:%M") }}</p>
+<p>Status: {{ appointment.status }}</p>
+<p><a href="/doctor/appointments">Back to my appointments</a></p>
+
+{% if saved == "note" %}<p>Clinical note saved.</p>{% endif %}
+{% if saved == "prescription" %}<p>Prescription saved.</p>{% endif %}
+{% if error == "empty" %}<p>Enter text before saving.</p>
+{% elif error == "too_long" %}<p>Record text is too long.</p>
+{% elif error == "invalid_type" %}<p>Choose a valid record type.</p>
+{% elif error == "record_unavailable" %}<p>This appointment cannot be edited (it may be cancelled).</p>{% endif %}
+
+<h2>Clinical note</h2>
+{% if can_edit %}
+<form method="post" action="/doctor/appointments/{{ appointment.id }}/records">
+  <input type="hidden" name="record_type" value="note">
+  <label>Note
+    <textarea name="body" rows="6" maxlength="4000" required>{{ note }}</textarea>
+  </label>
+  <button type="submit">Save note</button>
+</form>
+{% else %}
+<p>This cancelled appointment is read-only.</p>
+{% if note %}<pre>{{ note }}</pre>{% else %}<p>No clinical note recorded.</p>{% endif %}
+{% endif %}
+
+<h2>Prescriptions</h2>
+<ul>
+  {% for prescription in prescriptions %}
+    <li>{{ prescription }}</li>
+  {% else %}
+    <li>No prescriptions recorded.</li>
+  {% endfor %}
+</ul>
+{% if can_edit %}
+<form method="post" action="/doctor/appointments/{{ appointment.id }}/records">
+  <input type="hidden" name="record_type" value="prescription">
+  <label>Prescription
+    <textarea name="body" rows="4" maxlength="4000" required></textarea>
+  </label>
+  <button type="submit">Add prescription</button>
+</form>
+{% endif %}
+{% endblock %}

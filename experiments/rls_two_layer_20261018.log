@@ -1,0 +1,32 @@
+============================= test session starts ==============================
+platform linux -- Python 3.10.12, pytest-8.3.3, pluggy-1.6.0 -- /usr/bin/python3
+cachedir: .pytest_cache
+rootdir: /home/madfox/clinic_docker
+plugins: anyio-4.15.1
+collecting ... collected 23 items
+
+tests/test_stage4.py::test_guest_sees_doctors_but_not_slots PASSED       [  4%]
+tests/test_stage4.py::test_bad_password_rejected PASSED                  [  8%]
+tests/test_stage4.py::test_already_logged_in_admin_is_not_asked_for_credentials PASSED [ 13%]
+tests/test_stage4.py::test_patient_login_and_cabinet PASSED              [ 17%]
+tests/test_stage4.py::test_book_cancel_frees_slot_for_other_patient PASSED [ 21%]
+tests/test_stage4.py::test_patient_cannot_cancel_another_or_past_appointment PASSED [ 26%]
+tests/test_stage4.py::test_overlap_same_time_other_doctor PASSED         [ 30%]
+tests/test_stage4.py::test_patient_cannot_open_doctor_appointments PASSED [ 34%]
+tests/test_stage4.py::test_doctor_sees_only_own_cabinet PASSED           [ 39%]
+tests/test_stage4.py::test_registrar_books_for_pat2 PASSED               [ 43%]
+tests/test_stage4.py::test_registrar_can_cancel_patient_appointment PASSED [ 47%]
+tests/test_stage4.py::test_admin_can_cancel_future_appointments_separately_from_block PASSED [ 52%]
+tests/test_stage4.py::test_admin_block_pat PASSED                        [ 56%]
+tests/test_stage4.py::test_admin_slot_generator_respects_time_off_and_role PASSED [ 60%]
+tests/test_stage4.py::test_admin_schedule_configuration_is_admin_only_and_repeatable PASSED [ 65%]
+tests/test_stage4.py::test_database_rejects_overlapping_appointments_on_different_slots PASSED [ 69%]
+tests/test_stage4.py::test_past_slot_cannot_be_booked PASSED             [ 73%]
+tests/test_stage4.py::test_closed_day_lists_scheduled_and_drops_cancelled_only_slot PASSED [ 78%]
+tests/test_stage4.py::test_apply_hours_removes_free_slots_outside_window_only PASSED [ 82%]
+tests/test_stage4.py::test_patient_overlap_rejected_by_exclusion_without_python_select PASSED [ 86%]
+tests/test_stage4.py::test_session_role_and_block_come_from_database PASSED [ 91%]
+tests/test_stage4.py::test_visit_notes_keep_medical_text_off_appointment_status PASSED [ 95%]
+tests/test_rls_boundary.py::test_unfiltered_broken_selects_obey_role_rls PASSED [100%]
+
+======================== 23 passed in 64.57s (0:01:04) =========================

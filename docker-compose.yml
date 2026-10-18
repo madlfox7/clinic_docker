@@ -82,7 +82,7 @@ services:
       context: .
       dockerfile: docker/proxy/Dockerfile
     ports:
-      - "8080:8080"
+      - "${CLINIC_PROXY_PORT:-8080}:8080"
     networks:
       - frontend
     depends_on:

@@ -28,6 +28,7 @@ MAX_SLOT_MINUTES = 24 * 60
 MAX_EMAIL_LENGTH = 254
 MAX_PASSWORD_LENGTH = 72  # hashes <=72 bytes, other bytes ignored
 MAX_TEXT_LENGTH = 200
+MAX_RECORD_BODY_LENGTH = 4000
 
 
 def within_length(raw, max_length: int) -> bool:
@@ -96,6 +97,13 @@ def _set_db_context(conn, role, user_id):
 def set_db_context(conn, user):
     role = ROLE_BY_APP[user["role"]]
     _set_db_context(conn, role, user["id"])
+
+
+def record_audit_event(cur, action: str, target_type: str, target_id: int | None = None):
+    cur.execute(
+        "SELECT public.record_audit_event(%s, %s, %s)",
+        (action, target_type, target_id),
+    )
 
 
 def db_as(user):

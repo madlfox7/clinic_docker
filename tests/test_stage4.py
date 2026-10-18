@@ -1,3 +1,4 @@
+import os
 import re
 import subprocess
 from pathlib import Path
@@ -14,7 +15,7 @@ from tests.clinical_notes import (
 
 ROOT = Path(__file__).resolve().parents[1]
 
-BASE = "http://localhost:8080"
+BASE = os.environ.get("CLINIC_TEST_BASE", "http://localhost:8080")
 PASSWORD = "password123"
 
 PAT = "pat@clinic.local"
@@ -138,6 +139,74 @@ def test_book_cancel_frees_slot_for_other_patient():
 			pat2.post(f"/appointments/{appointment_id}/cancel")
 
 
+def test_patient_cannot_cancel_another_or_past_appointment():
+	with client() as pat, client() as pat2:
+		login(pat, PAT)
+		login(pat2, PAT2)
+		_, slot_id = open_free_slot_page(pat)
+		existing_ids = set(appointment_ids(pat.get("/my").text))
+		booked = pat.post(f"/slots/{slot_id}/book")
+		assert booked.status_code == 200
+		created_ids = set(appointment_ids(pat.get("/my").text)) - existing_ids
+		assert created_ids, "test booking did not create a scheduled appointment"
+		appointment_id = created_ids.pop()
+		past_slot_id = None
+		past_appointment_id = None
+
+		try:
+			other_cancel = pat2.post(f"/appointments/{appointment_id}/cancel")
+			assert "cancel_error=1" in str(other_cancel.url)
+			assert psql(
+				f"SELECT status FROM appointments WHERE id = {int(appointment_id)}"
+			) == "scheduled"
+
+			doctor_id = psql(
+				f"SELECT id FROM doctors WHERE user_id = "
+				f"(SELECT id FROM users WHERE email = '{DOC}')"
+			)
+			patient_id = psql(f"SELECT id FROM users WHERE email = '{PAT}'")
+			past_slot_id = psql(
+				f"""
+				INSERT INTO slots (doctor_id, starts_at, ends_at)
+				VALUES (
+					{int(doctor_id)},
+					CURRENT_TIMESTAMP - INTERVAL '5 years',
+					CURRENT_TIMESTAMP - INTERVAL '5 years' + INTERVAL '30 minutes'
+				)
+				RETURNING id
+				"""
+			)
+			past_appointment_id = psql(
+				f"""
+				INSERT INTO appointments (
+					slot_id, patient_user_id, status, doctor_id, starts_at, ends_at
+				)
+				SELECT id, {int(patient_id)}, 'scheduled', doctor_id, starts_at, ends_at
+				FROM slots
+				WHERE id = {int(past_slot_id)}
+				RETURNING id
+				"""
+			)
+
+			past_cancel = pat.post(
+				f"/appointments/{int(past_appointment_id)}/cancel"
+			)
+			assert "cancel_error=1" in str(past_cancel.url)
+			assert psql(
+				f"SELECT status FROM appointments WHERE id = {int(past_appointment_id)}"
+			) == "scheduled"
+			assert int(past_appointment_id) not in appointment_ids(pat.get("/my").text)
+		finally:
+			if psql(
+				f"SELECT status FROM appointments WHERE id = {int(appointment_id)}"
+			) == "scheduled":
+				pat.post(f"/appointments/{appointment_id}/cancel")
+			if past_appointment_id:
+				psql(f"DELETE FROM appointments WHERE id = {int(past_appointment_id)}")
+			if past_slot_id:
+				psql(f"DELETE FROM slots WHERE id = {int(past_slot_id)}")
+
+
 def test_overlap_same_time_other_doctor():
 	with client() as c:
 		login(c, PAT)
@@ -184,10 +253,131 @@ def test_doctor_sees_only_own_cabinet():
 		assert "/login" in str(mine.url) or "Login" in mine.text
 
 
+def test_medical_records_are_scoped_and_audited():
+	with (
+		client() as pat,
+		client() as doctor,
+		client() as other_doctor,
+		client() as registrar,
+		client() as admin,
+	):
+		login(pat, PAT)
+		login(doctor, DOC)
+		login(other_doctor, DOC2)
+		login(registrar, REG)
+		login(admin, ADMIN)
+		doctor_id = psql(
+			f"SELECT id FROM doctors WHERE user_id = "
+			f"(SELECT id FROM users WHERE email = '{DOC}')"
+		)
+		existing_ids = set(appointment_ids(pat.get("/my").text))
+		slot_page = pat.get(f"/doctors/{doctor_id}/slots")
+		appointment_id = None
+		try:
+			for slot_id in slot_ids(slot_page.text):
+				pat.post(f"/slots/{slot_id}/book")
+				created_ids = set(appointment_ids(pat.get("/my").text)) - existing_ids
+				if created_ids:
+					appointment_id = int(created_ids.pop())
+					break
+			assert appointment_id is not None, "no bookable slot for medical record test"
+
+			record_url = f"/doctor/appointments/{appointment_id}/records"
+			page = doctor.get(record_url)
+			assert page.status_code == 200
+			assert PAT in page.text
+			note_body = "private-test-clinical-note"
+			prescription_body = "private-test-prescription"
+			saved_note = doctor.post(
+				record_url,
+				data={"record_type": "note", "body": note_body},
+			)
+			assert "saved=note" in str(saved_note.url)
+			assert "Clinical note saved." in saved_note.text
+			saved_prescription = doctor.post(
+				record_url,
+				data={"record_type": "prescription", "body": prescription_body},
+			)
+			assert "saved=prescription" in str(saved_prescription.url)
+			assert "Prescription saved." in saved_prescription.text
+
+			patient_records = pat.get("/my/records")
+			assert note_body in patient_records.text
+			assert prescription_body in patient_records.text
+			assert note_body not in other_doctor.get(record_url).text
+			assert note_body not in registrar.get(record_url).text
+			assert note_body not in admin.get("/my/records").text
+			assert note_body not in pat.get(record_url).text
+
+			audit = admin.get("/admin/audit")
+			assert audit.status_code == 200
+			assert "medical.records.view" in audit.text
+			assert "medical.note.save" in audit.text
+			assert "medical.prescription.add" in audit.text
+			assert note_body not in audit.text
+			assert prescription_body not in audit.text
+			assert note_body not in registrar.get("/admin/audit").text
+
+			cancelled = pat.post(f"/appointments/{appointment_id}/cancel")
+			assert "cancelled=1" in str(cancelled.url)
+			assert "Appointment cancelled." in cancelled.text
+			doctor_schedule = doctor.get("/doctor/appointments")
+			assert re.search(
+				rf'<li style="color: gray">\s*{re.escape(PAT)}[\s\S]*?\(cancelled[\s\S]*?'
+				rf'href="/doctor/appointments/{appointment_id}/records"',
+				doctor_schedule.text,
+			)
+			cancelled_records = doctor.get(record_url)
+			assert note_body in cancelled_records.text
+			assert prescription_body in cancelled_records.text
+			assert "read-only" in cancelled_records.text
+			assert "<textarea" not in cancelled_records.text
+
+			patient_records = pat.get("/my/records")
+			assert note_body in patient_records.text
+			assert prescription_body in patient_records.text
+			read_only_update = doctor.post(
+				record_url,
+				data={"record_type": "note", "body": "must-not-overwrite-cancelled-note"},
+			)
+			assert "cannot be edited" in read_only_update.text
+			assert note_body in read_only_update.text
+			assert "must-not-overwrite-cancelled-note" not in read_only_update.text
+		finally:
+			if appointment_id is not None:
+				psql(
+					f"DELETE FROM prescriptions WHERE appointment_id = {appointment_id};"
+					f"DELETE FROM visit_notes WHERE appointment_id = {appointment_id}"
+				)
+				if str(appointment_id) in appointment_ids(pat.get("/my").text):
+					pat.post(f"/appointments/{appointment_id}/cancel")
+
+
+def test_admin_can_view_doctor_slots_without_actions():
+	with client() as admin:
+		login(admin, ADMIN)
+		doctors = admin.get("/doctors")
+		doctor_match = re.search(r'href="/doctors/(\d+)/slots"', doctors.text)
+		assert doctor_match, "admin cannot find a doctor slots link"
+
+		slots = admin.get(f"/doctors/{doctor_match.group(1)}/slots")
+		assert slots.status_code == 200
+		assert "Slots:" in slots.text
+		assert 'action="/slots/' not in slots.text
+		assert 'action="/appointments/' not in slots.text
+
+
 def test_registrar_books_for_pat2():
 	with client() as reg, client() as pat2:
 		login(reg, REG)
 		login(pat2, PAT2)
+		_, error_slot_id = open_free_slot_page(reg)
+		failed = reg.post(
+			f"/slots/{error_slot_id}/book",
+			data={"patient_email": "missing@clinic.local"},
+		)
+		assert "error=patient_not_found" in str(failed.url)
+		assert "Patient account was not found." in failed.text
 		existing_ids = set(appointment_ids(pat2.get("/my").text))
 		doctors = reg.get("/doctors")
 		r = None
@@ -205,6 +395,7 @@ def test_registrar_books_for_pat2():
 				break
 		assert r is not None, "no free slot without patient overlap for registrar test"
 		assert r.status_code == 200
+		assert "Appointment booked successfully." in r.text
 		assert "patient_required" not in r.text
 		assert "patient_not_found" not in r.text
 		mine = pat2.get("/my")
@@ -232,6 +423,10 @@ def test_registrar_can_cancel_patient_appointment():
 			assert f'action="/appointments/{appointment_id}/cancel"' in registrar_slots.text
 			cancelled = reg.post(f"/appointments/{appointment_id}/cancel")
 			assert "cancelled=1" in str(cancelled.url)
+			assert "Appointment cancelled." in cancelled.text
+			repeated_cancel = reg.post(f"/appointments/{appointment_id}/cancel")
+			assert "cancel_error=1" in str(repeated_cancel.url)
+			assert "could not be cancelled" in repeated_cancel.text
 			assert appointment_id not in appointment_ids(pat.get("/my").text)
 		finally:
 			if appointment_id in appointment_ids(pat.get("/my").text):
@@ -291,6 +486,11 @@ def test_admin_can_cancel_future_appointments_separately_from_block():
 			assert psql(
 				f"SELECT status FROM appointments WHERE id = {int(appointment_id)}"
 			) == "cancelled"
+			doctor_schedule = doc.get("/doctor/appointments").text
+			assert re.search(
+				rf'<li style="color: gray">\s*{re.escape(PAT)}[\s\S]*?\(cancelled',
+				doctor_schedule,
+			)
 			admin.post(f"/admin/users/{user_id}/unblock")
 			login(pat, PAT)
 			assert appointment_id not in appointment_ids(pat.get("/my").text)
@@ -360,6 +560,7 @@ def test_admin_schedule_configuration_is_admin_only_and_repeatable():
 		login(registrar, REG)
 		page = admin.get("/admin/schedule")
 		assert page.status_code == 200
+		assert "Current hours are not preloaded" in page.text
 		assert "Thanksgiving" in page.text
 		assert "Monday" in page.text
 		assert '<input name="name" type="text" required>' in page.text
@@ -813,11 +1014,22 @@ def test_visit_notes_keep_medical_text_off_appointment_status():
 		FROM pg_class
 		WHERE relname IN (
 			'appointments', 'visit_notes', 'prescriptions',
-			'slots', 'work_hours', 'time_off', 'holidays'
+			'slots', 'work_hours', 'time_off', 'holidays',
+			'time_off_requests'
 		)
 		  AND relrowsecurity
 		"""
-	) == "0"
+	) == "8"
+	assert psql(
+		"""
+		SELECT count(*)
+		FROM pg_constraint
+		WHERE conrelid = 'public.appointments'::regclass
+		  AND conname = 'appointments_status_check'
+		  AND contype = 'c'
+		  AND convalidated
+		"""
+	) == "1"
 
 	created = insert_cross_doctor_notes()
 	try:
@@ -895,3 +1107,206 @@ def test_visit_notes_keep_medical_text_off_appointment_status():
 		) == "2"
 	finally:
 		cleanup_cross_doctor_notes()
+
+
+def test_registrar_day_list_doctor_calendar_and_time_off_approval():
+	doctor_id = psql(
+		f"SELECT id FROM doctors WHERE user_id = (SELECT id FROM users WHERE email = '{DOC}')"
+	)
+	selected_day = psql(
+		f"""
+		SELECT g.day::date
+		FROM generate_series(CURRENT_DATE + 91, CURRENT_DATE + 365, INTERVAL '1 day')
+			AS g(day)
+		WHERE EXISTS (
+			SELECT 1
+			FROM work_hours w
+			WHERE w.doctor_id = {doctor_id}
+			  AND w.weekday = ((EXTRACT(DOW FROM g.day)::int + 6) % 7)
+			  AND TIME '10:00' >= w.start_time
+			  AND TIME '11:30' <= w.end_time
+		)
+		  AND NOT EXISTS (SELECT 1 FROM holidays h WHERE h.day = g.day::date)
+		  AND NOT EXISTS (
+			SELECT 1 FROM time_off t
+			WHERE t.doctor_id = {doctor_id}
+			  AND g.day::date BETWEEN t.starts_on AND t.ends_on
+		  )
+		  AND NOT EXISTS (
+			SELECT 1 FROM slots s
+			WHERE s.doctor_id = {doctor_id}
+			  AND s.starts_at::date = g.day::date
+		  )
+		ORDER BY g.day
+		LIMIT 1
+		"""
+	)
+	assert selected_day, "no unused future workday available for calendar test"
+
+	approved_comment = "calendar-time-off-approved-test"
+	rejected_comment = "calendar-time-off-rejected-test"
+	psql(
+		f"""
+		DELETE FROM time_off_requests
+		WHERE doctor_id = {doctor_id}
+		  AND comment IN ('{approved_comment}', '{rejected_comment}');
+		INSERT INTO slots (doctor_id, starts_at, ends_at)
+		VALUES
+			({doctor_id}, TIMESTAMP '{selected_day} 10:00', TIMESTAMP '{selected_day} 10:30'),
+			({doctor_id}, TIMESTAMP '{selected_day} 11:00', TIMESTAMP '{selected_day} 11:30');
+		"""
+	)
+	slot_ids_value = psql(
+		f"""
+		SELECT string_agg(id::text, ',' ORDER BY starts_at)
+		FROM slots
+		WHERE doctor_id = {doctor_id} AND starts_at::date = '{selected_day}'
+		"""
+	)
+	slot_id, free_slot_id = slot_ids_value.split(",")
+	appointment_id = None
+
+	try:
+		with (
+			client() as patient,
+			client() as doctor,
+			client() as other_doctor,
+			client() as registrar,
+			client() as admin,
+		):
+			login(patient, PAT)
+			login(doctor, DOC)
+			login(other_doctor, DOC2)
+			login(registrar, REG)
+			login(admin, ADMIN)
+
+			existing_ids = set(appointment_ids(patient.get("/my").text))
+			booked = patient.post(f"/slots/{slot_id}/book")
+			assert booked.status_code == 200
+			assert booked.url.path == "/my"
+			created_ids = set(appointment_ids(patient.get("/my").text)) - existing_ids
+			assert created_ids, "calendar test booking was not created"
+			appointment_id = int(created_ids.pop())
+
+			doctor_calendar = doctor.get(f"/doctor/calendar?day={selected_day}")
+			assert doctor_calendar.status_code == 200
+			assert f"{PAT} — scheduled" in doctor_calendar.text
+			assert "Available" in doctor_calendar.text
+			assert 'action="/slots/' not in doctor_calendar.text
+			assert "Save hours" not in doctor_calendar.text
+			other_calendar = other_doctor.get(
+				f"/doctor/calendar?day={selected_day}"
+			)
+			assert other_calendar.status_code == 200
+
+			registrar_day = registrar.get(
+				f"/registrar/appointments?day={selected_day}"
+			)
+			assert registrar_day.status_code == 200
+			assert PAT in registrar_day.text
+			assert "scheduled" in registrar_day.text
+			assert "10:00" in registrar_day.text
+			assert "Clinical note" not in registrar_day.text
+			assert "diagnosis" not in registrar_day.text.lower()
+
+			cancelled = patient.post(f"/appointments/{appointment_id}/cancel")
+			assert "cancelled=1" in str(cancelled.url)
+			calendar_after_cancel = doctor.get(
+				f"/doctor/calendar?day={selected_day}"
+			)
+			assert re.search(
+				rf'<li style="color: gray">[\s\S]*?{re.escape(PAT)} — cancelled',
+				calendar_after_cancel.text,
+			)
+			assert "Available" in calendar_after_cancel.text
+			registrar_cancelled = registrar.get(
+				f"/registrar/appointments?day={selected_day}"
+			)
+			assert "cancelled" in registrar_cancelled.text
+
+			for comment in (approved_comment, rejected_comment):
+				response = doctor.post(
+					"/doctor/time-off-requests",
+					data={
+						"starts_on": selected_day,
+						"ends_on": selected_day,
+						"comment": comment,
+					},
+				)
+				assert "request_submitted=1" in str(response.url)
+			doctor_requests = doctor.get(f"/doctor/calendar?day={selected_day}")
+			assert approved_comment in doctor_requests.text
+			assert rejected_comment in doctor_requests.text
+			assert approved_comment not in other_doctor.get(
+				f"/doctor/calendar?day={selected_day}"
+			).text
+
+			admin_queue = admin.get("/admin/schedule")
+			assert approved_comment in admin_queue.text
+			assert rejected_comment in admin_queue.text
+			approved_request_id = psql(
+				f"SELECT id FROM time_off_requests WHERE comment = '{approved_comment}'"
+			)
+			rejected_request_id = psql(
+				f"SELECT id FROM time_off_requests WHERE comment = '{rejected_comment}'"
+			)
+
+			rejected = admin.post(
+				f"/admin/time-off-requests/{rejected_request_id}/decision",
+				data={"decision": "reject"},
+			)
+			assert "time_off_request_decision=rejected" in str(rejected.url)
+			assert psql(
+				f"SELECT status FROM time_off_requests WHERE id = {rejected_request_id}"
+			) == "rejected"
+			assert psql(
+				f"""
+				SELECT count(*) FROM time_off
+				WHERE doctor_id = {doctor_id}
+				  AND starts_on = '{selected_day}' AND ends_on = '{selected_day}'
+				"""
+			) == "0"
+
+			approved = admin.post(
+				f"/admin/time-off-requests/{approved_request_id}/decision",
+				data={"decision": "approve"},
+			)
+			assert "time_off_request_decision=approved" in str(approved.url)
+			assert "Time-off request approved" in approved.text
+			assert psql(
+				f"SELECT status FROM time_off_requests WHERE id = {approved_request_id}"
+			) == "approved"
+			assert psql(
+				f"""
+				SELECT count(*) FROM time_off
+				WHERE doctor_id = {doctor_id}
+				  AND starts_on = '{selected_day}' AND ends_on = '{selected_day}'
+				"""
+			) == "1"
+			audit_page = admin.get("/admin/audit")
+			assert "schedule.time_off_request.submit" in audit_page.text
+			assert "schedule.time_off_request.approved" in audit_page.text
+			assert "schedule.time_off_request.rejected" in audit_page.text
+			assert approved_comment not in audit_page.text
+			assert rejected_comment not in audit_page.text
+			closed_calendar = doctor.get(f"/doctor/calendar?day={selected_day}")
+			assert "Closed: doctor time off." in closed_calendar.text
+			assert approved_comment in closed_calendar.text
+			assert rejected_comment in closed_calendar.text
+			assert psql(
+				f"SELECT count(*) FROM slots WHERE id IN ({slot_id}, {free_slot_id})"
+			) == "0"
+	finally:
+		psql(
+			f"""
+			DELETE FROM time_off
+			WHERE doctor_id = {doctor_id}
+			  AND starts_on = '{selected_day}' AND ends_on = '{selected_day}';
+			DELETE FROM time_off_requests
+			WHERE doctor_id = {doctor_id}
+			  AND comment IN ('{approved_comment}', '{rejected_comment}');
+			DELETE FROM appointments
+			WHERE slot_id IN ({slot_id}, {free_slot_id});
+			DELETE FROM slots WHERE id IN ({slot_id}, {free_slot_id});
+			"""
+		)

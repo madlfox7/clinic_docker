@@ -11,13 +11,19 @@
     | <a href="/doctors">Doctors</a>
     {% if role == "patient" %}
       | <a href="/my">My appointments</a>
+      | <a href="/my/records">My medical records</a>
     {% endif %}
     {% if role == "doctor" %}
       | <a href="/doctor/appointments">My appointments</a>
+      | <a href="/doctor/calendar">My calendar</a>
+    {% endif %}
+    {% if role == "registrar" %}
+      | <a href="/registrar/appointments">Appointments by day</a>
     {% endif %}
     {% if role == "admin" %}
       | <a href="/admin/users">Manage patients</a>
       | <a href="/admin/schedule">Schedule</a>
+      | <a href="/admin/audit">Audit log</a>
     {% endif %}
     {% if role in ("patient", "doctor", "registrar", "admin") %}
       | <a href="/me">Cabinet</a>

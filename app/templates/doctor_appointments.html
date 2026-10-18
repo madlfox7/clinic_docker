@@ -4,11 +4,15 @@
 
 
 <h1>My appointments</h1>
+{% if request.query_params.get("error") == "record_unavailable" %}
+  <p>Medical record is not available for this appointment.</p>
+{% endif %}
 <ul>
   {% for a in items %}
     <li {% if a.status == "cancelled" %}style="color: gray"{% endif %}>
       {{ a.patient_email }} — {{ a.starts_at.strftime("%Y-%m-%d %H:%M") }}-{{ a.ends_at.strftime("%H:%M") }} 
       ({{ a.status }}{% if a.patient_blocked %}, account blocked{% endif %})
+      — <a href="/doctor/appointments/{{ a.id }}/records">Notes and prescriptions</a>
     </li>
   {% endfor %}
 </ul>
