@@ -35,6 +35,26 @@ def login(c: httpx.Client, email: str) -> httpx.Response:
 	return c.post("/login", data={"email": email, "password": PASSWORD})
 
 
+def test_application_database_timezone_is_yerevan():
+	completed = subprocess.run(
+		[
+			"docker",
+			"compose",
+			"exec",
+			"-T",
+			"api",
+			"python",
+			"-c",
+			"from db import db; c=db(); cur=c.cursor(); cur.execute('SHOW TIME ZONE'); zone=cur.fetchone()[0]; cur.execute(\"SELECT CURRENT_TIMESTAMP::timestamp = CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Yerevan'\"); print(zone, cur.fetchone()[0]); c.close()",
+		],
+		cwd=ROOT,
+		capture_output=True,
+		text=True,
+	)
+	assert completed.returncode == 0, completed.stderr or completed.stdout
+	assert completed.stdout.strip() == "Asia/Yerevan True"
+
+
 def logout(c: httpx.Client) -> None:
 	c.get("/logout")
 
@@ -141,9 +161,10 @@ def test_book_cancel_frees_slot_for_other_patient():
 
 
 def test_patient_cannot_cancel_another_or_past_appointment():
-	with client() as pat, client() as pat2:
+	with client() as pat, client() as pat2, client() as registrar:
 		login(pat, PAT)
 		login(pat2, PAT2)
+		login(registrar, REG)
 		_, slot_id = open_free_slot_page(pat)
 		existing_ids = set(appointment_ids(pat.get("/my").text))
 		booked = pat.post(f"/slots/{slot_id}/book")
@@ -197,6 +218,15 @@ def test_patient_cannot_cancel_another_or_past_appointment():
 				f"SELECT status FROM appointments WHERE id = {int(past_appointment_id)}"
 			) == "scheduled"
 			assert int(past_appointment_id) not in appointment_ids(pat.get("/my").text)
+
+			registrar_past_cancel = registrar.post(
+				f"/appointments/{int(past_appointment_id)}/cancel"
+			)
+			assert "cancel_error=past" in str(registrar_past_cancel.url)
+			assert "Registrars cannot cancel past appointments." in registrar_past_cancel.text
+			assert psql(
+				f"SELECT status FROM appointments WHERE id = {int(past_appointment_id)}"
+			) == "scheduled"
 		finally:
 			if psql(
 				f"SELECT status FROM appointments WHERE id = {int(appointment_id)}"
@@ -434,6 +464,32 @@ def test_registrar_can_cancel_patient_appointment():
 				pat.post(f"/appointments/{appointment_id}/cancel")
 
 
+def test_admin_can_cancel_a_single_upcoming_visit():
+	with client() as admin, client() as patient:
+		login(admin, ADMIN)
+		login(patient, PAT)
+		_, slot_id = open_free_slot_page(patient)
+		before = set(appointment_ids(patient.get("/my").text))
+		patient.post(f"/slots/{slot_id}/book")
+		created = set(appointment_ids(patient.get("/my").text)) - before
+		assert created, "test booking did not create an appointment"
+		appointment_id = int(created.pop())
+
+		try:
+			schedule = admin.get("/admin/schedule")
+			assert (
+				f'action="/appointments/{appointment_id}/cancel"'
+				in schedule.text
+			)
+			cancelled = admin.post(f"/appointments/{appointment_id}/cancel")
+			assert "visit_cancelled=1" in str(cancelled.url)
+			assert psql(
+				f"SELECT status FROM appointments WHERE id = {appointment_id}"
+			) == "cancelled"
+		finally:
+			psql(f"DELETE FROM appointments WHERE id = {appointment_id}")
+
+
 def test_admin_can_cancel_future_appointments_separately_from_block():
 	with client() as admin, client() as pat, client() as doc:
 		login(admin, ADMIN)
@@ -539,14 +595,58 @@ def test_admin_slot_generator_respects_time_off_and_role():
 		)
 		assert match, "Anna slot-generation form missing"
 		doctor_id = match.group(1)
-
-		generated = admin.post(
-			f"/admin/doctors/{doctor_id}/generate",
-			data={"from_date": "2026-10-12", "to_date": "2026-10-12"},
+		selected_day = psql(
+			"SELECT CURRENT_DATE + ((8 - EXTRACT(ISODOW FROM CURRENT_DATE)::int) % 7) + 7"
 		)
-		assert "generated=0" in str(generated.url)
-		assert "skipped=6" in str(generated.url)
-		assert "Created 0 slots, skipped 6." in generated.text
+		psql(
+			f"""
+			INSERT INTO time_off (doctor_id, starts_on, ends_on)
+			VALUES ({int(doctor_id)}, '{selected_day}', '{selected_day}')
+			ON CONFLICT (doctor_id, starts_on, ends_on) DO NOTHING
+			"""
+		)
+
+		try:
+			generated = admin.post(
+				f"/admin/doctors/{doctor_id}/generate",
+				data={"from_date": selected_day, "to_date": selected_day},
+			)
+			assert "generated=0" in str(generated.url)
+			assert "skipped=6" in str(generated.url)
+			assert "Created 0 slots, skipped 6." in generated.text
+
+			today = psql("SELECT CURRENT_DATE")
+			yesterday = psql("SELECT CURRENT_DATE - 1")
+			day_after_tomorrow = psql("SELECT CURRENT_DATE + 2")
+			tomorrow = psql("SELECT CURRENT_DATE + 1")
+			past = admin.post(
+				f"/admin/doctors/{doctor_id}/generate",
+				data={"from_date": yesterday, "to_date": today},
+			)
+			assert "error=range_in_past" in str(past.url)
+			assert "cannot start in the past" in past.text
+
+			reversed_range = admin.post(
+				f"/admin/doctors/{doctor_id}/generate",
+				data={"from_date": day_after_tomorrow, "to_date": tomorrow},
+			)
+			assert "error=range_order" in str(reversed_range.url)
+			assert "End date must not be before start date." in reversed_range.text
+
+			too_long = admin.post(
+				f"/admin/doctors/{doctor_id}/generate",
+				data={
+					"from_date": tomorrow,
+					"to_date": psql("SELECT CURRENT_DATE + 91"),
+				},
+			)
+			assert "error=range_too_long" in str(too_long.url)
+			assert "no more than 90 calendar days" in too_long.text
+		finally:
+			psql(
+				f"DELETE FROM time_off WHERE doctor_id = {int(doctor_id)} "
+				f"AND starts_on = '{selected_day}' AND ends_on = '{selected_day}'"
+			)
 
 		unauthorized = registrar.post(
 			f"/admin/doctors/{doctor_id}/generate",
@@ -568,6 +668,9 @@ def test_admin_schedule_configuration_is_admin_only_and_repeatable():
 		doctor_match = re.search(r'<option value="(\d+)">Anna Ohanyan</option>', page.text)
 		assert doctor_match, "Anna missing from admin schedule controls"
 		doctor_id = doctor_match.group(1)
+		future_start = psql("SELECT CURRENT_DATE + 7")
+		future_end = psql("SELECT CURRENT_DATE + 13")
+		future_holiday = psql("SELECT CURRENT_DATE + 30")
 
 		for path, data in (
 			(
@@ -584,13 +687,13 @@ def test_admin_schedule_configuration_is_admin_only_and_repeatable():
 				"/admin/time-off",
 				{
 					"doctor_id": doctor_id,
-					"starts_on": "2026-10-12",
-					"ends_on": "2026-10-18",
+					"starts_on": future_start,
+					"ends_on": future_end,
 				},
 			),
 			(
 				"/admin/holidays",
-				{"holiday_day": "2026-11-26", "name": "Thanksgiving"},
+				{"holiday_day": future_holiday, "name": "Test Holiday"},
 			),
 		):
 			response = admin.post(path, data=data)
@@ -598,6 +701,46 @@ def test_admin_schedule_configuration_is_admin_only_and_repeatable():
 			assert "/admin/schedule?saved=" in str(response.url)
 			unauthorized = registrar.post(path, data=data)
 			assert "/login" in str(unauthorized.url)
+
+		past_day = psql("SELECT CURRENT_DATE - 1")
+		past_time_off = admin.post(
+			"/admin/time-off",
+			data={
+				"doctor_id": doctor_id,
+				"starts_on": past_day,
+				"ends_on": past_day,
+			},
+		)
+		assert "error=time_off_past" in str(past_time_off.url)
+		assert "Time off cannot start in the past." in past_time_off.text
+
+
+def test_admin_cannot_approve_a_past_time_off_request():
+	doctor_id = psql(
+		f"SELECT id FROM doctors WHERE user_id = (SELECT id FROM users WHERE email = '{DOC}')"
+	)
+	comment = "past-time-off-approval-test"
+	request_id = psql(
+		f"""
+		INSERT INTO time_off_requests (doctor_id, starts_on, ends_on, comment)
+		VALUES ({int(doctor_id)}, CURRENT_DATE - 1, CURRENT_DATE, '{comment}')
+		RETURNING id
+		"""
+	)
+	try:
+		with client() as admin:
+			login(admin, ADMIN)
+			response = admin.post(
+				f"/admin/time-off-requests/{request_id}/decision",
+				data={"decision": "approve"},
+			)
+			assert "error=time_off_past" in str(response.url)
+			assert "Time off cannot start in the past." in response.text
+			assert psql(
+				f"SELECT status FROM time_off_requests WHERE id = {int(request_id)}"
+			) == "pending"
+	finally:
+		psql(f"DELETE FROM time_off_requests WHERE id = {int(request_id)}")
 
 
 def psql(sql: str) -> str:
@@ -1070,17 +1213,10 @@ def test_visit_notes_keep_medical_text_off_appointment_status():
 
 		psql(
 			f"""
-			DO $$
-			BEGIN
-				INSERT INTO visit_notes (appointment_id, doctor_id, patient_user_id, body)
-				SELECT appointment_id, doctor_id, patient_user_id, 'second note'
-				FROM visit_notes
-				WHERE id = {created['note_a_id']};
-				RAISE EXCEPTION 'second visit note was accepted';
-			EXCEPTION WHEN unique_violation THEN
-				NULL;
-			END
-			$$;
+			INSERT INTO visit_notes (appointment_id, doctor_id, patient_user_id, body)
+			SELECT appointment_id, doctor_id, patient_user_id, 'second note'
+			FROM visit_notes
+			WHERE id = {created['note_a_id']}
 			"""
 		)
 		assert psql(
@@ -1088,7 +1224,7 @@ def test_visit_notes_keep_medical_text_off_appointment_status():
 			SELECT count(*) FROM visit_notes
 			WHERE appointment_id = {created['appointment_a_id']}
 			"""
-		) == "1"
+		) == "2"
 
 		psql(
 			f"""
@@ -1106,6 +1242,60 @@ def test_visit_notes_keep_medical_text_off_appointment_status():
 			WHERE appointment_id = {created['appointment_a_id']}
 			"""
 		) == "2"
+
+		for table, source_id in (
+			("visit_notes", created["note_a_id"]),
+			("prescriptions", created["note_a_id"]),
+		):
+			psql(
+				f"""
+				DO $$
+				DECLARE rejected BOOLEAN := FALSE;
+				BEGIN
+					BEGIN
+						INSERT INTO {table}
+							(appointment_id, doctor_id, patient_user_id, body)
+						SELECT appointment_id, doctor_id, patient_user_id, repeat('x', 5001)
+						FROM visit_notes
+						WHERE id = {source_id};
+					EXCEPTION WHEN check_violation THEN
+						rejected := TRUE;
+					END;
+					IF NOT rejected THEN
+						RAISE EXCEPTION '5001-character {table} body was accepted';
+					END IF;
+				END
+				$$;
+				"""
+			)
+
+		with client() as doctor:
+			login(doctor, DOC)
+			unicode_note = "\u00e9" * 4000
+			accepted_limit = doctor.post(
+				f"/doctor/appointments/{created['appointment_a_id']}/records",
+				data={"record_type": "note", "body": unicode_note},
+			)
+			assert "saved=note" in str(accepted_limit.url)
+			assert psql(
+				f"""
+				SELECT char_length(body) FROM visit_notes
+				WHERE appointment_id = {created['appointment_a_id']}
+				ORDER BY id DESC LIMIT 1
+				"""
+			) == "4000"
+
+			too_long = doctor.post(
+				f"/doctor/appointments/{created['appointment_a_id']}/records",
+				data={"record_type": "note", "body": "x" * 5001},
+			)
+			assert "error=too_long" in str(too_long.url)
+			assert "Record text is too long." in too_long.text
+			record_page = doctor.get(
+				f"/doctor/appointments/{created['appointment_a_id']}/records"
+			)
+			assert NOTE_DOCTOR1_PATIENT_A in record_page.text
+			assert "second note" in record_page.text
 	finally:
 		cleanup_cross_doctor_notes()
 
@@ -1180,6 +1370,17 @@ def test_registrar_day_list_doctor_calendar_and_time_off_approval():
 			login(other_doctor, DOC2)
 			login(registrar, REG)
 			login(admin, ADMIN)
+
+			past_request = doctor.post(
+				"/doctor/time-off-requests",
+				data={
+					"starts_on": psql("SELECT CURRENT_DATE - 1"),
+					"ends_on": psql("SELECT CURRENT_DATE + 1"),
+					"comment": "past request must be rejected",
+				},
+			)
+			assert "error=request_date_past" in str(past_request.url)
+			assert "Start date cannot be in the past." in past_request.text
 
 			existing_ids = set(appointment_ids(patient.get("/my").text))
 			booked = patient.post(f"/slots/{slot_id}/book")

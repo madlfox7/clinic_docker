@@ -271,6 +271,11 @@ def admin_schedule(request: Request):
         (),
     )
     outside_hours_visits = _scheduled_visit_rows(cur, _outside_hours_sql("s"), ())
+    upcoming_visits = _scheduled_visit_rows(
+        cur,
+        "s.starts_at > CURRENT_TIMESTAMP",
+        (),
+    )
     cur.close()
     conn.close()
     return templates.TemplateResponse(
@@ -287,6 +292,7 @@ def admin_schedule(request: Request):
             "hours_report": hours_report,
             "manual_cancel_visits": manual_cancel_visits,
             "outside_hours_visits": outside_hours_visits,
+            "upcoming_visits": upcoming_visits,
             "visit_cancelled": request.query_params.get("visit_cancelled"),
             "time_off_request_decision": request.query_params.get(
                 "time_off_request_decision"
@@ -394,6 +400,8 @@ def admin_add_time_off(
         return RedirectResponse("/admin/schedule?error=doctor_not_found", status_code=303)
     if starts_on > ends_on:
         return RedirectResponse("/admin/schedule?error=invalid_time_off", status_code=303)
+    if starts_on < date.today():
+        return RedirectResponse("/admin/schedule?error=time_off_past", status_code=303)
     conn = db_as(admin_user)
     cur = conn.cursor()
     cur.execute("SELECT 1 FROM doctors WHERE id=%s", (doctor_id,))
@@ -459,6 +467,15 @@ def admin_decide_time_off_request(
         conn.close()
         return RedirectResponse(
             "/admin/schedule?error=time_off_request_not_pending",
+            status_code=303,
+        )
+
+    if decision == "approve" and time_off_request[1] < date.today():
+        conn.rollback()
+        cur.close()
+        conn.close()
+        return RedirectResponse(
+            "/admin/schedule?error=time_off_past",
             status_code=303,
         )
 
@@ -569,8 +586,12 @@ def generate_doctor_slots(
     doctor_id = parse_strict_int(doctor_id, min_value=1)
     if doctor_id is None:
         return RedirectResponse("/admin/schedule?error=doctor_not_found", status_code=303)
-    if from_date > to_date or (to_date - from_date).days > 90:
-        return RedirectResponse("/admin/schedule?error=invalid_range", status_code=303)
+    if from_date > to_date:
+        return RedirectResponse("/admin/schedule?error=range_order", status_code=303)
+    if from_date < date.today():
+        return RedirectResponse("/admin/schedule?error=range_in_past", status_code=303)
+    if (to_date - from_date).days + 1 > 90:
+        return RedirectResponse("/admin/schedule?error=range_too_long", status_code=303)
 
     conn = db_as(admin_user)
     cur = conn.cursor()

@@ -32,6 +32,24 @@
     Scheduled visits were not cancelled.</p>
 {% endif %}
 <section>
+  <h2>Upcoming appointments</h2>
+  {% if upcoming_visits %}
+    <ul>
+      {% for visit in upcoming_visits %}
+        <li>
+          {{ visit.patient_email }} — {{ visit.doctor_name }} —
+          {{ visit.starts_at.strftime("%Y-%m-%d %H:%M") }}–{{ visit.ends_at.strftime("%H:%M") }}
+          <form method="post" action="/appointments/{{ visit.appointment_id }}/cancel" style="display:inline">
+            <button type="submit">Cancel this appointment</button>
+          </form>
+        </li>
+      {% endfor %}
+    </ul>
+  {% else %}
+    <p>No upcoming scheduled appointments.</p>
+  {% endif %}
+</section>
+<section>
   <h2>Needs manual cancellation</h2>
   <p>Closed days do not cancel scheduled visits. Cancel each one below.</p>
   {% if manual_cancel_visits %}
@@ -71,9 +89,12 @@
 
   <!-- error msgs -->
 </section>
-{% if error == "invalid_range" %}<p>Choose a valid date range of no more than 90 days.</p>
+{% if error == "range_order" %}<p>End date must not be before start date.</p>
+{% elif error == "range_in_past" %}<p>Slot generation cannot start in the past.</p>
+{% elif error == "range_too_long" %}<p>Choose a range of no more than 90 calendar days.</p>
 {% elif error == "invalid_work_hours" %}<p>Choose valid working hours.</p>
 {% elif error == "invalid_time_off" %}<p>End date must not be before start date.</p>
+{% elif error == "time_off_past" %}<p>Time off cannot start in the past.</p>
 {% elif error == "holiday_name_required" %}<p>Enter a holiday name.</p>
 {% elif error == "doctor_not_found" %}<p>Doctor not found.</p>
 {% elif error == "no_weekdays" %}<p>Select at least one weekday.</p>

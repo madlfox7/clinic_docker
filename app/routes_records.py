@@ -49,10 +49,14 @@ def doctor_records(request: Request, appointment_id: str):
         )
 
     cur.execute(
-        "SELECT body FROM visit_notes WHERE appointment_id = %s",
+        """
+        SELECT id, body FROM visit_notes
+        WHERE appointment_id = %s
+        ORDER BY id
+        """,
         (appointment_id,),
     )
-    note_row = cur.fetchone()
+    notes = [{"id": row[0], "body": row[1]} for row in cur.fetchall()]
     cur.execute(
         """
         SELECT body FROM prescriptions
@@ -81,7 +85,7 @@ def doctor_records(request: Request, appointment_id: str):
                 "status": appointment[5],
             },
             "can_edit": appointment[5] == "scheduled",
-            "note": note_row[0] if note_row else "",
+            "notes": notes,
             "prescriptions": prescriptions,
             "saved": request.query_params.get("saved"),
             "error": request.query_params.get("error"),
@@ -117,7 +121,9 @@ def save_doctor_record(
             f"/doctor/appointments/{appointment_id}/records?error=empty",
             status_code=303,
         )
-    if not within_length(body, MAX_RECORD_BODY_LENGTH):
+    if len(body) > MAX_RECORD_BODY_LENGTH or not within_length(
+        body, MAX_RECORD_BODY_LENGTH * 4
+    ):
         return RedirectResponse(
             f"/doctor/appointments/{appointment_id}/records?error=too_long",
             status_code=303,
@@ -136,7 +142,6 @@ def save_doctor_record(
               AND d.user_id = %s
               AND a.status = 'scheduled'
               AND a.starts_at > CURRENT_TIMESTAMP - INTERVAL '12 months'
-            ON CONFLICT (appointment_id) DO UPDATE SET body = EXCLUDED.body
             """,
             (body, appointment_id, user["id"]),
         )

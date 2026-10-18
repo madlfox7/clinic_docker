@@ -38,7 +38,8 @@
   <p>Appointment booked successfully.</p>
 {% endif %}
 {% if cancelled == "1" %}<p>Appointment cancelled.</p>{% endif %}
-{% if cancel_error == "1" %}<p>Appointment could not be cancelled; it may already be cancelled.</p>{% endif %}
+{% if cancel_error == "past" %}<p>Registrars cannot cancel past appointments.</p>
+{% elif cancel_error == "1" %}<p>Appointment could not be cancelled; it may already be cancelled.</p>{% endif %}
 {% for day in days %}
   <h2>{{ day.label }}</h2>
   <ul>
@@ -52,9 +53,11 @@
         {% if role == "registrar" %}
           Booked
           {% if s.closed %}<strong>Clinic closed — staff action required.</strong>{% endif %}
-          <form method="post" action="/appointments/{{ s.appointment_id }}/cancel" style="display:inline">
-            <button type="submit">Cancel appointment</button>
-          </form>
+          {% if not s.past %}
+            <form method="post" action="/appointments/{{ s.appointment_id }}/cancel" style="display:inline">
+              <button type="submit">Cancel appointment</button>
+            </form>
+          {% endif %}
         {% elif role == "admin" %}
           Booked
           {% if s.closed %}<strong>Clinic closed — staff action required.</strong>{% endif %}

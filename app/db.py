@@ -269,10 +269,10 @@ def seed_future_slots(cur):
     cur.execute(
         """
         WITH clock AS (
-            SELECT (CURRENT_TIMESTAMP AT TIME ZONE 'UTC') AS now_utc
+            SELECT (CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Yerevan') AS now_local
         ),
         horizon AS (
-            SELECT ((SELECT now_utc FROM clock)::date + n) AS day
+            SELECT ((SELECT now_local FROM clock)::date + n) AS day
             FROM generate_series(0, 21) AS n
         ),
         windows AS (
@@ -305,7 +305,7 @@ def seed_future_slots(cur):
                 w.window_end - make_interval(mins => w.slot_minutes),
                 make_interval(mins => w.slot_minutes)
             ) AS gs
-            WHERE gs > c.now_utc
+            WHERE gs > c.now_local
         ),
         shared_starts AS (
             SELECT starts_at, ends_at
@@ -357,7 +357,7 @@ def seed_future_slots(cur):
         WHERE NOT EXISTS (
             SELECT 1 FROM slots s
             WHERE s.doctor_id = p.doctor_id
-              AND s.starts_at > (CURRENT_TIMESTAMP AT TIME ZONE 'UTC')
+              AND s.starts_at > (CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Yerevan')
         )
         ON CONFLICT (doctor_id, starts_at) DO NOTHING
         """

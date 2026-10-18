@@ -218,10 +218,27 @@ CREATE TABLE IF NOT EXISTS visit_notes (
   appointment_id INTEGER NOT NULL REFERENCES appointments(id),
   doctor_id INTEGER NOT NULL REFERENCES doctors(id),
   patient_user_id INTEGER NOT NULL REFERENCES users(id),
-  body TEXT NOT NULL,
-  UNIQUE (appointment_id)
+  body TEXT NOT NULL CONSTRAINT visit_notes_body_length_check
+    CHECK (char_length(body) <= 4000)
 );
 
+ALTER TABLE public.visit_notes
+  DROP CONSTRAINT IF EXISTS visit_notes_appointment_id_key;
+DROP INDEX IF EXISTS public.visit_notes_appointment_id_key;
+
+DO $$
+BEGIN
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_constraint
+    WHERE conname = 'visit_notes_body_length_check'
+      AND conrelid = 'public.visit_notes'::regclass
+  ) THEN
+    ALTER TABLE public.visit_notes
+      ADD CONSTRAINT visit_notes_body_length_check
+      CHECK (char_length(body) <= 4000) NOT VALID;
+  END IF;
+END
+$$;
 
 --this one for rls
 CREATE TABLE IF NOT EXISTS prescriptions (
@@ -229,8 +246,23 @@ CREATE TABLE IF NOT EXISTS prescriptions (
   appointment_id INTEGER NOT NULL REFERENCES appointments(id),
   doctor_id INTEGER NOT NULL REFERENCES doctors(id),
   patient_user_id INTEGER NOT NULL REFERENCES users(id),
-  body TEXT NOT NULL
+  body TEXT NOT NULL CONSTRAINT prescriptions_body_length_check
+    CHECK (char_length(body) <= 4000)
 );
+
+DO $$
+BEGIN
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_constraint
+    WHERE conname = 'prescriptions_body_length_check'
+      AND conrelid = 'public.prescriptions'::regclass
+  ) THEN
+    ALTER TABLE public.prescriptions
+      ADD CONSTRAINT prescriptions_body_length_check
+      CHECK (char_length(body) <= 4000) NOT VALID;
+  END IF;
+END
+$$;
 
 CREATE TABLE IF NOT EXISTS audit_events (
   id BIGSERIAL PRIMARY KEY,

@@ -5,8 +5,8 @@ services:
       dockerfile: docker/db/Dockerfile
     env_file: .env
     environment:
-      TZ: UTC
-      PGTZ: UTC
+      TZ: Asia/Yerevan
+      PGTZ: Asia/Yerevan
     volumes:
       - db_data:/var/lib/postgresql/data
     networks:
@@ -24,7 +24,8 @@ services:
       dockerfile: docker/db/Dockerfile
     env_file: .env
     environment:
-      TZ: UTC
+      TZ: Asia/Yerevan
+      PGTZ: Asia/Yerevan
       PGPASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}
       CLINIC_API_PASSWORD: ${CLINIC_API_PASSWORD:?Set CLINIC_API_PASSWORD in .env}
     networks:
@@ -49,7 +50,8 @@ services:
       context: .
       dockerfile: docker/api/Dockerfile
     environment:
-      TZ: UTC
+      TZ: Asia/Yerevan
+      PGTZ: Asia/Yerevan
       SESSION_SECRET: ${SESSION_SECRET:-dev-secret-change-me}
       DATABASE_URL: postgresql://clinic_api:${CLINIC_API_PASSWORD:?Set CLINIC_API_PASSWORD in .env}@db:5432/${POSTGRES_DB:?Set POSTGRES_DB in .env}
     networks:
@@ -65,7 +67,8 @@ services:
       context: .
       dockerfile: docker/api/Dockerfile
     environment:
-      TZ: UTC
+      TZ: Asia/Yerevan
+      PGTZ: Asia/Yerevan
       PGHOST: db
       PGUSER: ${POSTGRES_USER:?Set POSTGRES_USER in .env}
       PGPASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}

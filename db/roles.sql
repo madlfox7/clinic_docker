@@ -19,6 +19,18 @@ ALTER ROLE clinic_api
   NOCREATEROLE
   NOINHERIT;
 
+ALTER ROLE clinic_api SET timezone TO 'Asia/Yerevan';
+
+DO $$
+BEGIN
+  EXECUTE format(
+    'ALTER ROLE %I SET timezone TO %L',
+    current_user,
+    'Asia/Yerevan'
+  );
+END
+$$;
+
 DO $$
 DECLARE
   role_name text;

@@ -392,6 +392,14 @@ def cancel_appointment(request: Request, appointment_id: str):
             )
         return RedirectResponse("/doctors", status_code=303)
 
+    if role == "registrar" and not is_future:
+        cur.close()
+        conn.close()
+        return RedirectResponse(
+            f"/doctors/{doctor_id}/slots?cancel_error=past",
+            status_code=303,
+        )
+
     if role == "patient":
         if not is_future:
             cur.close()
@@ -410,6 +418,20 @@ def cancel_appointment(request: Request, appointment_id: str):
               )
             """,
             (appointment_id, user["id"]),
+        )
+    elif role == "registrar":
+        cur.execute(
+            """
+            UPDATE appointments a
+            SET status='cancelled'
+            WHERE a.id=%s
+              AND a.status='scheduled'
+              AND EXISTS (
+                  SELECT 1 FROM slots s
+                  WHERE s.id=a.slot_id AND s.starts_at > CURRENT_TIMESTAMP
+              )
+            """,
+            (appointment_id,),
         )
     else:
         cur.execute(

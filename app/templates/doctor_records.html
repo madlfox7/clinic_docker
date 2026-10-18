@@ -14,18 +14,26 @@
 {% elif error == "invalid_type" %}<p>Choose a valid record type.</p>
 {% elif error == "record_unavailable" %}<p>This appointment cannot be edited (it may be cancelled).</p>{% endif %}
 
-<h2>Clinical note</h2>
+<h2>Clinical notes</h2>
+{% if notes %}
+<ul>
+  {% for note in notes %}
+    <li><pre>{{ note.body }}</pre></li>
+  {% endfor %}
+</ul>
+{% else %}
+<p>No clinical note recorded.</p>
+{% endif %}
 {% if can_edit %}
 <form method="post" action="/doctor/appointments/{{ appointment.id }}/records">
   <input type="hidden" name="record_type" value="note">
   <label>Note
-    <textarea name="body" rows="6" maxlength="4000" required>{{ note }}</textarea>
+    <textarea name="body" rows="6" maxlength="4000" required></textarea>
   </label>
   <button type="submit">Save note</button>
 </form>
 {% else %}
 <p>This cancelled appointment is read-only.</p>
-{% if note %}<pre>{{ note }}</pre>{% else %}<p>No clinical note recorded.</p>{% endif %}
 {% endif %}
 
 <h2>Prescriptions</h2>
