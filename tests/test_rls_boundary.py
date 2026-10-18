@@ -388,6 +388,33 @@ try:
 finally:
     conn.close()
 
+def guest_insert_denied(email, role, blocked):
+    guest = {"id": 0, "role": "guest"}
+    conn = db_as(guest)
+    try:
+        with conn.cursor() as cur:
+            try:
+                cur.execute(
+                    """
+                    INSERT INTO users (email, password_hash, role, blocked)
+                    VALUES (%s, 'not-a-real-hash', %s, %s)
+                    """,
+                    (email, role, blocked),
+                )
+            except psycopg2.errors.InsufficientPrivilege:
+                return True
+            return False
+    finally:
+        conn.rollback()
+        conn.close()
+
+guest_admin_insert_denied = guest_insert_denied(
+    "rls-forbidden-admin@clinic.local", "admin", False
+)
+guest_blocked_patient_insert_denied = guest_insert_denied(
+    "rls-forbidden-blocked-patient@clinic.local", "patient", True
+)
+
 print(json.dumps({
     "patient_appointments": patient_appointments,
     "patient_notes": patient_notes,
@@ -417,6 +444,8 @@ print(json.dumps({
     "patient_restored": patient_restored,
     "direct_email_denied": direct_email_denied,
     "doctor_patient_emails": doctor_patient_emails,
+    "guest_admin_insert_denied": guest_admin_insert_denied,
+    "guest_blocked_patient_insert_denied": guest_blocked_patient_insert_denied,
 }))
 '''
     api_script = (
@@ -469,6 +498,8 @@ print(json.dumps({
         assert result["patient_cancelled"] == 1
         assert result["patient_restored"] == 0
         assert result["direct_email_denied"] is True
+        assert result["guest_admin_insert_denied"] is True
+        assert result["guest_blocked_patient_insert_denied"] is True
         assert PATIENT_A in result["doctor_patient_emails"]
 
         with httpx.Client(base_url=TEST_BASE, follow_redirects=True, timeout=10.0) as client:
@@ -569,6 +600,8 @@ print(json.dumps({
             "Doctor SQL: SELECT id, doctor_id FROM slots;",
             f"Doctor result: {result['doctor_slots']}",
             f"Doctor time-off/schedule writes denied: {result['doctor_cannot_edit_schedule']}, {result['doctor_cannot_request_for_other']}",
+            f"Guest admin-role INSERT denied: {result['guest_admin_insert_denied']}",
+            f"Guest blocked-patient INSERT denied: {result['guest_blocked_patient_insert_denied']}",
             "Registrar SQL: SELECT body FROM visit_notes;",
             f"Registrar result: {result['registrar_body_result']}",
             "Registrar SQL: SELECT body FROM prescriptions;",

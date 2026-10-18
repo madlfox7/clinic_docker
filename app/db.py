@@ -113,6 +113,12 @@ def db_as(user):
     return conn
 
 
+def db_as_guest():
+    conn = db()
+    _set_db_context(conn, ROLE_BY_APP["guest"], 0)
+    return conn
+
+
 #
 def load_session_user(request):
     """Re-read id, email, role and blocked from users.

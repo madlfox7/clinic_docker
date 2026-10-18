@@ -8,19 +8,12 @@
 <p><a href="/me">Cabinet</a> | <a href="/logout">Logout</a></p>
 {% else %}
 {% if error %}<p>{{ error }}</p>{% endif %}
+{% if registered %}<p>Account created. Please log in.</p>{% endif %}
 <form method="post" action="/login">
   <p>Email: <input name="email" type="email" required></p>
   <p>Password: <input name="password" type="password" required></p>
   <button type="submit">Login</button>
 </form>
-<p>Test accounts, password for all: password123</p>
-<ul>
-  <li>admin@clinic.local</li>
-  <li>doc@clinic.local</li>
-  <li>doc2@clinic.local</li>
-  <li>pat@clinic.local</li>
-  <li>pat2@clinic.local</li>
-  <li>reg@clinic.local</li>
-</ul>
+<p><a href="/register">Create a patient account</a></p>
 {% endif %}
 {% endblock %}

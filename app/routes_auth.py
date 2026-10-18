@@ -1,3 +1,6 @@
+import re
+
+from psycopg2.errors import UniqueViolation
 from fastapi import APIRouter, Form, Request
 from fastapi.responses import RedirectResponse
 
@@ -8,6 +11,7 @@ from fastapi.responses import RedirectResponse
 from db import (
     MAX_EMAIL_LENGTH,
     MAX_PASSWORD_LENGTH,
+    db_as_guest,
     db,
     load_session_user,
     pwd,
@@ -17,8 +21,33 @@ from db import (
 
 router = APIRouter()
 
+EMAIL_PATTERN = re.compile(
+    r"^[A-Za-z0-9.!#$%&'*+/=?^_`{|}~-]+@"
+    r"[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?"
+    r"(?:\.[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?)+$"
+)
+DEFAULT_REGISTRATION_PASSWORDS = {
+    "password",
+    "password123",
+    "12345678",
+    "123456789",
+    "qwerty123",
+    "admin123",
+    "letmein",
+    "welcome1",
+    "changeme",
+    "passw0rd",
+}
 
-def _login_page(request: Request, error: str | None, status_code: int = 200, role: str = "guest", email=None):
+
+def _login_page(
+    request: Request,
+    error: str | None,
+    status_code: int = 200,
+    role: str = "guest",
+    email=None,
+    registered: bool = False,
+):
     return templates.TemplateResponse(
         "login.html",
         {
@@ -26,9 +55,46 @@ def _login_page(request: Request, error: str | None, status_code: int = 200, rol
             "error": error,
             "role": role,
             "email": email,
+            "registered": registered,
         },
         status_code=status_code,
     )
+
+
+def _register_page(
+    request: Request,
+    error: str | None = None,
+    status_code: int = 200,
+    email: str = "",
+):
+    return templates.TemplateResponse(
+        "register.html",
+        {
+            "request": request,
+            "role": "guest",
+            "error": error,
+            "email": email,
+        },
+        status_code=status_code,
+    )
+
+
+def _normalize_registration_email(email: str) -> str | None:
+    if not within_length(email, MAX_EMAIL_LENGTH):
+        return None
+    normalized = email.strip().lower()
+    if not EMAIL_PATTERN.fullmatch(normalized):
+        return None
+    local, domain = normalized.rsplit("@", 1)
+    if (
+        len(local) > 64
+        or len(domain) > 253
+        or local.startswith(".")
+        or local.endswith(".")
+        or ".." in local
+    ):
+        return None
+    return normalized
 
 
 def viewer(request: Request):
@@ -67,7 +133,83 @@ def login_form(request: Request):
         return _login_page(request, "Account is blocked", 403)
     if status == "ok":
         return _login_page(request, None, role=user["role"], email=user["email"])
-    return _login_page(request, None)
+    return _login_page(
+        request,
+        None,
+        registered=request.query_params.get("registered") == "1",
+    )
+
+
+@router.get("/register")
+def register_form(request: Request):
+    user, status = load_session_user(request)
+    if status == "blocked":
+        return _register_page(request, "Account is blocked", 403)
+    if status == "ok":
+        return RedirectResponse("/me", status_code=303)
+    return _register_page(request)
+
+
+@router.post("/register")
+def register(
+    request: Request,
+    email: str = Form(...),
+    password: str = Form(...),
+    confirm_password: str = Form(...),
+):
+    user, status = load_session_user(request)
+    if status == "blocked":
+        return _register_page(request, "Account is blocked", 403)
+    if status == "ok":
+        return RedirectResponse("/me", status_code=303)
+
+    normalized_email = _normalize_registration_email(email)
+    if normalized_email is None:
+        return _register_page(request, "Enter a valid email address.", 400, email)
+    if not within_length(password, MAX_PASSWORD_LENGTH) or len(password) < 8:
+        return _register_page(
+            request,
+            "Password must be 8–72 bytes and at least 8 characters.",
+            400,
+            normalized_email,
+        )
+    if password.strip().casefold() in DEFAULT_REGISTRATION_PASSWORDS:
+        return _register_page(
+            request,
+            "Choose a non-default password.",
+            400,
+            normalized_email,
+        )
+    if password != confirm_password:
+        return _register_page(
+            request,
+            "Passwords do not match.",
+            400,
+            normalized_email,
+        )
+
+    conn = db_as_guest()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                INSERT INTO users (email, password_hash, role, blocked)
+                VALUES (%s, %s, 'patient', FALSE)
+                """,
+                (normalized_email, pwd.hash(password)),
+            )
+        conn.commit()
+    except UniqueViolation:
+        conn.rollback()
+        return _register_page(
+            request,
+            "An account with this email already exists.",
+            409,
+            normalized_email,
+        )
+    finally:
+        conn.close()
+    return RedirectResponse("/login?registered=1", status_code=303)
 
 
 @router.post("/login")
@@ -136,4 +278,3 @@ def doctors_list(request: Request):
             "role": user["role"] if user else "guest",
         },
     )
-

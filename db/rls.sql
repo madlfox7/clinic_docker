@@ -192,6 +192,8 @@ GRANT USAGE ON SCHEMA public
   TO app_guest, app_patient, app_doctor, app_registrar, app_admin;
 
 GRANT SELECT ON public.doctors TO app_guest, app_patient, app_doctor, app_registrar, app_admin;
+GRANT INSERT (email, password_hash, role, blocked) ON public.users TO app_guest;
+GRANT USAGE, SELECT ON SEQUENCE public.users_id_seq TO app_guest;
 GRANT SELECT ON public.slots, public.work_hours, public.time_off, public.holidays
   TO app_patient, app_registrar;
 GRANT SELECT ON public.slots TO app_doctor, app_admin;
@@ -447,6 +449,25 @@ CREATE POLICY slots_admin_insert ON public.slots
 CREATE POLICY slots_admin_delete ON public.slots
   FOR DELETE TO app_admin USING (true);
 
+DROP POLICY IF EXISTS users_clinic_api_select ON public.users;
+DROP POLICY IF EXISTS users_registrar_select ON public.users;
+DROP POLICY IF EXISTS users_admin_select ON public.users;
+DROP POLICY IF EXISTS users_admin_update ON public.users;
+DROP POLICY IF EXISTS users_guest_insert ON public.users;
+CREATE POLICY users_clinic_api_select ON public.users
+  FOR SELECT TO clinic_api USING (true);
+CREATE POLICY users_registrar_select ON public.users
+  FOR SELECT TO app_registrar USING (role = 'patient');
+CREATE POLICY users_admin_select ON public.users
+  FOR SELECT TO app_admin USING (true);
+CREATE POLICY users_admin_update ON public.users
+  FOR UPDATE TO app_admin
+  USING (role = 'patient')
+  WITH CHECK (role = 'patient');
+CREATE POLICY users_guest_insert ON public.users
+  FOR INSERT TO app_guest
+  WITH CHECK (role = 'patient' AND NOT blocked);
+
 DROP POLICY IF EXISTS work_hours_patient_select ON public.work_hours;
 DROP POLICY IF EXISTS work_hours_registrar_select ON public.work_hours;
 DROP POLICY IF EXISTS work_hours_doctor_select ON public.work_hours;
@@ -552,6 +573,7 @@ CREATE POLICY time_off_requests_admin_update ON public.time_off_requests
   );
 
 ALTER TABLE public.slots ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.users ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.work_hours ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.time_off ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.holidays ENABLE ROW LEVEL SECURITY;

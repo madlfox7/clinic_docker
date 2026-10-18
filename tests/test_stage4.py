@@ -1,6 +1,7 @@
 import os
 import re
 import subprocess
+import uuid
 from pathlib import Path
 
 import httpx
@@ -1310,3 +1311,159 @@ def test_registrar_day_list_doctor_calendar_and_time_off_approval():
 			DELETE FROM slots WHERE id IN ({slot_id}, {free_slot_id});
 			"""
 		)
+
+
+def test_public_registration_is_patient_only_and_can_book(request):
+	email = f"public-registration-{uuid.uuid4().hex}@clinic.test"
+	password = "Clinic-Patient-Password-2026!"
+
+	def cleanup_registered_user():
+		registered_user_id = psql(
+			f"SELECT id FROM users WHERE email = '{email}'"
+		)
+		if registered_user_id.isdigit():
+			psql(
+				f"""
+				DELETE FROM audit_events WHERE actor_user_id = {registered_user_id};
+				DELETE FROM appointments WHERE patient_user_id = {registered_user_id};
+				DELETE FROM users WHERE id = {registered_user_id};
+				"""
+			)
+
+	request.addfinalizer(cleanup_registered_user)
+	user_id = None
+	with client() as guest:
+		register_page = guest.get("/register")
+		assert register_page.status_code == 200
+		assert 'name="role"' not in register_page.text
+
+		invalid_email = guest.post(
+			"/register",
+			data={
+				"email": "not-an-email",
+				"password": password,
+				"confirm_password": password,
+			},
+		)
+		assert invalid_email.status_code == 400
+		assert "valid email" in invalid_email.text
+
+		short_password = guest.post(
+			"/register",
+			data={
+				"email": email,
+				"password": "short",
+				"confirm_password": "short",
+			},
+		)
+		assert short_password.status_code == 400
+		assert "at least 8 characters" in short_password.text
+
+		default_password = guest.post(
+			"/register",
+			data={
+				"email": email,
+				"password": "password123",
+				"confirm_password": "password123",
+			},
+		)
+		assert default_password.status_code == 400
+		assert "non-default password" in default_password.text
+
+		mismatched_passwords = guest.post(
+			"/register",
+			data={
+				"email": email,
+				"password": password,
+				"confirm_password": password + "different",
+			},
+		)
+		assert mismatched_passwords.status_code == 400
+		assert "do not match" in mismatched_passwords.text
+
+		created = guest.post(
+			"/register",
+			data={
+				"email": email.upper(),
+				"password": password,
+				"confirm_password": password,
+				"role": "admin",
+			},
+		)
+		assert created.status_code == 200
+		assert "/login?registered=1" in str(created.url)
+		assert "Account created. Please log in." in created.text
+		user_id = int(
+			psql(f"SELECT id FROM users WHERE email = '{email}'")
+		)
+		assert psql(f"SELECT role FROM users WHERE id = {user_id}") == "patient"
+		assert psql(f"SELECT blocked FROM users WHERE id = {user_id}") == "f"
+
+		duplicate = guest.post(
+			"/register",
+			data={
+				"email": email.upper(),
+				"password": password,
+				"confirm_password": password,
+			},
+		)
+		assert duplicate.status_code == 409
+		assert "already exists" in duplicate.text
+		assert psql(f"SELECT count(*) FROM users WHERE lower(email) = '{email}'") == "1"
+
+		login_response = guest.post(
+			"/login",
+			data={"email": email, "password": password},
+		)
+		assert "Role: patient" in guest.get("/me").text, login_response.text
+		assert str(guest.get("/register").url).rstrip("/").endswith("/me")
+		existing_appointments = set(appointment_ids(guest.get("/my").text))
+		_, slot_id = open_free_slot_page(guest)
+		booked = guest.post(f"/slots/{slot_id}/book")
+		assert booked.url.path == "/my"
+		new_appointments = set(appointment_ids(guest.get("/my").text)) - existing_appointments
+		assert new_appointments, "new patient could not book an available slot"
+
+	with client() as admin, client() as new_patient, client() as second_guest:
+		login(admin, ADMIN)
+		patient_row_match = re.search(
+			rf"<li>\s*{re.escape(email)}\s*([\s\S]*?)</li>",
+			admin.get("/admin/users").text,
+		)
+		assert patient_row_match, "admin cannot see the newly registered patient"
+		patient_row = patient_row_match.group(1)
+		assert "Blocked: No" in patient_row
+		assert "Active" in patient_row
+
+		new_patient_login = new_patient.post(
+			"/login",
+			data={"email": email, "password": password},
+		)
+		assert "/me" in str(new_patient_login.url)
+		admin.post(f"/admin/users/{user_id}/block")
+		blocked_page = new_patient.get("/my")
+		assert blocked_page.status_code == 403
+		assert "Account is blocked" in blocked_page.text
+
+		reregister = second_guest.post(
+			"/register",
+			data={
+				"email": email,
+				"password": password,
+				"confirm_password": password,
+			},
+		)
+		assert reregister.status_code == 409
+		assert "already exists" in reregister.text
+		assert psql(f"SELECT count(*) FROM users WHERE lower(email) = '{email}'") == "1"
+
+		try:
+			assert "Blocked: Yes" in admin.get("/admin/users").text
+		finally:
+			psql(
+				f"""
+				DELETE FROM audit_events WHERE actor_user_id = {user_id};
+				DELETE FROM appointments WHERE patient_user_id = {user_id};
+				DELETE FROM users WHERE id = {user_id};
+				"""
+			)
