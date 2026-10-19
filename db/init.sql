@@ -8,15 +8,21 @@ CREATE TABLE IF NOT EXISTS users (
   email TEXT UNIQUE NOT NULL,
   password_hash TEXT NOT NULL,
   role TEXT NOT NULL CHECK (role IN ('admin','doctor','patient','registrar')),
-  blocked BOOLEAN NOT NULL DEFAULT FALSE
+  blocked BOOLEAN NOT NULL DEFAULT FALSE,
+  auth_version BIGINT NOT NULL DEFAULT 0 CHECK (auth_version >= 0)
 );
 
+CREATE EXTENSION IF NOT EXISTS pgcrypto;
 
 ALTER TABLE users
 ADD COLUMN IF NOT EXISTS blocked BOOLEAN NOT NULL DEFAULT FALSE;
 
 ALTER TABLE users
 ALTER COLUMN blocked SET DEFAULT FALSE;
+
+ALTER TABLE users
+ADD COLUMN IF NOT EXISTS auth_version BIGINT NOT NULL DEFAULT 0
+CHECK (auth_version >= 0);
 
 CREATE UNIQUE INDEX IF NOT EXISTS users_email_lower_unique
 ON users (lower(email));
@@ -56,12 +62,32 @@ INSERT INTO services (name, duration_minutes, buffer_minutes, active)
 VALUES ('General consultation', 30, 0, TRUE)
 ON CONFLICT (name) DO NOTHING;
 
+DO $$
+BEGIN
+  IF to_regclass('public.doctor_services') IS NULL THEN
+    CREATE TABLE public.doctor_services (
+      doctor_id INTEGER NOT NULL REFERENCES public.doctors(id) ON DELETE CASCADE,
+      service_id INTEGER NOT NULL REFERENCES public.services(id) ON DELETE CASCADE,
+      PRIMARY KEY (doctor_id, service_id)
+    );
+
+    INSERT INTO public.doctor_services (doctor_id, service_id)
+    SELECT d.id, svc.id
+    FROM public.doctors d
+    CROSS JOIN public.services svc
+    ON CONFLICT DO NOTHING;
+  END IF;
+END
+$$;
+
 CREATE TABLE IF NOT EXISTS slots (
   id SERIAL PRIMARY KEY,
   doctor_id INTEGER NOT NULL REFERENCES doctors(id),
   service_id INTEGER REFERENCES services(id),
   starts_at TIMESTAMP NOT NULL,
-  ends_at TIMESTAMP NOT NULL
+  ends_at TIMESTAMP NOT NULL,
+  duration_minutes INTEGER,
+  buffer_minutes INTEGER
 );
 
 ALTER TABLE slots
@@ -73,6 +99,86 @@ WHERE service_id IS NULL;
 
 ALTER TABLE slots
   ALTER COLUMN service_id SET NOT NULL;
+
+ALTER TABLE slots
+  ADD COLUMN IF NOT EXISTS duration_minutes INTEGER,
+  ADD COLUMN IF NOT EXISTS buffer_minutes INTEGER;
+
+UPDATE slots s
+SET duration_minutes = LEAST(
+      svc.duration_minutes,
+      GREATEST(1, FLOOR(EXTRACT(EPOCH FROM (s.ends_at - s.starts_at)) / 60)::integer)
+    ),
+    buffer_minutes = GREATEST(
+      0,
+      FLOOR(EXTRACT(EPOCH FROM (s.ends_at - s.starts_at)) / 60)::integer
+      - LEAST(
+          svc.duration_minutes,
+          GREATEST(1, FLOOR(EXTRACT(EPOCH FROM (s.ends_at - s.starts_at)) / 60)::integer)
+        )
+    )
+FROM services svc
+WHERE svc.id = s.service_id
+  AND (s.duration_minutes IS NULL OR s.buffer_minutes IS NULL);
+
+ALTER TABLE slots
+  ALTER COLUMN duration_minutes SET NOT NULL,
+  ALTER COLUMN buffer_minutes SET NOT NULL;
+
+DO $$
+BEGIN
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_constraint
+    WHERE conname = 'slots_duration_snapshot_check'
+      AND conrelid = 'public.slots'::regclass
+  ) THEN
+    ALTER TABLE public.slots
+      ADD CONSTRAINT slots_duration_snapshot_check
+      CHECK (
+        duration_minutes > 0
+        AND buffer_minutes >= 0
+        AND duration_minutes + buffer_minutes <= 1440
+        AND ends_at = starts_at
+          + make_interval(mins => duration_minutes + buffer_minutes)
+      );
+  END IF;
+END
+$$;
+
+CREATE OR REPLACE FUNCTION public.set_slot_duration_snapshot()
+RETURNS trigger
+LANGUAGE plpgsql
+SET search_path = pg_catalog, public
+AS $function$
+DECLARE
+  service_duration integer;
+  total_minutes integer;
+BEGIN
+  IF NEW.duration_minutes IS NULL OR NEW.buffer_minutes IS NULL THEN
+    SELECT svc.duration_minutes
+    INTO service_duration
+    FROM public.services svc
+    WHERE svc.id = NEW.service_id;
+
+    IF NOT FOUND THEN
+      RAISE EXCEPTION 'slot service does not exist';
+    END IF;
+
+    total_minutes := FLOOR(
+      EXTRACT(EPOCH FROM (NEW.ends_at - NEW.starts_at)) / 60
+    )::integer;
+    NEW.duration_minutes := LEAST(service_duration, GREATEST(1, total_minutes));
+    NEW.buffer_minutes := GREATEST(0, total_minutes - NEW.duration_minutes);
+  END IF;
+  RETURN NEW;
+END;
+$function$;
+
+DROP TRIGGER IF EXISTS slots_set_duration_snapshot ON public.slots;
+CREATE TRIGGER slots_set_duration_snapshot
+BEFORE INSERT ON public.slots
+FOR EACH ROW
+EXECUTE FUNCTION public.set_slot_duration_snapshot();
 
 DO $$
 DECLARE
@@ -185,41 +291,99 @@ CREATE EXTENSION IF NOT EXISTS btree_gist;
 ALTER TABLE appointments
   ADD COLUMN IF NOT EXISTS doctor_id INTEGER REFERENCES doctors(id),
   ADD COLUMN IF NOT EXISTS starts_at TIMESTAMP,
-  ADD COLUMN IF NOT EXISTS ends_at TIMESTAMP;
+  ADD COLUMN IF NOT EXISTS ends_at TIMESTAMP,
+  ADD COLUMN IF NOT EXISTS reserved_ends_at TIMESTAMP;
 
 UPDATE appointments a
 SET
   doctor_id = s.doctor_id,
   starts_at = s.starts_at,
-  ends_at = s.ends_at
+  ends_at = s.starts_at + make_interval(mins => s.duration_minutes),
+  reserved_ends_at = s.ends_at
 FROM slots s
 WHERE s.id = a.slot_id
-  AND (a.doctor_id IS NULL OR a.starts_at IS NULL OR a.ends_at IS NULL);
+  AND (
+    a.doctor_id IS NULL
+    OR a.starts_at IS NULL
+    OR a.ends_at IS NULL
+    OR a.reserved_ends_at IS NULL
+  );
 
 ALTER TABLE appointments
   ALTER COLUMN doctor_id SET NOT NULL,
   ALTER COLUMN starts_at SET NOT NULL,
-  ALTER COLUMN ends_at SET NOT NULL;
-CREATE INDEX IF NOT EXISTS appointments_doctor_starts_at
-ON appointments (doctor_id, starts_at);
+  ALTER COLUMN ends_at SET NOT NULL,
+  ALTER COLUMN reserved_ends_at SET NOT NULL;
 
-ALTER TABLE appointments
-  ADD COLUMN IF NOT EXISTS period tsrange
-  GENERATED ALWAYS AS (tsrange(starts_at, ends_at, '[)')) STORED;
+CREATE OR REPLACE FUNCTION public.set_appointment_reserved_end()
+RETURNS trigger
+LANGUAGE plpgsql
+SET search_path = pg_catalog, public
+AS $function$
+DECLARE
+  slot_reserved_end timestamp;
+BEGIN
+  IF NEW.reserved_ends_at IS NULL THEN
+    SELECT s.ends_at
+    INTO slot_reserved_end
+    FROM public.slots s
+    WHERE s.id = NEW.slot_id;
+
+    IF FOUND THEN
+      NEW.reserved_ends_at := GREATEST(slot_reserved_end, NEW.ends_at);
+    END IF;
+  END IF;
+  RETURN NEW;
+END;
+$function$;
+
+DROP TRIGGER IF EXISTS appointments_set_reserved_end ON public.appointments;
+CREATE TRIGGER appointments_set_reserved_end
+BEFORE INSERT ON public.appointments
+FOR EACH ROW
+EXECUTE FUNCTION public.set_appointment_reserved_end();
 
 DO $$
 BEGIN
   IF NOT EXISTS (
     SELECT 1 FROM pg_constraint
-    WHERE conname = 'appointments_no_overlap_per_doctor'
+    WHERE conname = 'appointments_reserved_end_check'
+      AND conrelid = 'public.appointments'::regclass
+  ) THEN
+    ALTER TABLE public.appointments
+      ADD CONSTRAINT appointments_reserved_end_check
+      CHECK (reserved_ends_at >= ends_at);
+  END IF;
+END
+$$;
+
+CREATE INDEX IF NOT EXISTS appointments_doctor_starts_at
+ON appointments (doctor_id, starts_at);
+
+ALTER TABLE appointments
+  ADD COLUMN IF NOT EXISTS doctor_period tsrange
+  GENERATED ALWAYS AS (tsrange(starts_at, reserved_ends_at, '[)')) STORED;
+
+ALTER TABLE appointments
+  ADD COLUMN IF NOT EXISTS period tsrange
+  GENERATED ALWAYS AS (tsrange(starts_at, ends_at, '[)')) STORED;
+
+ALTER TABLE appointments
+  DROP CONSTRAINT IF EXISTS appointments_no_overlap_per_doctor;
+
+DO $$
+BEGIN
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_constraint
+    WHERE conname = 'appointments_no_overlap_per_doctor_reservation'
       AND conrelid = 'appointments'::regclass
       AND contype = 'x'
   ) THEN
     ALTER TABLE appointments
-      ADD CONSTRAINT appointments_no_overlap_per_doctor
+      ADD CONSTRAINT appointments_no_overlap_per_doctor_reservation
       EXCLUDE USING gist (
         doctor_id WITH =,
-        period WITH &&
+        doctor_period WITH &&
       )
       WHERE (status = 'scheduled');
   END IF;

@@ -57,11 +57,13 @@ def doctor_slots(request: Request, doctor_id: str):
     cur = conn.cursor()
     cur.execute(
         """
-        SELECT id, name, duration_minutes, buffer_minutes
-        FROM services
-        WHERE active
+        SELECT svc.id, svc.name, svc.duration_minutes, svc.buffer_minutes
+        FROM services svc
+        JOIN doctor_services ds ON ds.service_id = svc.id
+        WHERE svc.active AND ds.doctor_id = %s
         ORDER BY name, id
-        """
+        """,
+        (doctor_id,),
     )
     services = [
         {
@@ -96,7 +98,7 @@ def doctor_slots(request: Request, doctor_id: str):
     if error == "overlap" and conflict_appointment_id and role == "patient":
         cur.execute(
             """
-            SELECT d.full_name, s.starts_at, s.ends_at
+            SELECT d.full_name, a.starts_at, a.ends_at
             FROM appointments a
             JOIN slots s ON s.id = a.slot_id
             JOIN doctors d ON d.id = s.doctor_id
@@ -120,7 +122,7 @@ def doctor_slots(request: Request, doctor_id: str):
     ):
         cur.execute(
             """
-            SELECT d.full_name, s.starts_at, s.ends_at
+            SELECT d.full_name, a.starts_at, a.ends_at
             FROM appointments a
             JOIN slots s ON s.id = a.slot_id
             JOIN doctors d ON d.id = s.doctor_id
@@ -144,8 +146,8 @@ def doctor_slots(request: Request, doctor_id: str):
     if role == "registrar" and booked == "1" and confirmation_id is not None:
         cur.execute(
             """
-            SELECT d.full_name, u.email, svc.name, svc.duration_minutes,
-                   svc.buffer_minutes, a.starts_at, a.ends_at
+            SELECT d.full_name, u.email, svc.name, s.duration_minutes,
+                   s.buffer_minutes, a.starts_at, a.ends_at
             FROM appointments a
             JOIN doctors d ON d.id = a.doctor_id
             JOIN users u ON u.id = a.patient_user_id
@@ -173,8 +175,9 @@ def doctor_slots(request: Request, doctor_id: str):
     else:
         cur.execute(
             """
-            SELECT s.id, s.starts_at, s.ends_at, svc.name,
-                   svc.duration_minutes, svc.buffer_minutes,
+            SELECT s.id, s.starts_at,
+                   s.starts_at + make_interval(mins => s.duration_minutes),
+                   svc.name, s.duration_minutes, s.buffer_minutes,
                    public.scheduled_slot_is_taken(s.id) AS taken,
                    EXISTS (
                        SELECT 1
@@ -182,7 +185,8 @@ def doctor_slots(request: Request, doctor_id: str):
                        WHERE a.doctor_id = s.doctor_id
                          AND a.status = 'scheduled'
                          AND a.patient_user_id = %s
-                         AND a.starts_at < s.ends_at
+                         AND a.starts_at < s.starts_at
+                               + make_interval(mins => s.duration_minutes)
                          AND a.ends_at > s.starts_at
                    ) AS mine,
                    (
@@ -191,7 +195,7 @@ def doctor_slots(request: Request, doctor_id: str):
                        WHERE a.doctor_id = s.doctor_id
                          AND a.status = 'scheduled'
                          AND a.starts_at < s.ends_at
-                         AND a.ends_at > s.starts_at
+                         AND a.reserved_ends_at > s.starts_at
                        ORDER BY a.starts_at
                        LIMIT 1
                    ) AS appointment_id,
@@ -208,6 +212,8 @@ def doctor_slots(request: Request, doctor_id: str):
                    s.starts_at <= CURRENT_TIMESTAMP AS is_past
             FROM slots s
             JOIN services svc ON svc.id = s.service_id AND svc.active
+            JOIN doctor_services ds
+              ON ds.doctor_id = s.doctor_id AND ds.service_id = s.service_id
             WHERE s.doctor_id = %s
               AND s.service_id = %s
             ORDER BY s.starts_at
@@ -215,6 +221,8 @@ def doctor_slots(request: Request, doctor_id: str):
             (user["id"], doctor_id, selected_service["id"]),
         )
         rows = cur.fetchall()
+        if role == "patient":
+            rows = [row for row in rows if not row[9] and not row[10]]
     cur.close()
     conn.close()
     if not doc:
@@ -287,13 +295,20 @@ def book_slot(
     cur = conn.cursor()
     cur.execute(
         """
-        SELECT s.doctor_id, s.service_id, s.starts_at, s.ends_at,
+        SELECT s.doctor_id, s.service_id, s.starts_at,
+               s.starts_at + make_interval(mins => s.duration_minutes),
+               s.ends_at,
                s.starts_at <= CURRENT_TIMESTAMP AS is_past,
                public.doctor_is_active(s.doctor_id) AS doctor_active,
                EXISTS (
                    SELECT 1 FROM services svc
                    WHERE svc.id = s.service_id AND svc.active
                ) AS service_active,
+               EXISTS (
+                   SELECT 1 FROM doctor_services ds
+                   WHERE ds.doctor_id = s.doctor_id
+                     AND ds.service_id = s.service_id
+               ) AS service_assigned,
                EXISTS (
                    SELECT 1 FROM time_off t
                    WHERE t.doctor_id=s.doctor_id
@@ -315,10 +330,12 @@ def book_slot(
         doctor_id,
         service_id,
         starts_at,
+        visit_ends_at,
         ends_at,
         is_past,
         doctor_active,
         service_active,
+        service_assigned,
         is_closed,
     ) = slot
     if raw_service_id is not None and requested_service_id != service_id:
@@ -336,7 +353,7 @@ def book_slot(
             f"/doctors/{doctor_id}/slots?error=unavailable&service_id={service_id}",
             status_code=303,
         )
-    if not service_active:
+    if not service_active or not service_assigned:
         cur.close()
         conn.close()
         return RedirectResponse(
@@ -419,13 +436,12 @@ def book_slot(
         """
         SELECT a.id
         FROM appointments a
-        JOIN slots s ON s.id = a.slot_id
         WHERE a.patient_user_id = %s
           AND a.status = 'scheduled'
-          AND s.starts_at < %s
-          AND s.ends_at > %s
+          AND a.starts_at < %s
+          AND a.ends_at > %s
         """,
-        (patient_id, ends_at, starts_at),
+        (patient_id, visit_ends_at, starts_at),
     )
     conflict_row = cur.fetchone()
     if conflict_row:
@@ -437,9 +453,12 @@ def book_slot(
         cur.execute(
             """
             INSERT INTO appointments (
-                slot_id, patient_user_id, doctor_id, starts_at, ends_at
+                slot_id, patient_user_id, doctor_id, starts_at, ends_at,
+                reserved_ends_at
             )
-            SELECT s.id, %s, s.doctor_id, s.starts_at, s.ends_at
+            SELECT s.id, %s, s.doctor_id, s.starts_at,
+                   s.starts_at + make_interval(mins => s.duration_minutes),
+                   s.ends_at
             FROM slots s
             WHERE s.id = %s
               AND s.starts_at > CURRENT_TIMESTAMP
@@ -484,7 +503,7 @@ def book_slot(
                       AND a.starts_at < %s
                       AND a.ends_at > %s
                     """,
-                    (patient_id, ends_at, starts_at),
+                    (patient_id, visit_ends_at, starts_at),
                 )
                 row = cur.fetchone()
                 conflict_id = row[0] if row else None
@@ -655,9 +674,9 @@ def my_appointments(request: Request):
     cur = conn.cursor()
     cur.execute(
         """
-         SELECT a.id, d.full_name, svc.name, s.starts_at, s.ends_at, a.status,
-              s.starts_at > CURRENT_TIMESTAMP AS cancellable,
-              svc.duration_minutes, svc.buffer_minutes
+         SELECT a.id, d.full_name, svc.name, a.starts_at, a.ends_at, a.status,
+              a.starts_at > CURRENT_TIMESTAMP AS cancellable,
+              s.duration_minutes, s.buffer_minutes
          FROM appointments a
          JOIN slots s ON s.id=a.slot_id
          JOIN doctors d ON d.id=s.doctor_id
@@ -666,16 +685,16 @@ def my_appointments(request: Request):
          ORDER BY
               CASE
                 WHEN a.status = 'scheduled'
-                 AND s.starts_at > CURRENT_TIMESTAMP THEN 0
+                 AND a.starts_at > CURRENT_TIMESTAMP THEN 0
                 ELSE 1
               END,
               CASE
                 WHEN a.status = 'scheduled'
-                 AND s.starts_at > CURRENT_TIMESTAMP THEN s.starts_at
+                 AND a.starts_at > CURRENT_TIMESTAMP THEN a.starts_at
               END ASC,
               CASE
                 WHEN a.status != 'scheduled'
-                  OR s.starts_at <= CURRENT_TIMESTAMP THEN s.starts_at
+                  OR a.starts_at <= CURRENT_TIMESTAMP THEN a.starts_at
               END DESC,
               a.id DESC
          """,
@@ -736,14 +755,14 @@ def doctor_appointments(request: Request):
     cur = conn.cursor()
     cur.execute(
         """
-        SELECT a.id, dp.email, svc.name, s.starts_at, s.ends_at, a.status, dp.blocked
+        SELECT a.id, dp.email, svc.name, a.starts_at, a.ends_at, a.status, dp.blocked
         FROM appointments a
         JOIN slots s ON s.id=a.slot_id
         JOIN services svc ON svc.id=s.service_id
         JOIN doctors d ON d.id=s.doctor_id
         JOIN public.doctor_patients(%s) dp ON dp.id=a.patient_user_id
         WHERE d.user_id=%s
-        ORDER BY s.starts_at
+        ORDER BY a.starts_at
         """,
         (user["id"], user["id"]),
     )

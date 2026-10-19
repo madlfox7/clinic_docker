@@ -203,11 +203,11 @@ HOST_GID=1000
 
 ## 6. Инициализация приложения
 
-Сервис `migrate` подключается к PostgreSQL как `POSTGRES_USER` и до запуска API применяет `db/init.sql`, создаёт роль `clinic_api` и выдаёт ей права на чтение и изменение данных. На новом volume `db/init.sql` и `db/roles.sql` также выполняются стандартным entrypoint PostgreSQL. Для уже заполненного volume их повторно применяет `migrate`; данные volume не удаляются.
+Сервис `migrate` подключается к PostgreSQL как `POSTGRES_USER` и до запуска API применяет `db/init.sql`, создаёт роль `clinic_api` и выдаёт ей ограниченные права. На новом volume `db/init.sql` и `db/roles.sql` также выполняются стандартным entrypoint PostgreSQL. Для уже заполненного volume их повторно применяет `migrate`; данные volume не удаляются.
 
-API использует только `clinic_api`: эта роль не является суперпользователем, не имеет `BYPASSRLS` и не может создавать объекты в схеме `public`. Пароль берётся из `CLINIC_API_PASSWORD` в локальном `.env`; полный `.env` API-контейнеру не передаётся.
+API и `seed` используют `clinic_api`: эта роль не является суперпользователем, не имеет `BYPASSRLS` и не может создавать объекты в схеме `public`. Пароль берётся из `CLINIC_API_PASSWORD` в локальном `.env`; пароль владельца БД передаётся только `migrate`.
 
-RLS включён для `appointments`, `visit_notes` и `prescriptions`; `users` пока остаётся без RLS для входа и проверки сессии. Роли `app_guest`, `app_patient`, `app_doctor`, `app_registrar` и `app_admin` являются NOLOGIN-контекстами. Защищённые запросы API открывают отдельное соединение через `db_as(user)`, где транзакционно устанавливаются `SET ROLE` и `app.user_id`; вход, проверка сессии и публичный список врачей остаются на `clinic_api`. Врач получает email и статус блокировки своих пациентов только через ограниченную `doctor_patients()`, без прямого `SELECT` на `users`.
+RLS включён для `appointments`, `visit_notes`, `prescriptions` и `users`; `clinic_api` не имеет прямого `SELECT` на `password_hash`. Вход проверяется через `SECURITY DEFINER`-функцию. `seed` создаёт начального администратора функцией, доступной только `clinic_api` и работающей лишь при пустой таблице `users`; остальные тестовые записи создаются через `app_guest` и `app_admin`. Защищённые запросы API открывают отдельное соединение через `db_as(user)`, где транзакционно устанавливаются `SET LOCAL ROLE` и `app.user_id`.
 
 При старте FastAPI выполняются только сиды:
 

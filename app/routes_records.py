@@ -201,9 +201,8 @@ def doctor_records(request: Request, appointment_id: str):
     cur = conn.cursor()
     cur.execute(
         """
-        SELECT a.id, dp.email, d.full_name, s.starts_at, s.ends_at, a.status
+        SELECT a.id, dp.email, d.full_name, a.starts_at, a.ends_at, a.status
         FROM appointments a
-        JOIN slots s ON s.id = a.slot_id
         JOIN doctors d ON d.id = a.doctor_id
         JOIN public.doctor_patients(%s) dp ON dp.id = a.patient_user_id
         WHERE a.id = %s
@@ -365,17 +364,15 @@ def patient_records(request: Request):
         SELECT record_type, body, doctor_name, starts_at, appointment_id
         FROM (
           SELECT 'Clinical note'::text AS record_type, n.body,
-                 d.full_name AS doctor_name, s.starts_at, a.id AS appointment_id
+                 d.full_name AS doctor_name, a.starts_at, a.id AS appointment_id
           FROM visit_notes n
           JOIN appointments a ON a.id = n.appointment_id
-          JOIN slots s ON s.id = a.slot_id
           JOIN doctors d ON d.id = a.doctor_id
           UNION ALL
           SELECT 'Prescription'::text AS record_type, p.body,
-                 d.full_name AS doctor_name, s.starts_at, a.id AS appointment_id
+                 d.full_name AS doctor_name, a.starts_at, a.id AS appointment_id
           FROM prescriptions p
           JOIN appointments a ON a.id = p.appointment_id
-          JOIN slots s ON s.id = a.slot_id
           JOIN doctors d ON d.id = a.doctor_id
         ) AS records
         ORDER BY starts_at DESC, appointment_id DESC, record_type

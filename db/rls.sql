@@ -98,7 +98,7 @@ AS $function$
     JOIN public.appointments AS a
       ON a.doctor_id = s.doctor_id
      AND a.starts_at < s.ends_at
-     AND a.ends_at > s.starts_at
+     AND a.reserved_ends_at > s.starts_at
     WHERE s.id = target_slot_id
       AND a.status = 'scheduled'
   );
@@ -125,7 +125,8 @@ CREATE OR REPLACE FUNCTION public.is_valid_free_slot(
   target_slot_id int,
   target_doctor_id int,
   target_starts_at timestamp,
-  target_ends_at timestamp
+  target_visit_ends_at timestamp,
+  target_reserved_ends_at timestamp
 )
 RETURNS boolean
 LANGUAGE sql
@@ -139,9 +140,17 @@ AS $function$
     WHERE s.id = target_slot_id
       AND s.doctor_id = target_doctor_id
       AND s.starts_at = target_starts_at
-      AND s.ends_at = target_ends_at
+      AND s.starts_at + make_interval(mins => s.duration_minutes)
+          = target_visit_ends_at
+      AND s.ends_at = target_reserved_ends_at
       AND s.starts_at > CURRENT_TIMESTAMP
       AND public.doctor_is_active(target_doctor_id)
+      AND EXISTS (
+        SELECT 1
+        FROM public.doctor_services AS ds
+        WHERE ds.doctor_id = s.doctor_id
+          AND ds.service_id = s.service_id
+      )
       AND EXISTS (
         SELECT 1
         FROM public.services AS svc
@@ -153,7 +162,7 @@ AS $function$
         FROM public.appointments AS a
         WHERE a.doctor_id = s.doctor_id
           AND a.starts_at < s.ends_at
-          AND a.ends_at > s.starts_at
+          AND a.reserved_ends_at > s.starts_at
           AND a.status = 'scheduled'
       )
       AND NOT EXISTS (
@@ -169,6 +178,32 @@ AS $function$
       )
   );
 $function$;
+
+CREATE OR REPLACE FUNCTION public.doctor_can_write_medical_record(
+  target_appointment_id int,
+  target_doctor_id int,
+  target_patient_user_id int
+)
+RETURNS boolean
+LANGUAGE sql
+STABLE
+SET search_path = pg_catalog, public
+AS $function$
+  SELECT EXISTS (
+    SELECT 1
+    FROM public.appointments AS a
+    WHERE a.id = target_appointment_id
+      AND a.doctor_id = target_doctor_id
+      AND a.patient_user_id = target_patient_user_id
+      AND a.status = 'scheduled'
+      AND a.starts_at > CURRENT_TIMESTAMP - INTERVAL '12 months'
+  );
+$function$;
+
+REVOKE ALL ON FUNCTION public.doctor_can_write_medical_record(integer, integer, integer)
+  FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION public.doctor_can_write_medical_record(integer, integer, integer)
+  TO app_doctor;
 
 CREATE OR REPLACE FUNCTION public.record_audit_event(
   event_action text,
@@ -221,7 +256,7 @@ DECLARE
 BEGIN
   IF current_setting('role', true) IS DISTINCT FROM 'app_admin'
      OR replacement_hash IS NULL
-     OR length(replacement_hash) = 0
+     OR replacement_hash !~ '^\$2[aby]\$[0-9]{2}\$[./A-Za-z0-9]{53}$'
      OR NOT EXISTS (
        SELECT 1
        FROM public.users
@@ -232,11 +267,90 @@ BEGIN
   END IF;
 
   UPDATE public.users
-  SET password_hash = replacement_hash
+  SET password_hash = replacement_hash,
+      auth_version = auth_version + 1
   WHERE id = target_user_id
+    AND role IN ('patient', 'registrar')
   RETURNING role INTO target_role;
 
   RETURN target_role;
+END;
+$function$;
+
+CREATE OR REPLACE FUNCTION public.authenticate_user(
+  candidate_email text,
+  candidate_password text
+)
+RETURNS TABLE (
+  id integer,
+  email text,
+  role text,
+  blocked boolean,
+  auth_version bigint
+)
+LANGUAGE sql
+SECURITY DEFINER
+SET search_path = pg_catalog, public, pg_temp
+AS $function$
+  SELECT u.id, u.email, u.role, u.blocked, u.auth_version
+  FROM public.users AS u
+  WHERE candidate_email IS NOT NULL
+    AND candidate_password IS NOT NULL
+    AND octet_length(candidate_password) <= 72
+    AND lower(u.email) = lower(candidate_email)
+    AND public.crypt(
+          candidate_password,
+          CASE
+            WHEN left(u.password_hash, 4) = '$2b$'
+              THEN '$2a$' || substring(u.password_hash FROM 5)
+            ELSE u.password_hash
+          END
+        ) = CASE
+              WHEN left(u.password_hash, 4) = '$2b$'
+                THEN '$2a$' || substring(u.password_hash FROM 5)
+              ELSE u.password_hash
+            END;
+$function$;
+
+CREATE OR REPLACE FUNCTION public.bootstrap_seed_admin(
+  seed_email text,
+  replacement_hash text
+)
+RETURNS integer
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = pg_catalog, public, pg_temp
+AS $function$
+DECLARE
+  existing_admin_id integer;
+  created_admin_id integer;
+BEGIN
+  IF session_user IS DISTINCT FROM 'clinic_api'
+     OR seed_email IS DISTINCT FROM 'admin@clinic.local'
+     OR replacement_hash IS NULL
+     OR replacement_hash !~ '^\$2[aby]\$[0-9]{2}\$[./A-Za-z0-9]{53}$' THEN
+    RAISE EXCEPTION 'invalid seed-admin context'
+      USING ERRCODE = '42501';
+  END IF;
+
+  SELECT id INTO existing_admin_id
+  FROM public.users
+  WHERE email = seed_email AND role = 'admin';
+
+  IF existing_admin_id IS NOT NULL THEN
+    RETURN existing_admin_id;
+  END IF;
+
+  IF EXISTS (SELECT 1 FROM public.users) THEN
+    RAISE EXCEPTION 'seed admin can only be bootstrapped into an empty users table'
+      USING ERRCODE = '42501';
+  END IF;
+
+  INSERT INTO public.users (email, password_hash, role, blocked)
+  VALUES (seed_email, replacement_hash, 'admin', FALSE)
+  RETURNING id INTO created_admin_id;
+
+  RETURN created_admin_id;
 END;
 $function$;
 
@@ -281,89 +395,121 @@ BEGIN
 END;
 $function$;
 
-CREATE OR REPLACE FUNCTION public.current_patient_password_hash()
-RETURNS text
+DROP FUNCTION IF EXISTS public.current_patient_password_hash();
+DROP FUNCTION IF EXISTS public.change_own_patient_password(text, text);
+
+CREATE OR REPLACE FUNCTION public.change_own_patient_password(
+  current_password text,
+  new_password text,
+  replacement_hash text
+)
+RETURNS TABLE (result text, resulting_auth_version bigint)
 LANGUAGE plpgsql
-STABLE
 SECURITY DEFINER
 SET search_path = pg_catalog, public, pg_temp
 AS $function$
 DECLARE
   actor_id integer := NULLIF(current_setting('app.user_id', true), '')::integer;
+  actor_role text := current_setting('role', true);
+  target_user_role text;
   stored_hash text;
+  crypt_hash text;
+  changed_auth_version bigint;
 BEGIN
-  IF current_setting('role', true) IS DISTINCT FROM 'app_patient'
-     OR actor_id IS NULL THEN
-    RAISE EXCEPTION 'invalid patient password context'
+  target_user_role := CASE actor_role
+    WHEN 'app_patient' THEN 'patient'
+    WHEN 'app_doctor' THEN 'doctor'
+    WHEN 'app_registrar' THEN 'registrar'
+    WHEN 'app_admin' THEN 'admin'
+    ELSE NULL
+  END;
+
+  IF target_user_role IS NULL
+     OR actor_id IS NULL
+     OR current_password IS NULL
+     OR new_password IS NULL
+     OR octet_length(current_password) > 72
+     OR octet_length(new_password) > 72
+     OR replacement_hash IS NULL
+     OR replacement_hash !~ '^\$2[aby]\$[0-9]{2}\$[./A-Za-z0-9]{53}$' THEN
+    RAISE EXCEPTION 'invalid password-change context'
       USING ERRCODE = '42501';
   END IF;
 
-  SELECT password_hash INTO stored_hash
-  FROM public.users
-  WHERE id = actor_id AND role = 'patient' AND NOT blocked;
+  SELECT u.password_hash INTO stored_hash
+  FROM public.users AS u
+  WHERE u.id = actor_id
+    AND u.role = target_user_role
+    AND NOT u.blocked
+  FOR UPDATE;
 
-  RETURN stored_hash;
-END;
-$function$;
+  IF NOT FOUND THEN
+    RETURN QUERY SELECT 'unavailable'::text, NULL::bigint;
+    RETURN;
+  END IF;
 
-CREATE OR REPLACE FUNCTION public.change_own_patient_password(
-  expected_password_hash text,
-  replacement_hash text
-)
-RETURNS boolean
-LANGUAGE plpgsql
-SECURITY DEFINER
-SET search_path = pg_catalog, public, pg_temp
-AS $function$
-DECLARE
-  actor_id integer := NULLIF(current_setting('app.user_id', true), '')::integer;
-BEGIN
-  IF current_setting('role', true) IS DISTINCT FROM 'app_patient'
-     OR actor_id IS NULL
-     OR expected_password_hash IS NULL
-     OR replacement_hash IS NULL
-     OR length(replacement_hash) = 0 THEN
-    RAISE EXCEPTION 'invalid patient password-change context'
-      USING ERRCODE = '42501';
+  crypt_hash := CASE
+    WHEN left(stored_hash, 4) = '$2b$'
+      THEN '$2a$' || substring(stored_hash FROM 5)
+    ELSE stored_hash
+  END;
+
+  IF public.crypt(current_password, crypt_hash) IS DISTINCT FROM crypt_hash THEN
+    RETURN QUERY SELECT 'current'::text, NULL::bigint;
+    RETURN;
+  END IF;
+
+  IF public.crypt(new_password, crypt_hash) = crypt_hash THEN
+    RETURN QUERY SELECT 'same'::text, NULL::bigint;
+    RETURN;
   END IF;
 
   UPDATE public.users
-  SET password_hash = replacement_hash
+  SET password_hash = replacement_hash,
+      auth_version = public.users.auth_version + 1
   WHERE id = actor_id
-    AND role = 'patient'
+    AND role = target_user_role
     AND NOT blocked
-    AND password_hash = expected_password_hash;
+    AND password_hash = stored_hash
+  RETURNING public.users.auth_version INTO changed_auth_version;
 
-  RETURN FOUND;
+  IF NOT FOUND THEN
+    RETURN QUERY SELECT 'stale'::text, NULL::bigint;
+    RETURN;
+  END IF;
+
+  RETURN QUERY SELECT 'changed'::text, changed_auth_version;
 END;
 $function$;
 
 REVOKE ALL ON FUNCTION public.current_patient_is_active() FROM PUBLIC;
 REVOKE ALL ON FUNCTION public.scheduled_slot_is_taken(integer) FROM PUBLIC;
 REVOKE ALL ON FUNCTION public.doctor_is_active(integer) FROM PUBLIC;
-REVOKE ALL ON FUNCTION public.is_valid_free_slot(integer, integer, timestamp, timestamp) FROM PUBLIC;
+REVOKE ALL ON FUNCTION public.is_valid_free_slot(integer, integer, timestamp, timestamp, timestamp) FROM PUBLIC;
 REVOKE ALL ON FUNCTION public.record_audit_event(text, text, integer) FROM PUBLIC;
 REVOKE ALL ON FUNCTION public.admin_reset_user_password(integer, text) FROM PUBLIC;
+REVOKE ALL ON FUNCTION public.authenticate_user(text, text) FROM PUBLIC;
+REVOKE ALL ON FUNCTION public.bootstrap_seed_admin(text, text) FROM PUBLIC;
 REVOKE ALL ON FUNCTION public.calendar_patient_email(integer, integer) FROM PUBLIC;
-REVOKE ALL ON FUNCTION public.current_patient_password_hash() FROM PUBLIC;
-REVOKE ALL ON FUNCTION public.change_own_patient_password(text, text) FROM PUBLIC;
+REVOKE ALL ON FUNCTION public.change_own_patient_password(text, text, text) FROM PUBLIC;
 GRANT EXECUTE ON FUNCTION public.current_patient_is_active() TO app_patient;
 GRANT EXECUTE ON FUNCTION public.scheduled_slot_is_taken(integer)
   TO app_patient, app_registrar, app_admin;
 GRANT EXECUTE ON FUNCTION public.doctor_is_active(integer)
   TO app_patient, app_registrar, app_admin;
-GRANT EXECUTE ON FUNCTION public.is_valid_free_slot(integer, integer, timestamp, timestamp)
-  TO app_patient;
+GRANT EXECUTE ON FUNCTION public.is_valid_free_slot(
+  integer, integer, timestamp, timestamp, timestamp
+) TO app_patient, app_registrar;
 GRANT EXECUTE ON FUNCTION public.record_audit_event(text, text, integer)
   TO app_patient, app_doctor, app_registrar, app_admin;
 GRANT EXECUTE ON FUNCTION public.admin_reset_user_password(integer, text)
   TO app_admin;
+GRANT EXECUTE ON FUNCTION public.authenticate_user(text, text) TO clinic_api;
+GRANT EXECUTE ON FUNCTION public.bootstrap_seed_admin(text, text) TO clinic_api;
 GRANT EXECUTE ON FUNCTION public.calendar_patient_email(integer, integer)
   TO app_doctor, app_registrar;
-GRANT EXECUTE ON FUNCTION public.current_patient_password_hash()
-  TO app_patient;
-GRANT EXECUTE ON FUNCTION public.change_own_patient_password(text, text)
-  TO app_patient;
+GRANT EXECUTE ON FUNCTION public.change_own_patient_password(text, text, text)
+  TO app_patient, app_doctor, app_registrar, app_admin;
 
 GRANT USAGE ON SCHEMA public
   TO app_guest, app_patient, app_doctor, app_registrar, app_admin;
@@ -373,6 +519,9 @@ GRANT SELECT ON public.services
   TO app_guest, app_patient, app_doctor, app_registrar, app_admin;
 GRANT INSERT, UPDATE, DELETE ON public.services TO app_admin;
 GRANT USAGE, SELECT ON SEQUENCE public.services_id_seq TO app_admin;
+GRANT SELECT ON public.doctor_services
+  TO app_patient, app_doctor, app_registrar, app_admin;
+GRANT INSERT, DELETE ON public.doctor_services TO app_admin;
 GRANT INSERT (user_id, full_name, specialty, experience_years),
   UPDATE (full_name, specialty, experience_years)
   ON public.doctors TO app_admin;
@@ -388,7 +537,9 @@ GRANT SELECT ON public.slots TO app_doctor, app_admin;
 GRANT SELECT ON public.work_hours, public.time_off, public.holidays TO app_doctor;
 
 GRANT SELECT, UPDATE (status) ON public.appointments TO app_patient, app_registrar;
-GRANT INSERT (slot_id, patient_user_id, doctor_id, starts_at, ends_at)
+GRANT INSERT (
+  slot_id, patient_user_id, doctor_id, starts_at, ends_at, reserved_ends_at
+)
   ON public.appointments TO app_patient, app_registrar;
 GRANT SELECT ON public.appointments TO app_doctor, app_admin;
 GRANT UPDATE (status), DELETE ON public.appointments TO app_admin;
@@ -415,7 +566,10 @@ GRANT SELECT ON public.work_hours, public.time_off, public.holidays TO app_admin
 GRANT INSERT, UPDATE ON public.work_hours TO app_admin;
 GRANT INSERT ON public.time_off TO app_admin;
 GRANT INSERT, UPDATE ON public.holidays TO app_admin;
-GRANT INSERT (doctor_id, service_id, starts_at, ends_at), DELETE
+GRANT INSERT (
+  doctor_id, service_id, starts_at, ends_at,
+  duration_minutes, buffer_minutes
+), DELETE
   ON public.slots TO app_admin;
 GRANT USAGE, SELECT ON SEQUENCE public.slots_id_seq, public.work_hours_id_seq,
   public.time_off_id_seq TO app_admin;
@@ -451,7 +605,9 @@ CREATE POLICY appointments_patient_insert ON public.appointments
     patient_user_id = current_setting('app.user_id', true)::int
     AND status = 'scheduled'
     AND public.current_patient_is_active()
-    AND public.is_valid_free_slot(slot_id, doctor_id, starts_at, ends_at)
+    AND public.is_valid_free_slot(
+      slot_id, doctor_id, starts_at, ends_at, reserved_ends_at
+    )
   );
 
 CREATE POLICY appointments_patient_update ON public.appointments
@@ -485,6 +641,9 @@ CREATE POLICY appointments_registrar_insert ON public.appointments
   FOR INSERT TO app_registrar
   WITH CHECK (
     public.doctor_is_active(doctor_id)
+    AND public.is_valid_free_slot(
+      slot_id, doctor_id, starts_at, ends_at, reserved_ends_at
+    )
     AND
     EXISTS (
       SELECT 1
@@ -511,6 +670,8 @@ CREATE POLICY appointments_admin_update ON public.appointments
 CREATE POLICY appointments_admin_delete ON public.appointments
   FOR DELETE TO app_admin
   USING (status = 'cancelled');
+
+DROP FUNCTION IF EXISTS public.is_valid_free_slot(integer, integer, timestamp, timestamp);
 
 DROP POLICY IF EXISTS patient_notes ON public.visit_notes;
 DROP POLICY IF EXISTS doctor_notes ON public.visit_notes;
@@ -543,7 +704,9 @@ CREATE POLICY patient_notes ON public.visit_notes
       FROM public.doctors
       WHERE user_id = current_setting('app.user_id', true)::int
     )
-    AND public.is_own_patient(doctor_id, patient_user_id)
+    AND public.doctor_can_write_medical_record(
+      appointment_id, doctor_id, patient_user_id
+    )
   );
 CREATE POLICY doctor_notes_update ON public.visit_notes
   FOR UPDATE TO app_doctor
@@ -553,7 +716,9 @@ CREATE POLICY doctor_notes_update ON public.visit_notes
       FROM public.doctors
       WHERE user_id = current_setting('app.user_id', true)::int
     )
-    AND public.is_own_patient(doctor_id, patient_user_id)
+    AND public.doctor_can_write_medical_record(
+      appointment_id, doctor_id, patient_user_id
+    )
   )
   WITH CHECK (
     doctor_id = (
@@ -561,7 +726,9 @@ CREATE POLICY doctor_notes_update ON public.visit_notes
       FROM public.doctors
       WHERE user_id = current_setting('app.user_id', true)::int
     )
-    AND public.is_own_patient(doctor_id, patient_user_id)
+    AND public.doctor_can_write_medical_record(
+      appointment_id, doctor_id, patient_user_id
+    )
   );
 
 DROP POLICY IF EXISTS patient_prescriptions ON public.prescriptions;
@@ -595,7 +762,9 @@ CREATE POLICY patient_prescriptions ON public.prescriptions
       FROM public.doctors
       WHERE user_id = current_setting('app.user_id', true)::int
     )
-    AND public.is_own_patient(doctor_id, patient_user_id)
+    AND public.doctor_can_write_medical_record(
+      appointment_id, doctor_id, patient_user_id
+    )
   );
 CREATE POLICY doctor_prescriptions_update ON public.prescriptions
   FOR UPDATE TO app_doctor
@@ -605,7 +774,9 @@ CREATE POLICY doctor_prescriptions_update ON public.prescriptions
       FROM public.doctors
       WHERE user_id = current_setting('app.user_id', true)::int
     )
-    AND public.is_own_patient(doctor_id, patient_user_id)
+    AND public.doctor_can_write_medical_record(
+      appointment_id, doctor_id, patient_user_id
+    )
   )
   WITH CHECK (
     doctor_id = (
@@ -613,7 +784,9 @@ CREATE POLICY doctor_prescriptions_update ON public.prescriptions
       FROM public.doctors
       WHERE user_id = current_setting('app.user_id', true)::int
     )
-    AND public.is_own_patient(doctor_id, patient_user_id)
+    AND public.doctor_can_write_medical_record(
+      appointment_id, doctor_id, patient_user_id
+    )
   );
 
 DROP POLICY IF EXISTS slots_patient_select ON public.slots;
@@ -656,8 +829,14 @@ CREATE POLICY users_admin_select ON public.users
   FOR SELECT TO app_admin USING (true);
 CREATE POLICY users_admin_update ON public.users
   FOR UPDATE TO app_admin
-  USING (role IN ('patient', 'doctor'))
-  WITH CHECK (role IN ('patient', 'doctor'));
+  USING (
+    role IN ('patient', 'doctor', 'admin')
+    AND id <> current_setting('app.user_id', true)::integer
+  )
+  WITH CHECK (
+    role IN ('patient', 'doctor', 'admin')
+    AND id <> current_setting('app.user_id', true)::integer
+  );
 CREATE POLICY users_admin_insert ON public.users
   FOR INSERT TO app_admin
   WITH CHECK (role IN ('doctor', 'registrar', 'admin') AND NOT blocked);

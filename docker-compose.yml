@@ -70,8 +70,8 @@ services:
       TZ: Asia/Yerevan
       PGTZ: Asia/Yerevan
       PGHOST: db
-      PGUSER: ${POSTGRES_USER:?Set POSTGRES_USER in .env}
-      PGPASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}
+      PGUSER: clinic_api
+      PGPASSWORD: ${CLINIC_API_PASSWORD:?Set CLINIC_API_PASSWORD in .env}
       PGDATABASE: ${POSTGRES_DB:?Set POSTGRES_DB in .env}
     networks:
       - backend

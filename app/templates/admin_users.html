@@ -11,7 +11,9 @@
 {% elif error == "invalid_role" %}<p>Choose registrar or admin.</p>
 {% elif error == "invalid_password" %}<p>Password must be at least 8 characters and not a common default password.</p>
 {% elif error == "password_mismatch" %}<p>Passwords do not match.</p>
-{% elif error == "user_not_found" %}<p>User not found.</p>{% endif %}
+{% elif error == "user_not_found" %}<p>User not found.</p>
+{% elif error == "self_block" %}<p>You cannot block or unblock your own administrator account.</p>
+{% elif error == "password_reset_not_allowed" %}<p>Password resets are available only for patients and registrars.</p>{% endif %}
 {% if future_cancelled is not none %}
   <p>Cancelled {{ future_cancelled }} future appointment(s).</p>
 {% endif %}
@@ -37,11 +39,26 @@
     {% for user in staff_users %}
       <li>
         {{ user.email }} — {{ user.role }} — {{ "Blocked" if user.blocked else "Active" }}
-        <form method="post" action="/admin/users/{{ user.id }}/password">
-          <label>New password <input name="new_password" type="password" minlength="8" maxlength="72" required></label>
-          <label>Confirm <input name="confirm_password" type="password" minlength="8" maxlength="72" required></label>
-          <button type="submit">Reset password</button>
-        </form>
+        {% if user.role == "registrar" %}
+          <form method="post" action="/admin/users/{{ user.id }}/password">
+            <label>New password <input name="new_password" type="password" minlength="8" maxlength="72" required></label>
+            <label>Confirm <input name="confirm_password" type="password" minlength="8" maxlength="72" required></label>
+            <button type="submit">Reset password</button>
+          </form>
+        {% elif user.role == "admin" %}
+          {% if user.id == current_admin_id %}
+            <strong>Your own administrator account cannot be blocked.</strong>
+          {% elif user.blocked %}
+            <form method="post" action="/admin/users/{{ user.id }}/unblock" style="display:inline">
+              <button type="submit">Unblock administrator</button>
+            </form>
+          {% else %}
+            <form method="post" action="/admin/users/{{ user.id }}/block" style="display:inline"
+              onsubmit="return confirm('Block this administrator?')">
+              <button type="submit">Block administrator</button>
+            </form>
+          {% endif %}
+        {% endif %}
       </li>
     {% else %}
       <li>No administrator or registrar accounts.</li>

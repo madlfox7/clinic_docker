@@ -100,10 +100,12 @@
 {% elif error == "time_off_past" %}<p>Time off cannot start in the past.</p>
 {% elif error == "holiday_name_required" %}<p>Enter a holiday name.</p>
 {% elif error == "doctor_not_found" %}<p>Doctor not found.</p>
+{% elif error == "no_doctors_selected" %}<p>Select at least one doctor.</p>
 {% elif error == "no_weekdays" %}<p>Select at least one weekday.</p>
 {% elif error == "invalid_id" %}<p>Enter a valid whole number.</p>
 {% elif error == "text_too_long" %}<p>That text is too long.</p>
 {% elif error == "no_active_services" %}<p>Create or activate a service before generating slots.</p>{% endif %}
+{% if error == "no_assigned_services" %}<p>Assign at least one active service to this doctor before generating slots.</p>{% endif %}
 {% if error == "invalid_time_off_request" %}<p>Invalid time-off request decision.</p>
 {% elif error == "time_off_request_not_pending" %}<p>This request has already been decided or is unavailable.</p>{% endif %}
 
@@ -126,7 +128,7 @@
   {% endfor %}
   </tbody>
 </table>
-<form method="post" action="/admin/work-hours-bulk">
+<form id="bulk-work-hours-form" method="post" action="/admin/work-hours-bulk">
   <p><strong>Warning:</strong> Current hours are not preloaded. Saving replaces the existing hours for each selected weekday with the same values below. Review the schedule above before saving.</p>
   <label>Doctor
     <select name="doctor_id" required>
@@ -135,7 +137,14 @@
       {% endfor %}
     </select>
   </label>
-  <p>Days</p>
+  <p>Quick day selection</p>
+  <div>
+    <button type="button" data-weekday-preset="0,1,2,3,4">Weekdays (Mon–Fri)</button>
+    <button type="button" data-weekday-preset="5,6">Weekends (Sat–Sun)</button>
+    <button type="button" data-weekday-preset="0,1,2,3,4,5,6">All days</button>
+    <button type="button" data-weekday-preset="">Clear selection</button>
+  </div>
+  <p>Or choose individual days:</p>
   {% for name in weekdays %}
     <label>
       <input type="checkbox" name="weekdays" value="{{ loop.index0 }}"
@@ -148,6 +157,20 @@
   <label>Minimum start interval (minutes) <input name="slot_minutes" type="number" min="1" value="30" required></label>
   <button type="submit">Save hours for selected days</button>
 </form>
+<script>
+  const bulkWorkHoursForm = document.getElementById("bulk-work-hours-form");
+  if (bulkWorkHoursForm) {
+    const weekdayCheckboxes = bulkWorkHoursForm.querySelectorAll('input[name="weekdays"]');
+    bulkWorkHoursForm.querySelectorAll("[data-weekday-preset]").forEach((button) => {
+      button.addEventListener("click", () => {
+        const selectedDays = button.dataset.weekdayPreset.split(",").filter(Boolean);
+        weekdayCheckboxes.forEach((checkbox) => {
+          checkbox.checked = selectedDays.includes(checkbox.value);
+        });
+      });
+    });
+  }
+</script>
 
 {% for doctor in doctors %}
   <form method="post" action="/admin/doctors/{{ doctor.id }}/apply-hours">
@@ -226,12 +249,44 @@
     <li>No active services; slot generation is disabled.</li>
   {% endfor %}
 </ul>
-{% for doctor in doctors %}
-  <form method="post" action="/admin/doctors/{{ doctor.id }}/generate">
-    <strong>{{ doctor.full_name }}</strong>
-    <label>From <input name="from_date" type="date" required></label>
-    <label>To <input name="to_date" type="date" required></label>
-    <button type="submit">Generate</button>
-  </form>
-{% endfor %}
+{% if generation_warnings %}
+  <p><strong>Some services do not fit within the doctor's working window, so no slot will be generated for them on those days:</strong></p>
+  <ul>
+    {% for warning in generation_warnings %}
+      <li>{{ warning.doctor_name }} — {{ weekdays[warning.weekday] }} — {{ warning.service_name }}:
+        {{ warning.total_minutes }} minutes including buffer; work window is {{ warning.work_window_minutes }} minutes.</li>
+    {% endfor %}
+  </ul>
+{% endif %}
+<form id="generate-slots-form" method="post" action="/admin/schedule/generate">
+  <fieldset>
+    <legend>Doctors</legend>
+    {% for doctor in doctors %}
+      <label>
+        <input type="checkbox" name="doctor_ids" value="{{ doctor.id }}">
+        {{ doctor.full_name }}
+      </label>
+    {% else %}
+      <p>No active doctors.</p>
+    {% endfor %}
+  </fieldset>
+  <label>From <input name="from_date" type="date" value="{{ default_from_date }}" required></label>
+  <label>To <input name="to_date" type="date" value="{{ default_to_date }}" required></label>
+  <button type="submit">Generate for selected doctors</button>
+</form>
+<script>
+  const generateSlotsForm = document.getElementById("generate-slots-form");
+  if (generateSlotsForm) {
+    const doctorCheckboxes = generateSlotsForm.querySelectorAll('input[name="doctor_ids"]');
+    const toggleDoctorsButton = document.createElement("button");
+    toggleDoctorsButton.type = "button";
+    toggleDoctorsButton.textContent = "Select all doctors";
+    toggleDoctorsButton.addEventListener("click", () => {
+      const shouldSelectAll = Array.from(doctorCheckboxes).some((checkbox) => !checkbox.checked);
+      doctorCheckboxes.forEach((checkbox) => { checkbox.checked = shouldSelectAll; });
+      toggleDoctorsButton.textContent = shouldSelectAll ? "Clear selection" : "Select all doctors";
+    });
+    generateSlotsForm.querySelector("fieldset").append(toggleDoctorsButton);
+  }
+</script>
 {% endblock %}

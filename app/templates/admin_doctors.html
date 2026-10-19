@@ -3,7 +3,11 @@
 <h1>Manage doctors</h1>
 {% if created == "1" %}<p>Doctor account created.</p>{% endif %}
 {% if updated == "1" %}<p>Doctor details updated.</p>{% endif %}
-{% if activation == "deactivated" %}<p>Doctor deactivated. Existing appointment history was kept.</p>
+{% if activation == "deactivated" %}
+  <p>Doctor deactivated. Existing appointments were not cancelled.</p>
+  {% if future_appointments %}
+    <p><strong>{{ future_appointments }} future scheduled appointment(s) remain on the calendar and need follow-up.</strong></p>
+  {% endif %}
 {% elif activation == "activated" %}<p>Doctor reactivated.</p>{% endif %}
 {% if error == "doctor_not_found" %}<p>Doctor not found.</p>
 {% elif error == "email_exists" %}<p>An account with this email already exists.</p>
@@ -14,6 +18,7 @@
   <section>
     <h2>{{ doctor.full_name }} — {{ "Inactive" if doctor.blocked else "Active" }}</h2>
     <p>{{ doctor.email }}</p>
+    <p>{{ doctor.future_appointments }} future scheduled appointment(s)</p>
     <form method="post" action="/admin/doctors/{{ doctor.id }}">
       <label>Name <input name="full_name" value="{{ doctor.full_name }}" maxlength="120" required></label>
       <label>Specialty <input name="specialty" value="{{ doctor.specialty }}" maxlength="120" required></label>
@@ -28,15 +33,10 @@
       </form>
     {% else %}
       <form method="post" action="/admin/doctors/{{ doctor.id }}/deactivate"
-        onsubmit="return confirm('Deactivate this doctor? Existing appointment history will remain.')">
+        onsubmit="return confirm('Deactivate this doctor? {{ doctor.future_appointments }} future appointment(s) will remain scheduled and will not be cancelled.')">
         <button type="submit">Deactivate doctor</button>
       </form>
     {% endif %}
-    <form method="post" action="/admin/users/{{ doctor.user_id }}/password">
-      <label>New password <input name="new_password" type="password" minlength="8" maxlength="72" required></label>
-      <label>Confirm <input name="confirm_password" type="password" minlength="8" maxlength="72" required></label>
-      <button type="submit">Reset password</button>
-    </form>
   </section>
 {% else %}
   <p>No doctors found.</p>

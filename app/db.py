@@ -121,15 +121,17 @@ def db_as_guest():
 
 #
 def load_session_user(request):
-    """Re-read id, email, role and blocked from users.
+    """Re-read identity, role, blocked state and auth version from users.
 
-    The signed cookie is only a user id. Role is never taken from the session.
+    The signed cookie carries only a user id and revocable auth version.
     Returns (user, status): status is 'ok', 'anonymous', 'missing', or 'blocked'.
-    A missing or blocked account clears the session.
+    A missing, stale or blocked account clears the session.
     """
     raw_id = request.session.get("user_id")
+    raw_auth_version = request.session.get("auth_version")
     has_auth_cookie = (
         raw_id is not None
+        or raw_auth_version is not None
         or request.session.get("email")
         or request.session.get("role")
     )
@@ -138,11 +140,14 @@ def load_session_user(request):
             request.session.clear()
             return None, "missing"
         return None, "anonymous"
+    if type(raw_auth_version) is not int or raw_auth_version < 0:
+        request.session.clear()
+        return None, "missing"
     conn = db()
     try:
         cur = conn.cursor()
         cur.execute(
-            "SELECT id, email, role, blocked FROM users WHERE id=%s",
+            "SELECT id, email, role, blocked, auth_version FROM users WHERE id=%s",
             (raw_id,),
         )
         row = cur.fetchone()
@@ -150,6 +155,9 @@ def load_session_user(request):
     finally:
         conn.close()
     if not row:
+        request.session.clear()
+        return None, "missing"
+    if row[4] != raw_auth_version:
         request.session.clear()
         return None, "missing"
     if row[3]:
@@ -162,103 +170,185 @@ def load_session_user(request):
         "email": row[1],
         "role": row[2],
         "blocked": False,
+        "auth_version": row[4],
     }, "ok"
 
 
 def seed_users():
     conn = db()
-    cur = conn.cursor()
-    for email, raw, role in SEED_USERS:
-        cur.execute("SELECT 1 FROM users WHERE email=%s", (email,))
-        if cur.fetchone() is None:
-            cur.execute(
-                "INSERT INTO users (email, password_hash, role) VALUES (%s, %s, %s)",
-                (email, pwd.hash(raw), role),
-            )
-    conn.commit()
-    cur.close()
-    conn.close()
+    try:
+        with conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT id FROM users WHERE email=%s AND role='admin'",
+                    ("admin@clinic.local",),
+                )
+                row = cur.fetchone()
+                if row is None:
+                    admin_email, raw_password, _ = next(
+                        user for user in SEED_USERS if user[2] == "admin"
+                    )
+                    cur.execute(
+                        "SELECT public.bootstrap_seed_admin(%s, %s)",
+                        (admin_email, pwd.hash(raw_password)),
+                    )
+                    admin_id = cur.fetchone()[0]
+                else:
+                    admin_id = row[0]
+
+            for email, raw_password, role in SEED_USERS:
+                if role == "admin":
+                    continue
+                _set_db_context(conn, ROLE_BY_APP["admin"], admin_id)
+                with conn.cursor() as cur:
+                    cur.execute("SELECT 1 FROM users WHERE email=%s", (email,))
+                    user_exists = cur.fetchone() is not None
+                if not user_exists:
+                    if role == "patient":
+                        _set_db_context(conn, ROLE_BY_APP["guest"], 0)
+                    with conn.cursor() as cur:
+                        cur.execute(
+                            """
+                            INSERT INTO users (email, password_hash, role)
+                            VALUES (%s, %s, %s)
+                            """,
+                            (email, pwd.hash(raw_password), role),
+                        )
+    finally:
+        conn.close()
+
+
+def _set_seed_admin_context(conn):
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT id FROM users WHERE email=%s AND role='admin'",
+            ("admin@clinic.local",),
+        )
+        row = cur.fetchone()
+    if row is None:
+        raise RuntimeError("Seed administrator is missing; seed_users() must run first")
+    _set_db_context(conn, ROLE_BY_APP["admin"], row[0])
 
 
 def seed_clinic():
     conn = db()
-    cur = conn.cursor()
-    cur.execute("SELECT count(*) FROM doctors")
-    if cur.fetchone()[0] == 0:
-        cur.execute("SELECT id FROM users WHERE email=%s", ("doc@clinic.local",))
-        d1 = cur.fetchone()[0]
-        cur.execute("SELECT id FROM users WHERE email=%s", ("doc2@clinic.local",))
-        d2 = cur.fetchone()[0]
-        cur.execute(
-            "INSERT INTO doctors (user_id, full_name, specialty, experience_years) VALUES (%s,%s,%s,%s)",
-            (d1, "Anna Ohanyan", "Therapist", 8),
-        )
-        cur.execute(
-            "INSERT INTO doctors (user_id, full_name, specialty, experience_years) VALUES (%s,%s,%s,%s)",
-            (d2, "Levon Petrosyan", "Dentist", 5),
-        )
-        conn.commit()
-    cur.close()
-    conn.close()
+    try:
+        with conn:
+            _set_seed_admin_context(conn)
+            with conn.cursor() as cur:
+                cur.execute("SELECT count(*) FROM doctors")
+                if cur.fetchone()[0] == 0:
+                    cur.execute(
+                        "SELECT id FROM users WHERE email=%s",
+                        ("doc@clinic.local",),
+                    )
+                    d1 = cur.fetchone()[0]
+                    cur.execute(
+                        "SELECT id FROM users WHERE email=%s",
+                        ("doc2@clinic.local",),
+                    )
+                    d2 = cur.fetchone()[0]
+                    cur.execute(
+                        """
+                        INSERT INTO doctors
+                          (user_id, full_name, specialty, experience_years)
+                        VALUES (%s, %s, %s, %s)
+                        """,
+                        (d1, "Anna Ohanyan", "Therapist", 8),
+                    )
+                    cur.execute(
+                        """
+                        INSERT INTO doctors
+                          (user_id, full_name, specialty, experience_years)
+                        VALUES (%s, %s, %s, %s)
+                        """,
+                        (d2, "Levon Petrosyan", "Dentist", 5),
+                    )
+                    cur.execute(
+                        """
+                        INSERT INTO doctor_services (doctor_id, service_id)
+                        SELECT d.id, svc.id
+                        FROM doctors d
+                        CROSS JOIN services svc
+                        WHERE d.user_id IN (%s, %s) AND svc.active
+                        ON CONFLICT DO NOTHING
+                        """,
+                        (d1, d2),
+                    )
+    finally:
+        conn.close()
 
 
 def seed_work_schedule():
     conn = db()
-    cur = conn.cursor()
-    cur.execute(
-        "SELECT d.id FROM doctors d JOIN users u ON u.id=d.user_id WHERE u.email=%s",
-        ("doc@clinic.local",),
-    )
-    anna = cur.fetchone()[0]
-    cur.execute(
-        "SELECT d.id FROM doctors d JOIN users u ON u.id=d.user_id WHERE u.email=%s",
-        ("doc2@clinic.local",),
-    )
-    levon = cur.fetchone()[0]
+    try:
+        with conn:
+            _set_seed_admin_context(conn)
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT d.id FROM doctors d
+                    JOIN users u ON u.id=d.user_id WHERE u.email=%s
+                    """,
+                    ("doc@clinic.local",),
+                )
+                anna = cur.fetchone()[0]
+                cur.execute(
+                    """
+                    SELECT d.id FROM doctors d
+                    JOIN users u ON u.id=d.user_id WHERE u.email=%s
+                    """,
+                    ("doc2@clinic.local",),
+                )
+                levon = cur.fetchone()[0]
 
-    for weekday in range(5):
-        cur.execute(
-            """
-            INSERT INTO work_hours (doctor_id, weekday, start_time, end_time, slot_minutes)
-            VALUES (%s, %s, '09:00', '12:00', 30)
-            ON CONFLICT (doctor_id, weekday) DO NOTHING
-            """,
-            (anna, weekday),
-        )
-    for weekday in (0, 2, 4):
-        cur.execute(
-            """
-            INSERT INTO work_hours (doctor_id, weekday, start_time, end_time, slot_minutes)
-            VALUES (%s, %s, '09:00', '11:00', 30)
-            ON CONFLICT (doctor_id, weekday) DO NOTHING
-            """,
-            (levon, weekday),
-        )
+                for weekday in range(5):
+                    cur.execute(
+                        """
+                        INSERT INTO work_hours
+                          (doctor_id, weekday, start_time, end_time, slot_minutes)
+                        VALUES (%s, %s, '09:00', '12:00', 30)
+                        ON CONFLICT (doctor_id, weekday) DO NOTHING
+                        """,
+                        (anna, weekday),
+                    )
+                for weekday in (0, 2, 4):
+                    cur.execute(
+                        """
+                        INSERT INTO work_hours
+                          (doctor_id, weekday, start_time, end_time, slot_minutes)
+                        VALUES (%s, %s, '09:00', '11:00', 30)
+                        ON CONFLICT (doctor_id, weekday) DO NOTHING
+                        """,
+                        (levon, weekday),
+                    )
 
-    cur.execute(
-        """
-        SELECT 1 FROM time_off
-        WHERE doctor_id=%s AND starts_on=%s AND ends_on=%s
-        """,
-        (anna, date(2026, 10, 12), date(2026, 10, 18)),
-    )
-    if cur.fetchone() is None:
-        cur.execute(
-            "INSERT INTO time_off (doctor_id, starts_on, ends_on) VALUES (%s, %s, %s)",
-            (anna, date(2026, 10, 12), date(2026, 10, 18)),
-        )
-    cur.execute(
-        """
-        INSERT INTO holidays (day, name)
-        VALUES (%s, %s)
-        ON CONFLICT (day) DO NOTHING
-        """,
-        (date(2026, 11, 26), "Thanksgiving"),
-    )
-    seed_future_slots(cur)
-    conn.commit()
-    cur.close()
-    conn.close()
+                cur.execute(
+                    """
+                    SELECT 1 FROM time_off
+                    WHERE doctor_id=%s AND starts_on=%s AND ends_on=%s
+                    """,
+                    (anna, date(2026, 10, 12), date(2026, 10, 18)),
+                )
+                if cur.fetchone() is None:
+                    cur.execute(
+                        """
+                        INSERT INTO time_off (doctor_id, starts_on, ends_on)
+                        VALUES (%s, %s, %s)
+                        """,
+                        (anna, date(2026, 10, 12), date(2026, 10, 18)),
+                    )
+                cur.execute(
+                    """
+                    INSERT INTO holidays (day, name)
+                    VALUES (%s, %s)
+                    ON CONFLICT (day) DO NOTHING
+                    """,
+                    (date(2026, 11, 26), "Thanksgiving"),
+                )
+                seed_future_slots(cur)
+    finally:
+        conn.close()
 
 
 
@@ -280,6 +370,8 @@ def seed_future_slots(cur):
                    h.day,
                    (h.day + w.start_time) AS window_start,
                    (h.day + w.end_time) AS window_end,
+                   svc.duration_minutes,
+                   svc.buffer_minutes,
                    svc.duration_minutes + svc.buffer_minutes AS total_minutes,
                    GREATEST(
                        w.slot_minutes,
@@ -287,7 +379,8 @@ def seed_future_slots(cur):
                    ) AS step_minutes
             FROM doctors d
             JOIN users u ON u.id = d.user_id AND NOT u.blocked
-            CROSS JOIN services svc
+            JOIN doctor_services ds ON ds.doctor_id = d.id
+            JOIN services svc ON svc.id = ds.service_id
             JOIN horizon h ON true
             JOIN work_hours w
               ON w.doctor_id = d.id
@@ -304,6 +397,8 @@ def seed_future_slots(cur):
         grid AS (
             SELECT w.doctor_id,
                    w.service_id,
+                   w.duration_minutes,
+                   w.buffer_minutes,
                    gs AS starts_at,
                    gs + make_interval(mins => w.total_minutes) AS ends_at
             FROM windows w
@@ -316,7 +411,8 @@ def seed_future_slots(cur):
             WHERE gs > c.now_local
         ),
         planned AS (
-            SELECT doctor_id, service_id, starts_at, ends_at
+            SELECT doctor_id, service_id, duration_minutes, buffer_minutes,
+                   starts_at, ends_at
             FROM (
                 SELECT g.*,
                        row_number() OVER (
@@ -327,8 +423,12 @@ def seed_future_slots(cur):
             ) ranked
             WHERE slot_number <= 6
         )
-        INSERT INTO slots (doctor_id, service_id, starts_at, ends_at)
-        SELECT p.doctor_id, p.service_id, p.starts_at, p.ends_at
+        INSERT INTO slots (
+            doctor_id, service_id, starts_at, ends_at,
+            duration_minutes, buffer_minutes
+        )
+        SELECT p.doctor_id, p.service_id, p.starts_at, p.ends_at,
+               p.duration_minutes, p.buffer_minutes
         FROM planned p
         ON CONFLICT (doctor_id, service_id, starts_at) DO NOTHING
         """

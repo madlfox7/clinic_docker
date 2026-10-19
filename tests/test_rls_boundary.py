@@ -25,6 +25,158 @@ def compose_exec(service: str, command: list[str], *, input_text: str = "") -> s
     return completed.stdout.strip()
 
 
+def test_clinic_api_authenticates_without_reading_password_hash():
+    result = compose_exec(
+        "db",
+        [
+            "psql", "-X", "-q", "-v", "ON_ERROR_STOP=1",
+            "-U", "clinic", "-d", "clinic", "-At", "-F", "|",
+            "-c",
+            """
+            BEGIN;
+            SET LOCAL ROLE clinic_api;
+            DO $$
+            BEGIN
+              BEGIN
+                EXECUTE 'SELECT password_hash FROM public.users LIMIT 1';
+                RAISE EXCEPTION 'clinic_api unexpectedly read password_hash';
+              EXCEPTION WHEN insufficient_privilege THEN
+                NULL;
+              END;
+            END $$;
+            SELECT
+                has_column_privilege(
+                    'clinic_api', 'public.users', 'password_hash', 'SELECT'
+                )::text,
+                (SELECT role
+                 FROM public.authenticate_user('pat@clinic.local', 'password123')),
+                (SELECT count(*)
+                 FROM public.authenticate_user('pat@clinic.local', 'wrong'))
+            ROLLBACK;
+            """,
+        ],
+    )
+    assert result == "false|patient|0"
+
+
+def test_doctor_cannot_write_records_for_other_or_cancelled_visits():
+    compose_exec(
+        "db",
+        [
+            "psql", "-X", "-q", "-v", "ON_ERROR_STOP=1",
+            "-U", "clinic", "-d", "clinic", "-c",
+            """
+            BEGIN;
+            WITH identities AS (
+                SELECT
+                    (SELECT id FROM doctors WHERE user_id =
+                        (SELECT id FROM users WHERE email = 'doc@clinic.local')) AS doctor_a,
+                    (SELECT id FROM doctors WHERE user_id =
+                        (SELECT id FROM users WHERE email = 'doc2@clinic.local')) AS doctor_b,
+                    (SELECT id FROM users WHERE email = 'pat@clinic.local') AS patient_id,
+                    (SELECT id FROM users WHERE email = 'doc@clinic.local') AS doctor_user_id
+            ),
+            times AS (
+                SELECT clock_timestamp()::timestamp + INTERVAL '250 days' AS starts_at
+            ),
+            slot_a AS (
+                INSERT INTO slots (doctor_id, starts_at, ends_at)
+                SELECT doctor_a, starts_at, starts_at + INTERVAL '30 minutes'
+                FROM identities CROSS JOIN times
+                RETURNING id, doctor_id, starts_at, ends_at
+            ),
+            slot_b AS (
+                INSERT INTO slots (doctor_id, starts_at, ends_at)
+                SELECT doctor_b, starts_at + INTERVAL '2 hours',
+                       starts_at + INTERVAL '2 hours 30 minutes'
+                FROM identities CROSS JOIN times
+                RETURNING id, doctor_id, starts_at, ends_at
+            ),
+            slot_cancelled AS (
+                INSERT INTO slots (doctor_id, starts_at, ends_at)
+                SELECT doctor_a, starts_at + INTERVAL '4 hours',
+                       starts_at + INTERVAL '4 hours 30 minutes'
+                FROM identities CROSS JOIN times
+                RETURNING id, doctor_id, starts_at, ends_at
+            ),
+            appointment_a AS (
+                INSERT INTO appointments
+                    (slot_id, patient_user_id, doctor_id, starts_at, ends_at, status)
+                SELECT slot_a.id, identities.patient_id, slot_a.doctor_id,
+                       slot_a.starts_at, slot_a.ends_at, 'scheduled'
+                FROM slot_a CROSS JOIN identities
+                RETURNING id
+            ),
+            appointment_b AS (
+                INSERT INTO appointments
+                    (slot_id, patient_user_id, doctor_id, starts_at, ends_at, status)
+                SELECT slot_b.id, identities.patient_id, slot_b.doctor_id,
+                       slot_b.starts_at, slot_b.ends_at, 'scheduled'
+                FROM slot_b CROSS JOIN identities
+                RETURNING id
+            ),
+            appointment_cancelled AS (
+                INSERT INTO appointments
+                    (slot_id, patient_user_id, doctor_id, starts_at, ends_at, status)
+                SELECT slot_cancelled.id, identities.patient_id,
+                       slot_cancelled.doctor_id, slot_cancelled.starts_at,
+                       slot_cancelled.ends_at, 'cancelled'
+                FROM slot_cancelled CROSS JOIN identities
+                RETURNING id
+            )
+            SELECT
+                set_config('app.user_id', identities.doctor_user_id::text, true),
+                set_config('test.doctor_id', identities.doctor_a::text, true),
+                set_config('test.patient_id', identities.patient_id::text, true),
+                set_config('test.other_appointment_id', appointment_b.id::text, true),
+                set_config(
+                    'test.cancelled_appointment_id',
+                    appointment_cancelled.id::text,
+                    true
+                )
+            FROM identities, appointment_b, appointment_cancelled;
+
+            SET LOCAL ROLE app_doctor;
+            DO $$
+            DECLARE
+                doctor_id integer := current_setting('test.doctor_id')::integer;
+                patient_id integer := current_setting('test.patient_id')::integer;
+                other_appointment_id integer :=
+                    current_setting('test.other_appointment_id')::integer;
+                cancelled_appointment_id integer :=
+                    current_setting('test.cancelled_appointment_id')::integer;
+            BEGIN
+                BEGIN
+                    INSERT INTO visit_notes
+                        (appointment_id, doctor_id, patient_user_id, body)
+                    VALUES (
+                        other_appointment_id, doctor_id, patient_id,
+                        'wrong-appointment-doctor'
+                    );
+                    RAISE EXCEPTION 'cross-appointment note insert unexpectedly succeeded';
+                EXCEPTION WHEN insufficient_privilege THEN
+                    NULL;
+                END;
+
+                BEGIN
+                    INSERT INTO prescriptions
+                        (appointment_id, doctor_id, patient_user_id, body)
+                    VALUES (
+                        cancelled_appointment_id, doctor_id, patient_id,
+                        'cancelled-appointment-prescription'
+                    );
+                    RAISE EXCEPTION 'cancelled-appointment record insert unexpectedly succeeded';
+                EXCEPTION WHEN insufficient_privilege THEN
+                    NULL;
+                END;
+            END
+            $$;
+            ROLLBACK;
+            """,
+        ],
+    )
+
+
 def test_unfiltered_broken_selects_obey_role_rls():
     fixture = compose_exec(
         "db",
@@ -339,7 +491,9 @@ try:
             SELECT public.current_patient_is_active(),
                    public.doctor_is_active(%s),
                    public.is_valid_free_slot(
-                       s.id, s.doctor_id, s.starts_at, s.ends_at
+                       s.id, s.doctor_id, s.starts_at,
+                       s.starts_at + make_interval(mins => s.duration_minutes),
+                       s.ends_at
                    )
             FROM slots s
             WHERE s.id = %s

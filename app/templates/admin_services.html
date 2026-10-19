@@ -9,6 +9,7 @@
 {% if error == "invalid_service" %}<p>Enter a name, a positive duration, and a non-negative buffer. Their total must not exceed 1440 minutes.</p>
 {% elif error == "name_exists" %}<p>A service with this name already exists.</p>
 {% elif error == "service_not_found" %}<p>Service not found.</p>
+{% elif error == "invalid_doctor" %}<p>One or more selected doctors are unavailable.</p>
 {% elif error == "service_in_use" %}<p>Only services with no generated slots can be deleted. Deactivate this service to stop future bookings.</p>{% endif %}
 
 <section>
@@ -17,11 +18,19 @@
     <label>Name <input name="name" maxlength="120" required></label>
     <label>Duration (minutes) <input name="duration_minutes" type="number" min="1" max="1440" required></label>
     <label>Buffer after service (minutes) <input name="buffer_minutes" type="number" min="0" max="1440" value="0" required></label>
+    <fieldset>
+      <legend>Doctors offering this service</legend>
+      {% for doctor in doctors %}
+        <label><input type="checkbox" name="doctor_ids" value="{{ doctor.id }}"> {{ doctor.full_name }}</label>
+      {% else %}
+        <p>No doctors configured.</p>
+      {% endfor %}
+    </fieldset>
     <button type="submit">Create service</button>
   </form>
 </section>
 
-<p>All active services are available for every active doctor. Deactivate a service to stop new bookings; existing slots and visits are retained.</p>
+<p>Only assigned doctors can generate slots or accept bookings for a service. Deactivate a service to stop new bookings; existing slots and visits are retained.</p>
 {% for service in services %}
   <section>
     <h2>{{ service.name }} — {{ "Active" if service.active else "Inactive" }}</h2>
@@ -34,6 +43,18 @@
       <label>Buffer after service (minutes)
         <input name="buffer_minutes" type="number" min="0" max="1440" value="{{ service.buffer_minutes }}" required>
       </label>
+      <fieldset>
+        <legend>Doctors offering this service</legend>
+        {% for doctor in doctors %}
+          <label>
+            <input type="checkbox" name="doctor_ids" value="{{ doctor.id }}"
+              {% if doctor.id in service.doctor_ids %}checked{% endif %}>
+            {{ doctor.full_name }}
+          </label>
+        {% else %}
+          <p>No doctors configured.</p>
+        {% endfor %}
+      </fieldset>
       <button type="submit">Save service</button>
     </form>
     {% if service.active %}

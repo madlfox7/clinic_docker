@@ -238,21 +238,26 @@ def login(request: Request, email: str = Form(...), password: str = Form(...)):
     if not within_length(email, MAX_EMAIL_LENGTH) or not within_length(password, MAX_PASSWORD_LENGTH):
         return _login_page(request, "Invalid email or password", 401)
     conn = db()
-    cur = conn.cursor()
-    cur.execute(
-        "SELECT id, email, password_hash, role, blocked FROM users WHERE email = %s",
-        (email,),
-    )
-    row = cur.fetchone()
-    cur.close()
-    conn.close()
-    if not row or not pwd.verify(password, row[2]):
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT id, email, role, blocked, auth_version
+                FROM public.authenticate_user(%s, %s)
+                """,
+                (email, password),
+            )
+            row = cur.fetchone()
+    finally:
+        conn.close()
+    if not row:
         return _login_page(request, "Invalid email or password", 401)
-    if row[4]:
+    if row[3]:
         return _login_page(request, "Account is blocked", 403)
     request.session.clear()
     request.session["user_id"] = row[0]
     request.session["email"] = row[1]
+    request.session["auth_version"] = row[4]
     return RedirectResponse("/me", status_code=303)
 
 
@@ -313,7 +318,7 @@ def change_own_password(
     new_password: str = Form(...),
     confirm_password: str = Form(...),
 ):
-    user, denied = require_user(request, "patient")
+    user, denied = require_user(request)
     if denied:
         return denied
     if (
@@ -328,38 +333,33 @@ def change_own_password(
         return RedirectResponse("/me?password_error=current", status_code=303)
 
     conn = db_as(user)
+    new_auth_version = None
     try:
         with conn:
             with conn.cursor() as cur:
-                cur.execute("SELECT public.current_patient_password_hash()")
+                cur.execute(
+                    """
+                    SELECT result, resulting_auth_version
+                    FROM public.change_own_patient_password(%s, %s, %s)
+                    """,
+                    (current_password, new_password, pwd.hash(new_password)),
+                )
                 row = cur.fetchone()
                 if row is None or row[0] is None:
                     return RedirectResponse(
                         "/me?password_error=unavailable", status_code=303
                     )
-                current_hash = row[0]
-                if not pwd.verify(current_password, current_hash):
+                result, new_auth_version = row
+                if result != "changed":
                     return RedirectResponse(
-                        "/me?password_error=current", status_code=303
-                    )
-                if pwd.verify(new_password, current_hash):
-                    return RedirectResponse(
-                        "/me?password_error=same", status_code=303
-                    )
-                cur.execute(
-                    "SELECT public.change_own_patient_password(%s, %s)",
-                    (current_hash, pwd.hash(new_password)),
-                )
-                changed = cur.fetchone()[0]
-                if not changed:
-                    return RedirectResponse(
-                        "/me?password_error=stale", status_code=303
+                        f"/me?password_error={result}", status_code=303
                     )
                 record_audit_event(
-                    cur, "user.password_change", "patient", user["id"]
+                    cur, "user.password_change", user["role"], user["id"]
                 )
     finally:
         conn.close()
+    request.session["auth_version"] = new_auth_version
     return RedirectResponse("/me?password_changed=1", status_code=303)
 
 

@@ -125,6 +125,7 @@ def admin_users(request: Request):
             "users": users,
             "staff_users": staff_users,
             "role": "admin",
+            "current_admin_id": admin_user["id"],
             "future_cancelled": request.query_params.get("future_cancelled"),
             "error": request.query_params.get("error"),
             "created": request.query_params.get("created"),
@@ -207,7 +208,8 @@ def reset_user_password(
                 row = cur.fetchone()
                 if row is None or row[0] is None:
                     return RedirectResponse(
-                        "/admin/users?error=user_not_found", status_code=303
+                        "/admin/users?error=password_reset_not_allowed",
+                        status_code=303,
                     )
                 record_audit_event(
                     cur, "user.password_reset", row[0], parsed_user_id
@@ -245,6 +247,20 @@ def admin_services(request: Request):
         }
         for row in cur.fetchall()
     ]
+    cur.execute(
+        """
+        SELECT d.id, d.full_name
+        FROM doctors d
+        ORDER BY d.full_name, d.id
+        """
+    )
+    doctors = [{"id": row[0], "full_name": row[1]} for row in cur.fetchall()]
+    cur.execute("SELECT doctor_id, service_id FROM doctor_services")
+    assigned_doctors = {}
+    for doctor_id, service_id in cur.fetchall():
+        assigned_doctors.setdefault(service_id, []).append(doctor_id)
+    for service in services:
+        service["doctor_ids"] = assigned_doctors.get(service["id"], [])
     cur.close()
     conn.close()
     return templates.TemplateResponse(
@@ -253,6 +269,7 @@ def admin_services(request: Request):
             "request": request,
             "role": admin_user["role"],
             "services": services,
+            "doctors": doctors,
             "created": request.query_params.get("created"),
             "updated": request.query_params.get("updated"),
             "activation": request.query_params.get("activation"),
@@ -281,23 +298,61 @@ def _validate_service_details(name: str, duration: str, buffer: str):
     return name, duration_minutes, buffer_minutes
 
 
+def _parse_doctor_ids(raw_ids: List[str]):
+    doctor_ids = []
+    for raw_id in raw_ids:
+        doctor_id = parse_strict_int(raw_id, min_value=1)
+        if doctor_id is None or doctor_id in doctor_ids:
+            return None
+        doctor_ids.append(doctor_id)
+    return doctor_ids
+
+
+def _valid_service_doctors(cur, doctor_ids):
+    if not doctor_ids:
+        return True
+    cur.execute(
+        "SELECT count(*) FROM doctors WHERE id = ANY(%s)",
+        (doctor_ids,),
+    )
+    return cur.fetchone()[0] == len(doctor_ids)
+
+
+def _replace_service_doctors(cur, service_id, doctor_ids):
+    cur.execute("DELETE FROM doctor_services WHERE service_id = %s", (service_id,))
+    for doctor_id in doctor_ids:
+        cur.execute(
+            """
+            INSERT INTO doctor_services (doctor_id, service_id)
+            VALUES (%s, %s)
+            """,
+            (doctor_id, service_id),
+        )
+
+
 @router.post("/admin/services")
 def create_service(
     request: Request,
     name: str = Form(...),
     duration_minutes: str = Form(...),
     buffer_minutes: str = Form("0"),
+    doctor_ids: List[str] = Form([]),
 ):
     admin_user, denied = require_user(request, "admin")
     if denied:
         return denied
     service = _validate_service_details(name, duration_minutes, buffer_minutes)
-    if service is None:
+    parsed_doctor_ids = _parse_doctor_ids(doctor_ids)
+    if service is None or parsed_doctor_ids is None:
         return RedirectResponse("/admin/services?error=invalid_service", status_code=303)
     conn = db_as(admin_user)
     try:
         with conn:
             with conn.cursor() as cur:
+                if not _valid_service_doctors(cur, parsed_doctor_ids):
+                    return RedirectResponse(
+                        "/admin/services?error=invalid_doctor", status_code=303
+                    )
                 cur.execute(
                     """
                     INSERT INTO services (name, duration_minutes, buffer_minutes)
@@ -307,6 +362,7 @@ def create_service(
                     service,
                 )
                 service_id = cur.fetchone()[0]
+                _replace_service_doctors(cur, service_id, parsed_doctor_ids)
                 record_audit_event(cur, "service.create", "service", service_id)
     except psycopg2.errors.UniqueViolation:
         return RedirectResponse("/admin/services?error=name_exists", status_code=303)
@@ -322,20 +378,26 @@ def update_service(
     name: str = Form(...),
     duration_minutes: str = Form(...),
     buffer_minutes: str = Form("0"),
+    doctor_ids: List[str] = Form([]),
 ):
     admin_user, denied = require_user(request, "admin")
     if denied:
         return denied
     parsed_service_id = parse_strict_int(service_id, min_value=1)
     service = _validate_service_details(name, duration_minutes, buffer_minutes)
+    parsed_doctor_ids = _parse_doctor_ids(doctor_ids)
     if parsed_service_id is None:
         return RedirectResponse("/admin/services?error=service_not_found", status_code=303)
-    if service is None:
+    if service is None or parsed_doctor_ids is None:
         return RedirectResponse("/admin/services?error=invalid_service", status_code=303)
     conn = db_as(admin_user)
     try:
         with conn:
             with conn.cursor() as cur:
+                if not _valid_service_doctors(cur, parsed_doctor_ids):
+                    return RedirectResponse(
+                        "/admin/services?error=invalid_doctor", status_code=303
+                    )
                 cur.execute(
                     """
                     UPDATE services
@@ -348,6 +410,7 @@ def update_service(
                     return RedirectResponse(
                         "/admin/services?error=service_not_found", status_code=303
                     )
+                _replace_service_doctors(cur, parsed_service_id, parsed_doctor_ids)
                 record_audit_event(
                     cur, "service.update", "service", parsed_service_id
                 )
@@ -445,9 +508,16 @@ def admin_doctors(request: Request):
     cur.execute(
         """
         SELECT d.id, d.user_id, u.email, u.blocked, d.full_name,
-               d.specialty, d.experience_years
+               d.specialty, d.experience_years,
+               count(a.id) FILTER (
+                 WHERE a.status = 'scheduled'
+                   AND a.starts_at > CURRENT_TIMESTAMP
+               ) AS future_appointments
         FROM doctors d
         JOIN users u ON u.id = d.user_id
+        LEFT JOIN appointments a ON a.doctor_id = d.id
+        GROUP BY d.id, d.user_id, u.email, u.blocked, d.full_name,
+                 d.specialty, d.experience_years
         ORDER BY d.full_name, d.id
         """
     )
@@ -460,6 +530,7 @@ def admin_doctors(request: Request):
             "full_name": row[4],
             "specialty": row[5],
             "experience_years": row[6],
+            "future_appointments": row[7],
         }
         for row in cur.fetchall()
     ]
@@ -474,6 +545,9 @@ def admin_doctors(request: Request):
             "created": request.query_params.get("created"),
             "updated": request.query_params.get("updated"),
             "activation": request.query_params.get("activation"),
+            "future_appointments": parse_strict_int(
+                request.query_params.get("future_appointments"), min_value=0
+            ),
             "error": request.query_params.get("error"),
         },
     )
@@ -557,6 +631,14 @@ def create_doctor(
                     (user_id, full_name, specialty, parsed_experience),
                 )
                 doctor_id = cur.fetchone()[0]
+                cur.execute(
+                    """
+                    INSERT INTO doctor_services (doctor_id, service_id)
+                    SELECT %s, id FROM services WHERE active
+                    ON CONFLICT DO NOTHING
+                    """,
+                    (doctor_id,),
+                )
                 record_audit_event(cur, "doctor.create", "doctor", doctor_id)
     except psycopg2.errors.UniqueViolation:
         return RedirectResponse(
@@ -628,6 +710,19 @@ def _set_doctor_blocked(request: Request, doctor_id: str, blocked: bool):
     try:
         with conn:
             with conn.cursor() as cur:
+                future_appointments = 0
+                if blocked:
+                    cur.execute(
+                        """
+                        SELECT count(*)
+                        FROM appointments
+                        WHERE doctor_id = %s
+                          AND status = 'scheduled'
+                          AND starts_at > CURRENT_TIMESTAMP
+                        """,
+                        (parsed_doctor_id,),
+                    )
+                    future_appointments = cur.fetchone()[0]
                 cur.execute(
                     """
                     UPDATE users u
@@ -650,7 +745,8 @@ def _set_doctor_blocked(request: Request, doctor_id: str, blocked: bool):
     finally:
         conn.close()
     return RedirectResponse(
-        f"/admin/doctors?activation={'deactivated' if blocked else 'activated'}",
+        f"/admin/doctors?activation={'deactivated' if blocked else 'activated'}"
+        f"&future_appointments={future_appointments}",
         status_code=303,
     )
 
@@ -776,7 +872,7 @@ def _outside_hours_sql(alias="s"):
 def _scheduled_visit_rows(cur, where_sql, params):
     cur.execute(
         f"""
-        SELECT a.id, u.email, d.full_name, svc.name, s.starts_at, s.ends_at
+        SELECT a.id, u.email, d.full_name, svc.name, a.starts_at, a.ends_at
         FROM appointments a
         JOIN users u ON u.id = a.patient_user_id
         JOIN slots s ON s.id = a.slot_id
@@ -784,7 +880,7 @@ def _scheduled_visit_rows(cur, where_sql, params):
         JOIN services svc ON svc.id = s.service_id
         WHERE a.status = 'scheduled'
           AND {where_sql}
-        ORDER BY s.starts_at
+        ORDER BY a.starts_at
         """,
         params,
     )
@@ -867,6 +963,36 @@ def admin_schedule(request: Request):
     ]
     cur.execute(
         """
+        SELECT d.full_name, w.weekday, w.start_time, w.end_time,
+               svc.name, svc.duration_minutes + svc.buffer_minutes
+        FROM work_hours w
+        JOIN doctors d ON d.id = w.doctor_id
+        JOIN doctor_services ds ON ds.doctor_id = d.id
+        JOIN services svc ON svc.id = ds.service_id AND svc.active
+        ORDER BY d.full_name, w.weekday, svc.name
+        """
+    )
+    generation_warnings = []
+    for doctor_name, weekday, start_time, end_time, service_name, total_minutes in cur.fetchall():
+        work_window_minutes = int(
+            (
+                datetime.combine(date.min, end_time)
+                - datetime.combine(date.min, start_time)
+            ).total_seconds()
+            // 60
+        )
+        if total_minutes > work_window_minutes:
+            generation_warnings.append(
+                {
+                    "doctor_name": doctor_name,
+                    "weekday": weekday,
+                    "service_name": service_name,
+                    "total_minutes": total_minutes,
+                    "work_window_minutes": work_window_minutes,
+                }
+            )
+    cur.execute(
+        """
         SELECT d.full_name, t.starts_on, t.ends_on
         FROM time_off t
         JOIN doctors d ON d.id=t.doctor_id
@@ -935,6 +1061,9 @@ def admin_schedule(request: Request):
             "doctors": doctors,
             "active_services": active_services,
             "work_hours": work_hours,
+            "generation_warnings": generation_warnings,
+            "default_from_date": date.today().isoformat(),
+            "default_to_date": (date.today() + timedelta(days=14)).isoformat(),
             "time_off": time_off,
             "time_off_requests": time_off_requests,
             "holidays": holidays,
@@ -1260,6 +1389,34 @@ def generate_doctor_slots(
     doctor_id = parse_strict_int(doctor_id, min_value=1)
     if doctor_id is None:
         return RedirectResponse("/admin/schedule?error=doctor_not_found", status_code=303)
+    return _generate_slots_for_doctors(
+        admin_user, [doctor_id], from_date, to_date
+    )
+
+
+@router.post("/admin/schedule/generate")
+def generate_selected_doctor_slots(
+    request: Request,
+    doctor_ids: List[str] = Form(default=[]),
+    from_date: date = Form(...),
+    to_date: date = Form(...),
+):
+    admin_user, denied = require_user(request, "admin")
+    if denied:
+        return denied
+    parsed_doctor_ids = [
+        parse_strict_int(raw, min_value=1) for raw in doctor_ids
+    ]
+    if not parsed_doctor_ids or any(doctor_id is None for doctor_id in parsed_doctor_ids):
+        return RedirectResponse("/admin/schedule?error=no_doctors_selected", status_code=303)
+    return _generate_slots_for_doctors(
+        admin_user, sorted(set(parsed_doctor_ids)), from_date, to_date
+    )
+
+
+def _generate_slots_for_doctors(
+    admin_user: dict, doctor_ids: List[int], from_date: date, to_date: date
+):
     if from_date > to_date:
         return RedirectResponse("/admin/schedule?error=range_order", status_code=303)
     if from_date < date.today():
@@ -1274,117 +1431,138 @@ def generate_doctor_slots(
         SELECT 1
         FROM doctors d
         JOIN users u ON u.id = d.user_id
-        WHERE d.id = %s AND u.role = 'doctor' AND NOT u.blocked
+        WHERE d.id = ANY(%s::int[]) AND u.role = 'doctor' AND NOT u.blocked
         """,
-        (doctor_id,),
+        (doctor_ids,),
     )
-    if cur.fetchone() is None:
+    if cur.rowcount != len(doctor_ids):
         cur.close()
         conn.close()
         return RedirectResponse("/admin/schedule?error=doctor_not_found", status_code=303)
-
     cur.execute(
         """
-        SELECT weekday, start_time, end_time, slot_minutes
-        FROM work_hours
-        WHERE doctor_id=%s
-        ORDER BY weekday
+        SELECT d.id
+        FROM doctors d
+        WHERE d.id = ANY(%s::int[])
+          AND NOT EXISTS (
+              SELECT 1
+              FROM doctor_services ds
+              JOIN services svc ON svc.id = ds.service_id AND svc.active
+              WHERE ds.doctor_id = d.id
+          )
         """,
-        (doctor_id,),
+        (doctor_ids,),
     )
-    work_hours = cur.fetchall()
-    cur.execute(
-        """
-        SELECT id, duration_minutes, buffer_minutes
-        FROM services
-        WHERE active
-        ORDER BY id
-        """
-    )
-    services = cur.fetchall()
-    if not services:
+    if cur.fetchone() is not None:
         cur.close()
         conn.close()
         return RedirectResponse(
-            "/admin/schedule?error=no_active_services", status_code=303
+            "/admin/schedule?error=no_assigned_services", status_code=303
         )
-    cur.execute(
-        """
-        SELECT starts_on, ends_on
-        FROM time_off
-        WHERE doctor_id=%s AND starts_on <= %s AND ends_on >= %s
-        """,
-        (doctor_id, to_date, from_date),
-    )
-    time_off = cur.fetchall()
     cur.execute(
         "SELECT day FROM holidays WHERE day BETWEEN %s AND %s",
         (from_date, to_date),
     )
     holidays = {row[0] for row in cur.fetchall()}
-
     created = 0
     skipped = 0
     cur.execute("SELECT CURRENT_TIMESTAMP::timestamp")
     now = cur.fetchone()[0]
     today = now.date()
-    current_date = from_date
-    while current_date <= to_date:
-        day_hours = [row for row in work_hours if row[0] == current_date.weekday()]
-        is_day_off = (
-            current_date in holidays
-            or any(start <= current_date <= end for start, end in time_off)
+    for doctor_id in doctor_ids:
+        cur.execute(
+            """
+            SELECT weekday, start_time, end_time, slot_minutes
+            FROM work_hours
+            WHERE doctor_id=%s
+            ORDER BY weekday
+            """,
+            (doctor_id,),
         )
-        for _, start_time, end_time, work_step_minutes in day_hours:
-            day_end = datetime.combine(current_date, end_time)
-            for service_id, duration_minutes, buffer_minutes in services:
-                occupied_minutes = duration_minutes + buffer_minutes
-                step_minutes = max(work_step_minutes, occupied_minutes)
-                slot_duration = timedelta(minutes=occupied_minutes)
-                step_duration = timedelta(minutes=step_minutes)
-                start_at = datetime.combine(current_date, start_time)
-                if is_day_off:
-                    while start_at + slot_duration <= day_end:
-                        skipped += 1
-                        start_at += step_duration
-                    continue
-                while start_at + slot_duration <= day_end:
-                    if current_date < today or start_at <= now:
-                        skipped += 1
-                        start_at += step_duration
-                        continue
-                    cur.execute("SAVEPOINT generate_slot")
-                    try:
-                        cur.execute(
-                            """
-                            INSERT INTO slots (
-                                doctor_id, service_id, starts_at, ends_at
-                            )
-                            VALUES (%s, %s, %s, %s)
-                            ON CONFLICT (doctor_id, service_id, starts_at)
-                            DO NOTHING
-                            """,
-                            (
-                                doctor_id,
-                                service_id,
-                                start_at,
-                                start_at + slot_duration,
-                            ),
-                        )
-                        if cur.rowcount:
-                            created += 1
-                        else:
+        work_hours = cur.fetchall()
+        cur.execute(
+            """
+            SELECT svc.id, svc.duration_minutes, svc.buffer_minutes
+            FROM services svc
+            JOIN doctor_services ds ON ds.service_id = svc.id
+            WHERE svc.active AND ds.doctor_id = %s
+            ORDER BY svc.id
+            """,
+            (doctor_id,),
+        )
+        services = cur.fetchall()
+        cur.execute(
+            """
+            SELECT starts_on, ends_on
+            FROM time_off
+            WHERE doctor_id=%s AND starts_on <= %s AND ends_on >= %s
+            """,
+            (doctor_id, to_date, from_date),
+        )
+        time_off = cur.fetchall()
+
+        current_date = from_date
+        while current_date <= to_date:
+            day_hours = [
+                row for row in work_hours if row[0] == current_date.weekday()
+            ]
+            is_day_off = (
+                current_date in holidays
+                or any(start <= current_date <= end for start, end in time_off)
+            )
+            for _, start_time, end_time, work_step_minutes in day_hours:
+                day_end = datetime.combine(current_date, end_time)
+                for service_id, duration_minutes, buffer_minutes in services:
+                    occupied_minutes = duration_minutes + buffer_minutes
+                    step_minutes = max(work_step_minutes, occupied_minutes)
+                    slot_duration = timedelta(minutes=occupied_minutes)
+                    step_duration = timedelta(minutes=step_minutes)
+                    start_at = datetime.combine(current_date, start_time)
+                    if is_day_off:
+                        while start_at + slot_duration <= day_end:
                             skipped += 1
-                    except psycopg2.errors.ExclusionViolation:
-                        cur.execute("ROLLBACK TO SAVEPOINT generate_slot")
-                        skipped += 1
-                    finally:
-                        cur.execute("RELEASE SAVEPOINT generate_slot")
-                    start_at += step_duration
+                            start_at += step_duration
+                        continue
+                    while start_at + slot_duration <= day_end:
+                        if current_date < today or start_at <= now:
+                            skipped += 1
+                            start_at += step_duration
+                            continue
+                        cur.execute("SAVEPOINT generate_slot")
+                        try:
+                            cur.execute(
+                                """
+                                INSERT INTO slots (
+                                    doctor_id, service_id, starts_at, ends_at,
+                                    duration_minutes, buffer_minutes
+                                )
+                                VALUES (%s, %s, %s, %s, %s, %s)
+                                ON CONFLICT (doctor_id, service_id, starts_at)
+                                DO NOTHING
+                                """,
+                                (
+                                    doctor_id,
+                                    service_id,
+                                    start_at,
+                                    start_at + slot_duration,
+                                    duration_minutes,
+                                    buffer_minutes,
+                                ),
+                            )
+                            if cur.rowcount:
+                                created += 1
+                            else:
+                                skipped += 1
+                        except psycopg2.errors.ExclusionViolation:
+                            cur.execute("ROLLBACK TO SAVEPOINT generate_slot")
+                            skipped += 1
+                        finally:
+                            cur.execute("RELEASE SAVEPOINT generate_slot")
+                        start_at += step_duration
 
-        current_date += timedelta(days=1)
+                current_date += timedelta(days=1)
+        record_audit_event(cur, "schedule.slots.generate", "doctor", doctor_id)
 
-    record_audit_event(cur, "schedule.slots.generate", "doctor", doctor_id)
     conn.commit()
     cur.close()
     conn.close()
@@ -1402,14 +1580,23 @@ def block_user(request: Request, user_id: str):
     user_id = parse_strict_int(user_id, min_value=1)
     if user_id is None:
         return RedirectResponse("/admin/users", status_code=303)
+    if user_id == admin_user["id"]:
+        return RedirectResponse("/admin/users?error=self_block", status_code=303)
     conn = db_as(admin_user)
     cur = conn.cursor()
     cur.execute(
-        "UPDATE users SET blocked=TRUE WHERE id=%s AND role='patient'",
-        (user_id,),
+        """
+        UPDATE users
+        SET blocked = TRUE
+        WHERE id = %s
+          AND (role = 'patient' OR (role = 'admin' AND id <> %s))
+        RETURNING role
+        """,
+        (user_id, admin_user["id"]),
     )
-    if cur.rowcount:
-        record_audit_event(cur, "user.block", "patient", user_id)
+    row = cur.fetchone()
+    if row:
+        record_audit_event(cur, "user.block", row[0], user_id)
     conn.commit()
     cur.close()
     conn.close()
@@ -1424,14 +1611,23 @@ def unblock_user(request: Request, user_id: str):
     user_id = parse_strict_int(user_id, min_value=1)
     if user_id is None:
         return RedirectResponse("/admin/users", status_code=303)
+    if user_id == admin_user["id"]:
+        return RedirectResponse("/admin/users?error=self_block", status_code=303)
     conn = db_as(admin_user)
     cur = conn.cursor()
     cur.execute(
-        "UPDATE users SET blocked=FALSE WHERE id=%s AND role='patient'",
-        (user_id,),
+        """
+        UPDATE users
+        SET blocked = FALSE
+        WHERE id = %s
+          AND (role = 'patient' OR (role = 'admin' AND id <> %s))
+        RETURNING role
+        """,
+        (user_id, admin_user["id"]),
     )
-    if cur.rowcount:
-        record_audit_event(cur, "user.unblock", "patient", user_id)
+    row = cur.fetchone()
+    if row:
+        record_audit_event(cur, "user.unblock", row[0], user_id)
     conn.commit()
     cur.close()
     conn.close()

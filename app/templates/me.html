@@ -21,26 +21,6 @@
     {% endfor %}
   </ul>
 
-  <h2>Change password</h2>
-  {% if password_changed == "1" %}<p>Password changed successfully.</p>{% endif %}
-  {% if password_error == "current" %}<p>Current password is incorrect.</p>
-  {% elif password_error == "invalid" %}<p>Use a non-default password of at least 8 characters.</p>
-  {% elif password_error == "mismatch" %}<p>New password and confirmation do not match.</p>
-  {% elif password_error == "same" %}<p>Choose a password different from your current one.</p>
-  {% elif password_error == "stale" %}<p>Your password changed during this request. Please retry.</p>
-  {% elif password_error == "unavailable" %}<p>Password change is unavailable for this account.</p>{% endif %}
-  <form method="post" action="/me/password">
-    <label>Current password
-      <input type="password" name="current_password" autocomplete="current-password" required>
-    </label>
-    <label>New password
-      <input type="password" name="new_password" minlength="8" maxlength="72" autocomplete="new-password" required>
-    </label>
-    <label>Confirm new password
-      <input type="password" name="confirm_password" minlength="8" maxlength="72" autocomplete="new-password" required>
-    </label>
-    <button type="submit">Change password</button>
-  </form>
 {% elif role == "doctor" %}
   <p>Doctor: here will be only your patients.</p>
   <p><a href="/doctor/appointments">My appointments</a> | <a href="/doctor/calendar">My calendar</a></p>
@@ -51,4 +31,25 @@
   <p>Admin: users and logs. Medical texts are not available.</p>
   <p><a href="/admin/users">Manage patients</a> | <a href="/admin/schedule">Manage schedule</a> | <a href="/admin/audit">Audit log</a></p>
 {% endif %}
+
+<h2>Change password</h2>
+{% if password_changed == "1" %}<p>Password changed successfully.</p>{% endif %}
+{% if password_error == "current" %}<p>Current password is incorrect.</p>
+{% elif password_error == "invalid" %}<p>Use a non-default password of at least 8 characters.</p>
+{% elif password_error == "mismatch" %}<p>New password and confirmation do not match.</p>
+{% elif password_error == "same" %}<p>Choose a password different from your current one.</p>
+{% elif password_error == "stale" %}<p>Your password changed during this request. Please retry.</p>
+{% elif password_error == "unavailable" %}<p>Password change is unavailable for this account.</p>{% endif %}
+<form method="post" action="/me/password">
+  <label>Current password
+    <input type="password" name="current_password" autocomplete="current-password" required>
+  </label>
+  <label>New password
+    <input type="password" name="new_password" minlength="8" maxlength="72" autocomplete="new-password" required>
+  </label>
+  <label>Confirm new password
+    <input type="password" name="confirm_password" minlength="8" maxlength="72" autocomplete="new-password" required>
+  </label>
+  <button type="submit">Change password</button>
+</form>
 {% endblock %}

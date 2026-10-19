@@ -385,9 +385,30 @@ def test_medical_records_are_scoped_and_audited():
 				rf'href="/doctor/appointments/{appointment_id}/records"',
 				doctor_schedule.text,
 			)
+			appointment_day, appointment_start, appointment_end = psql(
+				f"""
+				SELECT to_char(starts_at, 'YYYY-MM-DD'),
+				       to_char(starts_at, 'HH24:MI'),
+				       to_char(ends_at, 'HH24:MI')
+				FROM appointments WHERE id = {appointment_id}
+				"""
+			).split("|")
+			doctor_calendar = doctor.get(
+				f"/doctor/calendar?day={appointment_day}"
+			)
+			assert re.search(
+				rf"{appointment_start}–{appointment_end}[\s\S]{{0,120}}Available",
+				doctor_calendar.text,
+			)
 			cancelled_records = doctor.get(record_url)
 			assert note_body in cancelled_records.text
 			assert prescription_body in cancelled_records.text
+			after_cancel_note = doctor.post(
+				record_url,
+				data={"record_type": "note", "body": "note-after-cancellation"},
+			)
+			assert "error=record_unavailable" in str(after_cancel_note.url)
+			assert "note-after-cancellation" not in pat.get("/my/records").text
 			assert "read-only" in cancelled_records.text
 			assert "<textarea" not in cancelled_records.text
 			cancelled_history = doctor.get(f"/doctor/patients/{patient_id}")
@@ -623,10 +644,10 @@ def test_admin_slot_generator_respects_time_off_and_role():
 		login(registrar, REG)
 		html = admin.get("/admin/schedule").text
 		match = re.search(
-			rf'action="/admin/doctors/(\d+)/generate"[\s\S]{{0,250}}Anna Ohanyan',
+			rf'name="doctor_ids" value="(\d+)"[\s\S]{{0,120}}Anna Ohanyan',
 			html,
 		)
-		assert match, "Anna slot-generation form missing"
+		assert match, "Anna checkbox missing from slot-generation form"
 		doctor_id = match.group(1)
 		selected_day = psql(
 			"SELECT CURRENT_DATE + ((8 - EXTRACT(ISODOW FROM CURRENT_DATE)::int) % 7) + 7"
@@ -641,8 +662,12 @@ def test_admin_slot_generator_respects_time_off_and_role():
 
 		try:
 			generated = admin.post(
-				f"/admin/doctors/{doctor_id}/generate",
-				data={"from_date": selected_day, "to_date": selected_day},
+				"/admin/schedule/generate",
+				data={
+					"doctor_ids": [doctor_id],
+					"from_date": selected_day,
+					"to_date": selected_day,
+				},
 			)
 			assert "generated=0" in str(generated.url)
 			assert "skipped=6" in str(generated.url)
@@ -653,22 +678,31 @@ def test_admin_slot_generator_respects_time_off_and_role():
 			day_after_tomorrow = psql("SELECT CURRENT_DATE + 2")
 			tomorrow = psql("SELECT CURRENT_DATE + 1")
 			past = admin.post(
-				f"/admin/doctors/{doctor_id}/generate",
-				data={"from_date": yesterday, "to_date": today},
+				"/admin/schedule/generate",
+				data={
+					"doctor_ids": [doctor_id],
+					"from_date": yesterday,
+					"to_date": today,
+				},
 			)
 			assert "error=range_in_past" in str(past.url)
 			assert "cannot start in the past" in past.text
 
 			reversed_range = admin.post(
-				f"/admin/doctors/{doctor_id}/generate",
-				data={"from_date": day_after_tomorrow, "to_date": tomorrow},
+				"/admin/schedule/generate",
+				data={
+					"doctor_ids": [doctor_id],
+					"from_date": day_after_tomorrow,
+					"to_date": tomorrow,
+				},
 			)
 			assert "error=range_order" in str(reversed_range.url)
 			assert "End date must not be before start date." in reversed_range.text
 
 			too_long = admin.post(
-				f"/admin/doctors/{doctor_id}/generate",
+				"/admin/schedule/generate",
 				data={
+					"doctor_ids": [doctor_id],
 					"from_date": tomorrow,
 					"to_date": psql("SELECT CURRENT_DATE + 91"),
 				},
@@ -694,7 +728,13 @@ def test_admin_schedule_configuration_is_admin_only_and_repeatable():
 		login(registrar, REG)
 		page = admin.get("/admin/schedule")
 		assert page.status_code == 200
+		assert 'action="/admin/schedule/generate"' in page.text
+		assert 'name="doctor_ids"' in page.text
+		assert "Select all doctors" in page.text
 		assert "Current hours are not preloaded" in page.text
+		assert 'data-weekday-preset="0,1,2,3,4"' in page.text
+		assert 'data-weekday-preset="5,6"' in page.text
+		assert 'data-weekday-preset="0,1,2,3,4,5,6"' in page.text
 		assert "Thanksgiving" in page.text
 		assert "Monday" in page.text
 		assert '<input name="name" type="text" required>' in page.text
@@ -837,7 +877,7 @@ def test_database_rejects_overlapping_appointments_on_different_slots():
 				RAISE EXCEPTION 'overlapping appointment was accepted';
 			EXCEPTION WHEN exclusion_violation THEN
 				GET STACKED DIAGNOSTICS rejected_constraint = CONSTRAINT_NAME;
-				IF rejected_constraint <> 'appointments_no_overlap_per_doctor' THEN
+				IF rejected_constraint <> 'appointments_no_overlap_per_doctor_reservation' THEN
 					RAISE;
 				END IF;
 			END;
@@ -874,7 +914,7 @@ def test_past_slot_cannot_be_booked():
 			booked = pat.post(f"/slots/{slot_id}/book")
 			assert "error=past" in str(booked.url)
 			assert "This slot is in the past" in booked.text
-			assert "Past — unavailable" in booked.text
+			assert "Past — unavailable" not in booked.text
 	finally:
 		psql(f"DELETE FROM slots WHERE id = {int(slot_id)}")
 
@@ -1632,137 +1672,277 @@ def test_admin_service_duration_buffer_and_booking_overlap():
 	with client() as admin, client() as patient:
 		login(admin, ADMIN)
 		login(patient, PAT)
-		doctor_id = psql(
-			"SELECT id FROM doctors WHERE full_name = 'Anna Ohanyan'"
-		)
+		doctor_id = int(psql("SELECT id FROM doctors WHERE full_name = 'Anna Ohanyan'"))
+		other_doctor_id = int(psql("SELECT id FROM doctors WHERE full_name = 'Levon Petrosyan'"))
 		created = admin.post(
 			"/admin/services",
 			data={
 				"name": service_name,
-				"duration_minutes": "40",
-				"buffer_minutes": "10",
+				"duration_minutes": "1000",
+				"buffer_minutes": "0",
+				"doctor_ids": str(doctor_id),
 			},
 		)
 		assert "created=1" in str(created.url)
-		service_id = psql(
-			f"SELECT id FROM services WHERE name = '{service_name}'"
-		)
+		service_id = int(psql(f"SELECT id FROM services WHERE name = '{service_name}'"))
 		try:
+			warning_page = admin.get("/admin/schedule")
+			assert service_name in warning_page.text
+			assert "does not fit within the doctor's working window" in warning_page.text
+			not_assigned = patient.get(
+				f"/doctors/{other_doctor_id}/slots?service_id={service_id}"
+			)
+			assert "not currently available for this doctor" in not_assigned.text
 			updated = admin.post(
 				f"/admin/services/{service_id}",
 				data={
 					"name": service_name,
 					"duration_minutes": "45",
 					"buffer_minutes": "15",
+					"doctor_ids": [str(doctor_id), str(other_doctor_id)],
 				},
 			)
 			assert "updated=1" in str(updated.url)
-
 			selected_day = psql(
 				f"""
 				SELECT (CURRENT_DATE + candidate.day_offset)::date
 				FROM generate_series(1, 80) AS candidate(day_offset)
 				JOIN work_hours w
-				  ON w.doctor_id = {int(doctor_id)}
-				 AND w.weekday = EXTRACT(
-				       ISODOW FROM CURRENT_DATE + candidate.day_offset
-				     )::int - 1
+				  ON w.doctor_id = {doctor_id}
+				 AND w.weekday = EXTRACT(ISODOW FROM CURRENT_DATE + candidate.day_offset)::int - 1
+				JOIN work_hours other_w
+				  ON other_w.doctor_id = {other_doctor_id}
+				 AND other_w.weekday = w.weekday
+				 AND other_w.end_time - other_w.start_time >= INTERVAL '60 minutes'
 				WHERE NOT EXISTS (
 				        SELECT 1 FROM holidays h
 				        WHERE h.day = CURRENT_DATE + candidate.day_offset
 				      )
 				  AND NOT EXISTS (
 				        SELECT 1 FROM time_off t
-				        WHERE t.doctor_id = {int(doctor_id)}
-				          AND CURRENT_DATE + candidate.day_offset
-				              BETWEEN t.starts_on AND t.ends_on
+				        WHERE t.doctor_id = {doctor_id}
+				          AND CURRENT_DATE + candidate.day_offset BETWEEN t.starts_on AND t.ends_on
+				      )
+				  AND NOT EXISTS (
+				        SELECT 1 FROM time_off t
+				        WHERE t.doctor_id = {other_doctor_id}
+				          AND CURRENT_DATE + candidate.day_offset BETWEEN t.starts_on AND t.ends_on
 				      )
 				ORDER BY candidate.day_offset
 				LIMIT 1
 				"""
 			)
 			generated = admin.post(
-				f"/admin/doctors/{doctor_id}/generate",
-				data={"from_date": selected_day, "to_date": selected_day},
+				"/admin/schedule/generate",
+				data={
+					"doctor_ids": [str(doctor_id), str(other_doctor_id)],
+					"from_date": selected_day,
+					"to_date": selected_day,
+				},
 			)
 			assert "generated=" in str(generated.url)
+			for selected_doctor in (doctor_id, other_doctor_id):
+				assert psql(
+					f"""
+					SELECT count(*) FROM slots
+					WHERE doctor_id = {selected_doctor} AND service_id = {service_id}
+					  AND starts_at::date = '{selected_day}'
+					  AND ends_at - starts_at = INTERVAL '60 minutes'
+					"""
+				) != "0"
 			assert psql(
 				f"""
 				SELECT count(*) FROM slots
-				WHERE doctor_id = {int(doctor_id)}
-				  AND service_id = {int(service_id)}
+				WHERE doctor_id = {doctor_id} AND service_id = {service_id}
 				  AND starts_at::date = '{selected_day}'
 				  AND ends_at - starts_at = INTERVAL '60 minutes'
+				  AND duration_minutes = 45 AND buffer_minutes = 15
 				"""
 			) != "0"
-
-			default_service_id = psql(
-				"SELECT id FROM services WHERE name = 'General consultation'"
+			default_service_id = int(
+				psql("SELECT id FROM services WHERE name = 'General consultation'")
 			)
-			overlapping_slots = psql(
-				f"""
-				SELECT new_slot.id, old_slot.id
-				FROM slots new_slot
-				JOIN slots old_slot
-				  ON old_slot.doctor_id = new_slot.doctor_id
-				 AND old_slot.service_id = {int(default_service_id)}
-				 AND old_slot.starts_at < new_slot.ends_at
-				 AND old_slot.ends_at > new_slot.starts_at
-				WHERE new_slot.service_id = {int(service_id)}
-				  AND new_slot.starts_at::date = '{selected_day}'
-				  AND NOT EXISTS (
-				        SELECT 1 FROM appointments a
-				        WHERE a.doctor_id = new_slot.doctor_id
-				          AND a.status = 'scheduled'
-				          AND a.starts_at < new_slot.ends_at
-				          AND a.ends_at > new_slot.starts_at
-				      )
-				ORDER BY new_slot.starts_at
-				LIMIT 1
-				"""
+			new_slot_id, old_slot_id = map(
+				int,
+				psql(
+					f"""
+					SELECT new_slot.id, old_slot.id
+					FROM slots new_slot
+					JOIN slots old_slot
+					  ON old_slot.doctor_id = new_slot.doctor_id
+					 AND old_slot.service_id = {default_service_id}
+					 AND old_slot.starts_at < new_slot.ends_at
+					 AND old_slot.ends_at > new_slot.starts_at
+					WHERE new_slot.service_id = {service_id}
+					  AND new_slot.starts_at::date = '{selected_day}'
+					  AND NOT EXISTS (
+					        SELECT 1 FROM appointments a
+					        WHERE a.doctor_id = new_slot.doctor_id
+					          AND a.status = 'scheduled'
+					          AND a.starts_at < new_slot.ends_at
+					          AND a.reserved_ends_at > new_slot.starts_at
+					      )
+					ORDER BY new_slot.starts_at
+					LIMIT 1
+					"""
+				).split("|"),
 			)
-			new_slot_id, old_slot_id = map(int, overlapping_slots.split("|"))
 			slots_page = patient.get(
 				f"/doctors/{doctor_id}/slots?service_id={service_id}"
 			)
 			assert service_name in slots_page.text
 			assert "45 min + 15 min buffer" in slots_page.text
-
 			before = set(appointment_ids(patient.get("/my").text))
 			booked = patient.post(
-				f"/slots/{new_slot_id}/book",
-				data={"service_id": service_id},
+				f"/slots/{new_slot_id}/book", data={"service_id": str(service_id)}
 			)
 			assert "My appointments" in booked.text
-			mine = patient.get("/my")
-			assert service_name in mine.text
-			created_appointments = set(appointment_ids(mine.text)) - before
-			assert created_appointments
-
+			assert service_name in patient.get("/my").text
+			assert set(appointment_ids(patient.get("/my").text)) - before
+			assert psql(
+				f"""
+				SELECT (EXTRACT(EPOCH FROM (a.ends_at - a.starts_at)) / 60)::int,
+				       (EXTRACT(EPOCH FROM (a.reserved_ends_at - a.starts_at)) / 60)::int,
+				       s.duration_minutes, s.buffer_minutes
+				FROM appointments a JOIN slots s ON s.id = a.slot_id
+				WHERE s.id = {new_slot_id}
+				"""
+			) == "45|60|45|15"
+			admin.post(
+				f"/admin/services/{service_id}",
+				data={
+					"name": service_name,
+					"duration_minutes": "25",
+					"buffer_minutes": "5",
+					"doctor_ids": str(doctor_id),
+				},
+			)
+			assert psql(
+				f"""
+				SELECT s.duration_minutes, s.buffer_minutes,
+				       (EXTRACT(EPOCH FROM (a.ends_at - a.starts_at)) / 60)::int
+				FROM slots s JOIN appointments a ON a.slot_id = s.id
+				WHERE s.id = {new_slot_id}
+				"""
+			) == "45|15|45"
 			overlap = patient.post(
 				f"/slots/{old_slot_id}/book",
-				data={"service_id": default_service_id},
+				data={"service_id": str(default_service_id)},
 			)
 			assert "error=unavailable" in str(overlap.url)
-
-			deactivated = admin.post(f"/admin/services/{service_id}/deactivate")
-			assert "activation=deactivated" in str(deactivated.url)
+			admin.post(f"/admin/services/{service_id}/deactivate")
 			inactive_slots = patient.get(
 				f"/doctors/{doctor_id}/slots?service_id={service_id}"
 			)
-			assert "service is no longer active" in inactive_slots.text
+			assert "not currently available for this doctor" in inactive_slots.text
 			assert service_name in patient.get("/my").text
 		finally:
 			psql(
 				f"""
-				DELETE FROM appointments
-				WHERE slot_id IN (
-				  SELECT id FROM slots WHERE service_id = {int(service_id)}
+				DELETE FROM appointments WHERE slot_id IN (
+				  SELECT id FROM slots WHERE service_id = {service_id}
 				);
-				DELETE FROM slots WHERE service_id = {int(service_id)};
-				DELETE FROM services WHERE id = {int(service_id)}
+				DELETE FROM slots WHERE service_id = {service_id};
+				DELETE FROM services WHERE id = {service_id}
 				"""
 			)
+
+
+def test_service_buffer_reserves_doctor_not_patient_across_doctors():
+	service_name = f"Buffer boundary {uuid.uuid4().hex}"
+	service_id = None
+	slot_ids_created = []
+	with client() as admin, client() as patient:
+		login(admin, ADMIN)
+		login(patient, PAT)
+		doctor_a = int(psql("SELECT id FROM doctors WHERE full_name = 'Anna Ohanyan'"))
+		doctor_b = int(psql("SELECT id FROM doctors WHERE full_name = 'Levon Petrosyan'"))
+		created = admin.post(
+			"/admin/services",
+			data={
+				"name": service_name,
+				"duration_minutes": "30",
+				"buffer_minutes": "30",
+				"doctor_ids": [str(doctor_a), str(doctor_b)],
+			},
+		)
+		assert "created=1" in str(created.url)
+		service_id = int(psql(f"SELECT id FROM services WHERE name = '{service_name}'"))
+		try:
+			selected_day = psql(
+				f"""
+				SELECT CURRENT_DATE + candidate.day_offset
+				FROM generate_series(100, 300) AS candidate(day_offset)
+				WHERE NOT EXISTS (
+				        SELECT 1 FROM holidays h
+				        WHERE h.day = CURRENT_DATE + candidate.day_offset
+				      )
+				  AND NOT EXISTS (
+				        SELECT 1 FROM time_off t
+				        WHERE t.doctor_id IN ({doctor_a}, {doctor_b})
+				          AND CURRENT_DATE + candidate.day_offset BETWEEN t.starts_on AND t.ends_on
+				      )
+				  AND NOT EXISTS (
+				        SELECT 1 FROM appointments a
+				        WHERE a.patient_user_id = (SELECT id FROM users WHERE email = '{PAT}')
+				          AND a.status = 'scheduled'
+				          AND a.starts_at < CURRENT_DATE + candidate.day_offset + TIME '11:00'
+				          AND a.ends_at > CURRENT_DATE + candidate.day_offset + TIME '10:00'
+				      )
+				  AND NOT EXISTS (
+				        SELECT 1 FROM slots s
+				        WHERE (s.doctor_id = {doctor_a} AND s.starts_at = CURRENT_DATE + candidate.day_offset + TIME '10:00')
+				           OR (s.doctor_id = {doctor_b} AND s.starts_at = CURRENT_DATE + candidate.day_offset + TIME '10:30')
+				      )
+				ORDER BY candidate.day_offset
+				LIMIT 1
+				"""
+			)
+			slot_ids_created = [
+				int(slot_id)
+				for slot_id in psql(
+					f"""
+					INSERT INTO slots (
+					  doctor_id, service_id, starts_at, ends_at,
+					  duration_minutes, buffer_minutes
+					)
+					VALUES
+					  ({doctor_a}, {service_id}, '{selected_day} 10:00', '{selected_day} 11:00', 30, 30),
+					  ({doctor_b}, {service_id}, '{selected_day} 10:30', '{selected_day} 11:30', 30, 30)
+					RETURNING id
+					"""
+				).splitlines()
+			]
+			assert len(slot_ids_created) == 2
+			first = patient.post(
+				f"/slots/{slot_ids_created[0]}/book",
+				data={"service_id": str(service_id)},
+			)
+			assert "booked=1" in str(first.url)
+			second = patient.post(
+				f"/slots/{slot_ids_created[1]}/book",
+				data={"service_id": str(service_id)},
+			)
+			assert second.url.path == "/my"
+			assert "booked=1" in str(second.url)
+			assert psql(
+				f"""
+				SELECT count(*) FROM appointments a
+				WHERE a.slot_id IN ({', '.join(map(str, slot_ids_created))})
+				  AND a.status = 'scheduled'
+				  AND a.ends_at = a.starts_at + INTERVAL '30 minutes'
+				  AND a.reserved_ends_at = a.starts_at + INTERVAL '60 minutes'
+				"""
+			) == "2"
+		finally:
+			if slot_ids_created:
+				ids = ', '.join(map(str, slot_ids_created))
+				psql(
+					f"DELETE FROM appointments WHERE slot_id IN ({ids}); "
+					f"DELETE FROM slots WHERE id IN ({ids})"
+				)
+			psql(f"DELETE FROM services WHERE id = {service_id}")
+
 def test_public_registration_is_patient_only_and_can_book(request):
 	email = f"public-registration-{uuid.uuid4().hex}@clinic.test"
 	password = "Clinic-Patient-Password-2026!"
@@ -1980,6 +2160,10 @@ def test_admin_can_create_update_deactivate_and_reactivate_doctor():
 			doctor_id = int(psql(f"SELECT id FROM doctors WHERE user_id = {user_id}"))
 			assert psql(f"SELECT role FROM users WHERE id = {user_id}") == "doctor"
 			assert "Dr. Initial Name" in admin.get("/doctors").text
+			assert (
+				f'action="/admin/users/{user_id}/password"'
+				not in admin.get("/admin/doctors").text
+			)
 
 			updated = admin.post(
 				f"/admin/doctors/{doctor_id}",
@@ -2002,11 +2186,45 @@ def test_admin_can_create_update_deactivate_and_reactivate_doctor():
 					"confirm_password": reset_password,
 				},
 			)
-			assert "Password reset." in reset.text
-			doctor_login = doctor.post(
+			assert "password_reset_not_allowed" in str(reset.url)
+			assert "only for patients and registrars" in reset.text
+			denied_doctor_login = doctor.post(
 				"/login", data={"email": email, "password": reset_password}
 			)
+			assert "Invalid email or password" in denied_doctor_login.text
+			doctor_login = doctor.post(
+				"/login", data={"email": email, "password": initial_password}
+			)
 			assert "Role: doctor" in doctor_login.text
+			changed_doctor_password = "DoctorSelfChanged#902"
+			changed = doctor.post(
+				"/me/password",
+				data={
+					"current_password": initial_password,
+					"new_password": changed_doctor_password,
+					"confirm_password": changed_doctor_password,
+				},
+			)
+			assert "password_changed=1" in str(changed.url)
+			assert "Change password" in doctor.get("/me").text
+			logout(doctor)
+			assert "Invalid email or password" in doctor.post(
+				"/login",
+				data={"email": email, "password": initial_password},
+			).text
+			assert "Role: doctor" in doctor.post(
+				"/login",
+				data={"email": email, "password": changed_doctor_password},
+			).text
+			restored = doctor.post(
+				"/me/password",
+				data={
+					"current_password": changed_doctor_password,
+					"new_password": initial_password,
+					"confirm_password": initial_password,
+				},
+			)
+			assert "password_changed=1" in str(restored.url)
 
 			slot_id = int(
 				psql(
@@ -2021,7 +2239,23 @@ def test_admin_can_create_update_deactivate_and_reactivate_doctor():
 					"""
 				)
 			)
-			admin.post(f"/admin/doctors/{doctor_id}/deactivate")
+			psql(
+				f"""
+				INSERT INTO appointments (
+					slot_id, patient_user_id, status, doctor_id, starts_at, ends_at
+				)
+				SELECT s.id, u.id, 'scheduled', s.doctor_id, s.starts_at,
+				       s.starts_at + make_interval(mins => s.duration_minutes)
+				FROM slots s
+				JOIN users u ON u.email = '{PAT}'
+				WHERE s.id = {slot_id}
+				"""
+			)
+			deactivated = admin.post(f"/admin/doctors/{doctor_id}/deactivate")
+			assert "1 future scheduled appointment(s) remain" in deactivated.text
+			assert psql(
+				f"SELECT status FROM appointments WHERE slot_id = {slot_id}"
+			) == "scheduled"
 			assert "Inactive" in admin.get("/admin/doctors").text
 			assert "Dr. Updated Name" not in admin.get("/doctors").text
 			blocked_doctor = doctor.get("/me")
@@ -2039,6 +2273,8 @@ def test_admin_can_create_update_deactivate_and_reactivate_doctor():
 					{slot_id},
 					{doctor_id},
 					(SELECT starts_at FROM slots WHERE id = {slot_id}),
+					(SELECT starts_at + make_interval(mins => duration_minutes)
+					 FROM slots WHERE id = {slot_id}),
 					(SELECT ends_at FROM slots WHERE id = {slot_id})
 				) THEN 'allowed' ELSE 'denied' END;
 				"""
@@ -2046,13 +2282,13 @@ def test_admin_can_create_update_deactivate_and_reactivate_doctor():
 			patient.post(f"/slots/{slot_id}/book")
 			assert psql(
 				f"SELECT count(*) FROM appointments WHERE slot_id = {slot_id}"
-			) == "0"
+			) == "1"
 
 			reactivated = admin.post(f"/admin/doctors/{doctor_id}/activate")
 			assert "Doctor reactivated." in reactivated.text
 			assert "Dr. Updated Name" in admin.get("/doctors").text
 			doctor_login = doctor.post(
-				"/login", data={"email": email, "password": reset_password}
+				"/login", data={"email": email, "password": initial_password}
 			)
 			assert "Role: doctor" in doctor_login.text
 	finally:
@@ -2080,11 +2316,19 @@ def test_admin_can_create_update_deactivate_and_reactivate_doctor():
 
 def test_admin_can_create_staff_and_reset_password():
 	email = f"managed-registrar-{uuid.uuid4().hex}@example.test"
+	admin_email = f"managed-admin-{uuid.uuid4().hex}@example.test"
 	initial_password = "RegistrarInitial#417"
 	reset_password = "RegistrarReset#583"
 	user_id = None
+	other_admin_id = None
 	try:
-		with client() as admin, client() as registrar:
+		with (
+			client() as admin,
+			client() as registrar,
+			client() as other_registrar,
+			client() as managed_admin,
+			client() as stale_admin,
+		):
 			login(admin, ADMIN)
 			invalid_role = admin.post(
 				"/admin/users",
@@ -2096,6 +2340,89 @@ def test_admin_can_create_staff_and_reset_password():
 				},
 			)
 			assert "Choose registrar or admin." in invalid_role.text
+			created_admin = admin.post(
+				"/admin/users",
+				data={
+					"email": admin_email,
+					"role": "admin",
+					"password": initial_password,
+					"confirm_password": initial_password,
+				},
+			)
+			assert "Staff account created." in created_admin.text
+			other_admin_id = int(
+				psql(f"SELECT id FROM users WHERE email = '{admin_email}'")
+			)
+			assert (
+				f'action="/admin/users/{other_admin_id}/password"'
+				not in admin.get("/admin/users").text
+			)
+			managed_admin_login = managed_admin.post(
+				"/login",
+				data={"email": admin_email, "password": initial_password},
+			)
+			assert "Role: admin" in managed_admin_login.text
+			stale_admin.post(
+				"/login",
+				data={"email": admin_email, "password": initial_password},
+			)
+			changed_admin_password = "AdminSelfChanged#781"
+			changed_admin = managed_admin.post(
+				"/me/password",
+				data={
+					"current_password": initial_password,
+					"new_password": changed_admin_password,
+					"confirm_password": changed_admin_password,
+				},
+			)
+			assert "password_changed=1" in str(changed_admin.url)
+			assert stale_admin.get("/me").url.path == "/login"
+			logout(managed_admin)
+			assert "Invalid email or password" in managed_admin.post(
+				"/login",
+				data={"email": admin_email, "password": initial_password},
+			).text
+			assert "Role: admin" in managed_admin.post(
+				"/login",
+				data={"email": admin_email, "password": changed_admin_password},
+			).text
+			restored_admin_password = managed_admin.post(
+				"/me/password",
+				data={
+					"current_password": changed_admin_password,
+					"new_password": initial_password,
+					"confirm_password": initial_password,
+				},
+			)
+			assert "password_changed=1" in str(restored_admin_password.url)
+
+			own_admin_id = int(
+				psql(f"SELECT id FROM users WHERE email = '{ADMIN}'")
+			)
+			self_block = admin.post(f"/admin/users/{own_admin_id}/block")
+			assert "error=self_block" in str(self_block.url)
+			assert psql(
+				f"SELECT blocked FROM users WHERE id = {own_admin_id}"
+			) == "f"
+			admin.post(f"/admin/users/{other_admin_id}/block")
+			assert psql(
+				f"SELECT blocked FROM users WHERE id = {other_admin_id}"
+			) == "t"
+			assert managed_admin.get("/me").status_code == 403
+			admin.post(f"/admin/users/{other_admin_id}/unblock")
+			assert "Role: admin" in managed_admin.post(
+				"/login",
+				data={"email": admin_email, "password": initial_password},
+			).text
+			denied_admin_reset = admin.post(
+				f"/admin/users/{other_admin_id}/password",
+				data={
+					"new_password": reset_password,
+					"confirm_password": reset_password,
+				},
+			)
+			assert "password_reset_not_allowed" in str(denied_admin_reset.url)
+
 			created = admin.post(
 				"/admin/users",
 				data={
@@ -2108,24 +2435,65 @@ def test_admin_can_create_staff_and_reset_password():
 			assert "Staff account created." in created.text
 			user_id = int(psql(f"SELECT id FROM users WHERE email = '{email}'"))
 			assert psql(f"SELECT role FROM users WHERE id = {user_id}") == "registrar"
-			admin.post(
+			for registrar_client in (registrar, other_registrar):
+				initial_login = registrar_client.post(
+					"/login",
+					data={"email": email, "password": initial_password},
+				)
+				assert "Role: registrar" in initial_login.text
+			reset = admin.post(
 				f"/admin/users/{user_id}/password",
 				data={
 					"new_password": reset_password,
 					"confirm_password": reset_password,
 				},
 			)
+			assert "Password reset." in reset.text
+			for registrar_client in (registrar, other_registrar):
+				stale_session = registrar_client.get("/me")
+				assert stale_session.url.path == "/login"
+			old_password_login = registrar.post(
+				"/login", data={"email": email, "password": initial_password}
+			)
+			assert "Invalid email or password" in old_password_login.text
 			registrar_login = registrar.post(
 				"/login", data={"email": email, "password": reset_password}
 			)
 			assert "Role: registrar" in registrar_login.text
+			stale_registrar_login = other_registrar.post(
+				"/login",
+				data={"email": email, "password": reset_password},
+			)
+			assert "Role: registrar" in stale_registrar_login.text
+			changed_registrar_password = "RegistrarSelfChanged#644"
+			changed_registrar = registrar.post(
+				"/me/password",
+				data={
+					"current_password": reset_password,
+					"new_password": changed_registrar_password,
+					"confirm_password": changed_registrar_password,
+				},
+			)
+			assert "password_changed=1" in str(changed_registrar.url)
+			assert other_registrar.get("/me").url.path == "/login"
+			logout(registrar)
+			assert "Invalid email or password" in registrar.post(
+				"/login",
+				data={"email": email, "password": reset_password},
+			).text
+			assert "Role: registrar" in registrar.post(
+				"/login",
+				data={"email": email, "password": changed_registrar_password},
+			).text
 	finally:
-		if user_id is not None:
+		target_ids = [target_id for target_id in (user_id, other_admin_id) if target_id]
+		if target_ids:
+			ids_csv = ", ".join(str(target_id) for target_id in target_ids)
 			psql(
 				f"""
 				DELETE FROM audit_events
-				WHERE target_id = {user_id} AND target_type = 'registrar';
-				DELETE FROM users WHERE id = {user_id};
+				WHERE target_id IN ({ids_csv});
+				DELETE FROM users WHERE id IN ({ids_csv});
 				"""
 			)
 

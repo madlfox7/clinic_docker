@@ -79,7 +79,8 @@ GRANT USAGE ON SCHEMA public TO clinic_api;
 REVOKE CREATE ON SCHEMA public FROM PUBLIC;
 REVOKE ALL PRIVILEGES ON ALL TABLES IN SCHEMA public FROM clinic_api;
 REVOKE ALL PRIVILEGES ON ALL SEQUENCES IN SCHEMA public FROM clinic_api;
-GRANT SELECT (id, email, password_hash, role, blocked) ON public.users TO clinic_api;
+REVOKE SELECT (password_hash) ON public.users FROM clinic_api;
+GRANT SELECT (id, email, role, blocked, auth_version) ON public.users TO clinic_api;
 GRANT SELECT ON public.doctors TO clinic_api;
 
 ALTER DEFAULT PRIVILEGES IN SCHEMA public

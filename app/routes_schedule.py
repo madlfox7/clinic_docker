@@ -91,7 +91,8 @@ def _load_calendar(cur, start_day, day_count, doctor_id, role):
                      AND cd.day BETWEEN t.starts_on AND t.ends_on
                ) AS selected_doctor_time_off,
                s.id, s.doctor_id, d.full_name, svc.name,
-               s.starts_at, s.ends_at,
+               s.starts_at,
+               s.starts_at + make_interval(mins => s.duration_minutes),
                s.starts_at > CURRENT_TIMESTAMP AS slot_future,
                EXISTS (
                    SELECT 1 FROM time_off t
@@ -111,8 +112,9 @@ def _load_calendar(cur, start_day, day_count, doctor_id, role):
         LEFT JOIN services svc ON svc.id = s.service_id
         LEFT JOIN appointments a
           ON a.doctor_id = s.doctor_id
+         AND a.status = 'scheduled'
          AND a.starts_at < s.ends_at
-         AND a.ends_at > s.starts_at
+         AND a.reserved_ends_at > s.starts_at
         LEFT JOIN slots booked_slot ON booked_slot.id = a.slot_id
         LEFT JOIN services booked_service ON booked_service.id = booked_slot.service_id
         ORDER BY cd.day, s.starts_at, d.full_name, a.starts_at, a.id

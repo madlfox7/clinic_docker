@@ -17,7 +17,7 @@
   <button type="submit">Show slots for this service</button>
 </form>
 {% if service_error %}
-  <p><strong>This service is no longer active. Choose an active service.</strong></p>
+  <p><strong>This service is not currently available for this doctor. Choose another service.</strong></p>
 {% elif selected_service %}
   <p>
     Selected service: {{ selected_service.name }}.
@@ -25,7 +25,7 @@
     and {{ selected_service.buffer_minutes }} minutes for the buffer.
   </p>
 {% elif not services %}
-  <p>No active services are currently available.</p>
+  <p>No active services are currently assigned to this doctor.</p>
 {% endif %}
 {% if error == "overlap" %}
 
@@ -47,7 +47,7 @@
   <p><strong>Booking failed.</strong> This slot is no longer available. Please choose another slot.</p>
   <p>Cause: another patient booked this slot first.</p>
 {% elif error == "service_unavailable" %}
-  <p><strong>Booking failed.</strong> This service is no longer active.</p>
+  <p><strong>Booking failed.</strong> This service is inactive or not assigned to this doctor.</p>
 {% elif error == "service_mismatch" %}
   <p><strong>Booking failed.</strong> The selected service does not match this slot.</p>
 {% elif error == "patient_not_found" %}
