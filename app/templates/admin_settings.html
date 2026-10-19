@@ -1,0 +1,12 @@
+{% extends "base.html" %}
+{% block content %}
+<h1>Clinic settings</h1>
+{% if saved == "1" %}<p>Clinic settings saved.</p>{% endif %}
+{% if error == "invalid_address" %}<p>Enter an address of up to 300 characters.</p>
+{% elif error == "invalid_phone" %}<p>Enter a phone number of up to 50 characters.</p>{% endif %}
+<form method="post" action="/admin/settings">
+  <label>Address <input name="address" value="{{ address }}" maxlength="300" required></label>
+  <label>Phone <input name="phone" value="{{ phone }}" maxlength="50" required></label>
+  <button type="submit">Save settings</button>
+</form>
+{% endblock %}

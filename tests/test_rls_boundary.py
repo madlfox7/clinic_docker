@@ -43,8 +43,26 @@ def test_unfiltered_broken_selects_obey_role_rls():
                     (SELECT id FROM users WHERE email = 'pat2@clinic.local') AS patient_b
             ),
             times AS (
-                SELECT clock_timestamp() + INTERVAL '30 days' AS start_a,
+                SELECT (
+                           SELECT CURRENT_DATE + candidate.day_offset + TIME '10:00'
+                           FROM generate_series(30, 365) AS candidate(day_offset)
+                           WHERE NOT EXISTS (
+                               SELECT 1
+                               FROM holidays h
+                               WHERE h.day = CURRENT_DATE + candidate.day_offset
+                           )
+                             AND NOT EXISTS (
+                                 SELECT 1
+                                 FROM time_off t
+                                 WHERE t.doctor_id = identities.doctor_a
+                                   AND CURRENT_DATE + candidate.day_offset
+                                       BETWEEN t.starts_on AND t.ends_on
+                             )
+                           ORDER BY candidate.day_offset
+                           LIMIT 1
+                       ) AS start_a,
                        clock_timestamp() + INTERVAL '30 days 2 hours' AS start_b
+                FROM identities
             ),
             slot_a AS (
                 INSERT INTO slots (doctor_id, starts_at, ends_at)
@@ -313,6 +331,25 @@ def patient_insert(sql, params):
     finally:
         conn.close()
 
+conn = db_as(patient_a)
+try:
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT public.current_patient_is_active(),
+                   public.doctor_is_active(%s),
+                   public.is_valid_free_slot(
+                       s.id, s.doctor_id, s.starts_at, s.ends_at
+                   )
+            FROM slots s
+            WHERE s.id = %s
+            """,
+            (doctor_id, __FREE_SLOT_ID__),
+        )
+        free_slot_checks = cur.fetchone()
+finally:
+    conn.close()
+
 valid_free_slot_insert_allowed = patient_insert(
     """
     INSERT INTO appointments (slot_id, patient_user_id, doctor_id, starts_at, ends_at)
@@ -437,6 +474,7 @@ print(json.dumps({
     "registrar_audit_select_denied": registrar_audit_select_denied,
     "other_patient_slot_taken": other_patient_slot_taken,
     "valid_free_slot_insert_allowed": valid_free_slot_insert_allowed,
+    "free_slot_checks": free_slot_checks,
     "spoofed_slot_insert_allowed": spoofed_slot_insert_allowed,
     "occupied_slot_insert_allowed": occupied_slot_insert_allowed,
     "arbitrary_status_denied": arbitrary_status_denied,
@@ -491,7 +529,8 @@ print(json.dumps({
         assert result["patient_audit_select_denied"] is True
         assert result["registrar_audit_select_denied"] is True
         assert result["other_patient_slot_taken"] is True
-        assert result["valid_free_slot_insert_allowed"] is True
+        assert result["free_slot_checks"] == [True, True, True], result["free_slot_checks"]
+        assert result["valid_free_slot_insert_allowed"] is True, result
         assert result["spoofed_slot_insert_allowed"] is False
         assert result["occupied_slot_insert_allowed"] is False
         assert result["arbitrary_status_denied"] is True

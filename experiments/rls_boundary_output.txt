@@ -1,17 +1,17 @@
 Regression: unfiltered SELECTs under app roles
 Context: db_as() sets SET LOCAL ROLE and app.user_id in one transaction.
 Patient SQL: SELECT id, patient_user_id FROM appointments;
-Patient result: [[1, 4], [4, 4], [6, 4], [7, 4], [9, 4], [11, 4], [24, 4]]
+Patient result: [[2, 4], [77, 4], [11, 4], [12, 4], [15, 4], [17, 4], [18, 4], [20, 4], [22, 4], [97, 4], [100, 4], [102, 4], [103, 4], [105, 4], [107, 4], [120, 4], [67, 4], [70, 4], [72, 4], [73, 4], [75, 4]]
 Patient SQL: SELECT id, patient_user_id FROM visit_notes;
-Patient result: [[7, 4]]
+Patient result: [[35, 4]]
 Patient SQL: SELECT id, patient_user_id FROM prescriptions;
-Patient result: [[5, 4]]
+Patient result: [[29, 4]]
 Doctor SQL: SELECT id, doctor_id FROM visit_notes;
-Doctor result: [[7, 1]]
+Doctor result: [[35, 1]]
 Doctor SQL: SELECT id, doctor_id FROM prescriptions;
-Doctor result: [[5, 1]]
+Doctor result: [[29, 1]]
 Doctor SQL: SELECT id, doctor_id FROM slots;
-Doctor result: [[33, 1]]
+Doctor result: [[103, 1]]
 Doctor time-off/schedule writes denied: True, True
 Guest admin-role INSERT denied: True
 Guest blocked-patient INSERT denied: True

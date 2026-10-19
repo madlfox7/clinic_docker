@@ -21,6 +21,15 @@ ALTER COLUMN blocked SET DEFAULT FALSE;
 CREATE UNIQUE INDEX IF NOT EXISTS users_email_lower_unique
 ON users (lower(email));
 
+CREATE TABLE IF NOT EXISTS clinic_settings (
+  id INTEGER PRIMARY KEY CHECK (id = 1),
+  address TEXT NOT NULL CHECK (length(btrim(address)) BETWEEN 1 AND 300),
+  phone TEXT NOT NULL CHECK (length(btrim(phone)) BETWEEN 1 AND 50)
+);
+
+INSERT INTO clinic_settings (id, address, phone)
+VALUES (1, 'Educational stand', '000-00-00')
+ON CONFLICT (id) DO NOTHING;
 
 
 CREATE TABLE IF NOT EXISTS doctors (

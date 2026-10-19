@@ -51,6 +51,12 @@ def doctor_slots(request: Request, doctor_id: str):
     cur = conn.cursor()
     cur.execute("SELECT id, full_name FROM doctors WHERE id=%s", (doctor_id,))
     doc = cur.fetchone()
+    cur.execute("SELECT public.doctor_is_active(%s)", (doctor_id,))
+    doctor_active = cur.fetchone()[0]
+    if not doctor_active:
+        cur.close()
+        conn.close()
+        return RedirectResponse("/doctors", status_code=303)
     conflict_appointment_id = request.query_params.get("conflict_appointment_id")
     conflict_patient_id = request.query_params.get("conflict_patient_id")
     if error == "overlap" and conflict_appointment_id and role == "patient":
@@ -187,6 +193,7 @@ def book_slot(request: Request, slot_id: str, patient_email: str = Form(None)):
         """
         SELECT s.doctor_id, s.starts_at, s.ends_at,
                s.starts_at <= CURRENT_TIMESTAMP AS is_past,
+               public.doctor_is_active(s.doctor_id) AS doctor_active,
                EXISTS (
                    SELECT 1 FROM time_off t
                    WHERE t.doctor_id=s.doctor_id
@@ -204,7 +211,11 @@ def book_slot(request: Request, slot_id: str, patient_email: str = Form(None)):
         cur.close()
         conn.close()
         return RedirectResponse("/doctors", status_code=303)
-    doctor_id, starts_at, ends_at, is_past, is_closed = slot
+    doctor_id, starts_at, ends_at, is_past, doctor_active, is_closed = slot
+    if not doctor_active:
+        cur.close()
+        conn.close()
+        return RedirectResponse(f"/doctors/{doctor_id}/slots?error=unavailable", status_code=303)
     if is_past:
         cur.close()
         conn.close()

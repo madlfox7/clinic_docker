@@ -7,15 +7,21 @@ from fastapi import APIRouter, Form, Request
 from fastapi.responses import RedirectResponse
 
 from db import (
+    MAX_PASSWORD_LENGTH,
     MAX_SLOT_MINUTES,
     MAX_TEXT_LENGTH,
     db_as,
     parse_strict_int,
+    pwd,
     record_audit_event,
     templates,
     within_length,
 )
-from routes_auth import require_user
+from routes_auth import (
+    DEFAULT_REGISTRATION_PASSWORDS,
+    _normalize_registration_email,
+    require_user,
+)
 
 
 
@@ -23,6 +29,12 @@ from routes_auth import require_user
 
 router = APIRouter()
 
+def _valid_admin_password(password: str) -> bool:
+    return (
+        within_length(password, MAX_PASSWORD_LENGTH)
+        and len(password) >= 8
+        and password.strip().casefold() not in DEFAULT_REGISTRATION_PASSWORDS
+    )
 
 @router.get("/admin/audit")
 def admin_audit(request: Request):
@@ -92,6 +104,18 @@ def admin_users(request: Request):
         }
         for row in cur.fetchall()
     ]
+    cur.execute(
+        """
+        SELECT id, email, role, blocked
+        FROM users
+        WHERE role IN ('admin', 'registrar')
+        ORDER BY role, email
+        """
+    )
+    staff_users = [
+        {"id": row[0], "email": row[1], "role": row[2], "blocked": row[3]}
+        for row in cur.fetchall()
+    ]
     cur.close()
     conn.close()
     return templates.TemplateResponse(
@@ -99,10 +123,390 @@ def admin_users(request: Request):
         {
             "request": request,
             "users": users,
+            "staff_users": staff_users,
             "role": "admin",
             "future_cancelled": request.query_params.get("future_cancelled"),
+            "error": request.query_params.get("error"),
+            "created": request.query_params.get("created"),
+            "password_reset": request.query_params.get("password_reset"),
         },
     )
+
+
+@router.post("/admin/users")
+def create_staff_user(
+    request: Request,
+    email: str = Form(...),
+    role: str = Form(...),
+    password: str = Form(...),
+    confirm_password: str = Form(...),
+):
+    admin_user, denied = require_user(request, "admin")
+    if denied:
+        return denied
+    normalized_email = _normalize_registration_email(email)
+    role = role.strip().lower()
+    if normalized_email is None:
+        return RedirectResponse("/admin/users?error=invalid_email", status_code=303)
+    if role not in ("registrar", "admin"):
+        return RedirectResponse("/admin/users?error=invalid_role", status_code=303)
+    if not _valid_admin_password(password):
+        return RedirectResponse("/admin/users?error=invalid_password", status_code=303)
+    if password != confirm_password:
+        return RedirectResponse("/admin/users?error=password_mismatch", status_code=303)
+
+    conn = db_as(admin_user)
+    try:
+        with conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    INSERT INTO users (email, password_hash, role, blocked)
+                    VALUES (%s, %s, %s, FALSE)
+                    RETURNING id
+                    """,
+                    (normalized_email, pwd.hash(password), role),
+                )
+                user_id = cur.fetchone()[0]
+                record_audit_event(cur, "user.create", role, user_id)
+    except psycopg2.errors.UniqueViolation:
+        return RedirectResponse("/admin/users?error=email_exists", status_code=303)
+    finally:
+        conn.close()
+    return RedirectResponse("/admin/users?created=1", status_code=303)
+
+
+@router.post("/admin/users/{user_id}/password")
+def reset_user_password(
+    request: Request,
+    user_id: str,
+    new_password: str = Form(...),
+    confirm_password: str = Form(...),
+):
+    admin_user, denied = require_user(request, "admin")
+    if denied:
+        return denied
+    parsed_user_id = parse_strict_int(user_id, min_value=1)
+    if parsed_user_id is None:
+        return RedirectResponse("/admin/users?error=user_not_found", status_code=303)
+    if not _valid_admin_password(new_password):
+        return RedirectResponse("/admin/users?error=invalid_password", status_code=303)
+    if new_password != confirm_password:
+        return RedirectResponse("/admin/users?error=password_mismatch", status_code=303)
+
+    conn = db_as(admin_user)
+    try:
+        with conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT public.admin_reset_user_password(%s, %s)
+                    """,
+                    (parsed_user_id, pwd.hash(new_password)),
+                )
+                row = cur.fetchone()
+                if row is None or row[0] is None:
+                    return RedirectResponse(
+                        "/admin/users?error=user_not_found", status_code=303
+                    )
+                record_audit_event(
+                    cur, "user.password_reset", row[0], parsed_user_id
+                )
+    finally:
+        conn.close()
+    return RedirectResponse("/admin/users?password_reset=1", status_code=303)
+
+
+@router.get("/admin/doctors")
+def admin_doctors(request: Request):
+    admin_user, denied = require_user(request, "admin")
+    if denied:
+        return denied
+    conn = db_as(admin_user)
+    cur = conn.cursor()
+    cur.execute(
+        """
+        SELECT d.id, d.user_id, u.email, u.blocked, d.full_name,
+               d.specialty, d.experience_years
+        FROM doctors d
+        JOIN users u ON u.id = d.user_id
+        ORDER BY d.full_name, d.id
+        """
+    )
+    doctors = [
+        {
+            "id": row[0],
+            "user_id": row[1],
+            "email": row[2],
+            "blocked": row[3],
+            "full_name": row[4],
+            "specialty": row[5],
+            "experience_years": row[6],
+        }
+        for row in cur.fetchall()
+    ]
+    cur.close()
+    conn.close()
+    return templates.TemplateResponse(
+        "admin_doctors.html",
+        {
+            "request": request,
+            "role": "admin",
+            "doctors": doctors,
+            "created": request.query_params.get("created"),
+            "updated": request.query_params.get("updated"),
+            "activation": request.query_params.get("activation"),
+            "error": request.query_params.get("error"),
+        },
+    )
+
+
+@router.get("/admin/doctors/new")
+def admin_new_doctor_form(request: Request):
+    admin_user, denied = require_user(request, "admin")
+    if denied:
+        return denied
+    return templates.TemplateResponse(
+        "admin_doctor_form.html",
+        {
+            "request": request,
+            "role": admin_user["role"],
+            "error": request.query_params.get("error"),
+        },
+    )
+
+
+@router.post("/admin/doctors")
+def create_doctor(
+    request: Request,
+    email: str = Form(...),
+    full_name: str = Form(...),
+    specialty: str = Form(...),
+    experience_years: str = Form(...),
+    password: str = Form(...),
+    confirm_password: str = Form(...),
+):
+    admin_user, denied = require_user(request, "admin")
+    if denied:
+        return denied
+    normalized_email = _normalize_registration_email(email)
+    full_name = full_name.strip()
+    specialty = specialty.strip()
+    parsed_experience = parse_strict_int(experience_years, min_value=0, max_value=80)
+    if normalized_email is None:
+        return RedirectResponse(
+            "/admin/doctors/new?error=invalid_email", status_code=303
+        )
+    if (
+        not within_length(full_name, 120)
+        or not full_name
+        or not within_length(specialty, 120)
+        or not specialty
+        or parsed_experience is None
+    ):
+        return RedirectResponse(
+            "/admin/doctors/new?error=invalid_details", status_code=303
+        )
+    if not _valid_admin_password(password):
+        return RedirectResponse(
+            "/admin/doctors/new?error=invalid_password", status_code=303
+        )
+    if password != confirm_password:
+        return RedirectResponse(
+            "/admin/doctors/new?error=password_mismatch", status_code=303
+        )
+
+    conn = db_as(admin_user)
+    try:
+        with conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    INSERT INTO users (email, password_hash, role, blocked)
+                    VALUES (%s, %s, 'doctor', FALSE)
+                    RETURNING id
+                    """,
+                    (normalized_email, pwd.hash(password)),
+                )
+                user_id = cur.fetchone()[0]
+                cur.execute(
+                    """
+                    INSERT INTO doctors
+                        (user_id, full_name, specialty, experience_years)
+                    VALUES (%s, %s, %s, %s)
+                    RETURNING id
+                    """,
+                    (user_id, full_name, specialty, parsed_experience),
+                )
+                doctor_id = cur.fetchone()[0]
+                record_audit_event(cur, "doctor.create", "doctor", doctor_id)
+    except psycopg2.errors.UniqueViolation:
+        return RedirectResponse(
+            "/admin/doctors/new?error=email_exists", status_code=303
+        )
+    finally:
+        conn.close()
+    return RedirectResponse("/admin/doctors?created=1", status_code=303)
+
+
+@router.post("/admin/doctors/{doctor_id}")
+def update_doctor(
+    request: Request,
+    doctor_id: str,
+    full_name: str = Form(...),
+    specialty: str = Form(...),
+    experience_years: str = Form(...),
+):
+    admin_user, denied = require_user(request, "admin")
+    if denied:
+        return denied
+    parsed_doctor_id = parse_strict_int(doctor_id, min_value=1)
+    full_name = full_name.strip()
+    specialty = specialty.strip()
+    parsed_experience = parse_strict_int(experience_years, min_value=0, max_value=80)
+    if parsed_doctor_id is None:
+        return RedirectResponse("/admin/doctors?error=doctor_not_found", status_code=303)
+    if (
+        not within_length(full_name, 120)
+        or not full_name
+        or not within_length(specialty, 120)
+        or not specialty
+        or parsed_experience is None
+    ):
+        return RedirectResponse("/admin/doctors?error=invalid_details", status_code=303)
+
+    conn = db_as(admin_user)
+    try:
+        with conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    UPDATE doctors
+                    SET full_name = %s, specialty = %s, experience_years = %s
+                    WHERE id = %s
+                    """,
+                    (full_name, specialty, parsed_experience, parsed_doctor_id),
+                )
+                if cur.rowcount == 0:
+                    return RedirectResponse(
+                        "/admin/doctors?error=doctor_not_found", status_code=303
+                    )
+                record_audit_event(
+                    cur, "doctor.update", "doctor", parsed_doctor_id
+                )
+    finally:
+        conn.close()
+    return RedirectResponse("/admin/doctors?updated=1", status_code=303)
+
+
+def _set_doctor_blocked(request: Request, doctor_id: str, blocked: bool):
+    admin_user, denied = require_user(request, "admin")
+    if denied:
+        return denied
+    parsed_doctor_id = parse_strict_int(doctor_id, min_value=1)
+    if parsed_doctor_id is None:
+        return RedirectResponse("/admin/doctors?error=doctor_not_found", status_code=303)
+    conn = db_as(admin_user)
+    try:
+        with conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    UPDATE users u
+                    SET blocked = %s
+                    FROM doctors d
+                    WHERE d.id = %s AND u.id = d.user_id AND u.role = 'doctor'
+                    """,
+                    (blocked, parsed_doctor_id),
+                )
+                if cur.rowcount == 0:
+                    return RedirectResponse(
+                        "/admin/doctors?error=doctor_not_found", status_code=303
+                    )
+                record_audit_event(
+                    cur,
+                    "doctor.deactivate" if blocked else "doctor.activate",
+                    "doctor",
+                    parsed_doctor_id,
+                )
+    finally:
+        conn.close()
+    return RedirectResponse(
+        f"/admin/doctors?activation={'deactivated' if blocked else 'activated'}",
+        status_code=303,
+    )
+
+
+@router.post("/admin/doctors/{doctor_id}/deactivate")
+def deactivate_doctor(request: Request, doctor_id: str):
+    return _set_doctor_blocked(request, doctor_id, True)
+
+
+@router.post("/admin/doctors/{doctor_id}/activate")
+def activate_doctor(request: Request, doctor_id: str):
+    return _set_doctor_blocked(request, doctor_id, False)
+
+
+@router.get("/admin/settings")
+def admin_settings(request: Request):
+    admin_user, denied = require_user(request, "admin")
+    if denied:
+        return denied
+    conn = db_as(admin_user)
+    cur = conn.cursor()
+    cur.execute("SELECT address, phone FROM clinic_settings WHERE id = 1")
+    row = cur.fetchone()
+    cur.close()
+    conn.close()
+    if row is None:
+        raise RuntimeError("Clinic settings row is missing")
+    return templates.TemplateResponse(
+        "admin_settings.html",
+        {
+            "request": request,
+            "role": admin_user["role"],
+            "address": row[0],
+            "phone": row[1],
+            "saved": request.query_params.get("saved"),
+            "error": request.query_params.get("error"),
+        },
+    )
+
+
+@router.post("/admin/settings")
+def update_admin_settings(
+    request: Request,
+    address: str = Form(...),
+    phone: str = Form(...),
+):
+    admin_user, denied = require_user(request, "admin")
+    if denied:
+        return denied
+    address = address.strip()
+    phone = phone.strip()
+    if not within_length(address, 300) or not address:
+        return RedirectResponse("/admin/settings?error=invalid_address", status_code=303)
+    if not within_length(phone, 50) or not phone:
+        return RedirectResponse("/admin/settings?error=invalid_phone", status_code=303)
+
+    conn = db_as(admin_user)
+    try:
+        with conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    UPDATE clinic_settings
+                    SET address = %s, phone = %s
+                    WHERE id = 1
+                    """,
+                    (address, phone),
+                )
+                if cur.rowcount != 1:
+                    raise RuntimeError("Clinic settings row is missing")
+                record_audit_event(cur, "clinic.settings.update", "clinic", 1)
+    finally:
+        conn.close()
+    return RedirectResponse("/admin/settings?saved=1", status_code=303)
 
 
 def _purge_slots_without_scheduled(cur, where_sql, params):
@@ -196,7 +600,15 @@ def admin_schedule(request: Request):
         return denied
     conn = db_as(admin_user)
     cur = conn.cursor()
-    cur.execute("SELECT id, full_name FROM doctors ORDER BY full_name")
+    cur.execute(
+        """
+        SELECT d.id, d.full_name
+        FROM doctors d
+        JOIN users u ON u.id = d.user_id
+        WHERE u.role = 'doctor' AND NOT u.blocked
+        ORDER BY d.full_name
+        """
+    )
     doctors = [{"id": row[0], "full_name": row[1]} for row in cur.fetchall()]
     cur.execute(
         """
@@ -332,7 +744,15 @@ def admin_save_work_hours_bulk(
 
     conn = db_as(admin_user)
     cur = conn.cursor()
-    cur.execute("SELECT 1 FROM doctors WHERE id=%s", (doctor_id,))
+    cur.execute(
+        """
+        SELECT 1
+        FROM doctors d
+        JOIN users u ON u.id = d.user_id
+        WHERE d.id = %s AND u.role = 'doctor' AND NOT u.blocked
+        """,
+        (doctor_id,),
+    )
     if cur.fetchone() is None:
         cur.close()
         conn.close()
@@ -367,7 +787,15 @@ def admin_apply_hours(request: Request, doctor_id: str):
         return RedirectResponse("/admin/schedule?error=doctor_not_found", status_code=303)
     conn = db_as(admin_user)
     cur = conn.cursor()
-    cur.execute("SELECT 1 FROM doctors WHERE id=%s", (doctor_id,))
+    cur.execute(
+        """
+        SELECT 1
+        FROM doctors d
+        JOIN users u ON u.id = d.user_id
+        WHERE d.id = %s AND u.role = 'doctor' AND NOT u.blocked
+        """,
+        (doctor_id,),
+    )
     if cur.fetchone() is None:
         cur.close()
         conn.close()
@@ -404,7 +832,15 @@ def admin_add_time_off(
         return RedirectResponse("/admin/schedule?error=time_off_past", status_code=303)
     conn = db_as(admin_user)
     cur = conn.cursor()
-    cur.execute("SELECT 1 FROM doctors WHERE id=%s", (doctor_id,))
+    cur.execute(
+        """
+        SELECT 1
+        FROM doctors d
+        JOIN users u ON u.id = d.user_id
+        WHERE d.id = %s AND u.role = 'doctor' AND NOT u.blocked
+        """,
+        (doctor_id,),
+    )
     if cur.fetchone() is None:
         cur.close()
         conn.close()
@@ -595,7 +1031,15 @@ def generate_doctor_slots(
 
     conn = db_as(admin_user)
     cur = conn.cursor()
-    cur.execute("SELECT 1 FROM doctors WHERE id=%s", (doctor_id,))
+    cur.execute(
+        """
+        SELECT 1
+        FROM doctors d
+        JOIN users u ON u.id = d.user_id
+        WHERE d.id = %s AND u.role = 'doctor' AND NOT u.blocked
+        """,
+        (doctor_id,),
+    )
     if cur.fetchone() is None:
         cur.close()
         conn.close()

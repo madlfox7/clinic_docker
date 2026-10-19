@@ -120,9 +120,23 @@ def require_user(request: Request, *roles):
 @router.get("/")
 def home(request: Request):
     user = viewer(request)
+    conn = db_as_guest()
+    try:
+        with conn.cursor() as cur:
+            cur.execute("SELECT address, phone FROM clinic_settings WHERE id = 1")
+            settings = cur.fetchone()
+    finally:
+        conn.close()
+    if settings is None:
+        raise RuntimeError("Clinic settings row is missing")
     return templates.TemplateResponse(
         "home.html",
-        {"request": request, "role": user["role"] if user else "guest"},
+        {
+            "request": request,
+            "role": user["role"] if user else "guest",
+            "clinic_address": settings[0],
+            "clinic_phone": settings[1],
+        },
     )
 
 
@@ -261,7 +275,15 @@ def logout(request: Request):
 def doctors_list(request: Request):
     conn = db()
     cur = conn.cursor()
-    cur.execute("SELECT id, full_name, specialty, experience_years FROM doctors ORDER BY id")
+    cur.execute(
+        """
+        SELECT d.id, d.full_name, d.specialty, d.experience_years
+        FROM doctors d
+        JOIN users u ON u.id = d.user_id
+        WHERE u.role = 'doctor' AND NOT u.blocked
+        ORDER BY d.id
+        """
+    )
     rows = cur.fetchall()
     cur.close()
     conn.close()

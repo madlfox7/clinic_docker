@@ -1668,3 +1668,210 @@ def test_public_registration_is_patient_only_and_can_book(request):
 				DELETE FROM users WHERE id = {user_id};
 				"""
 			)
+
+
+def test_admin_can_create_update_deactivate_and_reactivate_doctor():
+	email = f"managed-doctor-{uuid.uuid4().hex}@example.test"
+	initial_password = "DoctorInitial#417"
+	reset_password = "DoctorReset#583"
+	user_id = None
+	doctor_id = None
+	slot_id = None
+	try:
+		with client() as admin, client() as patient, client() as doctor:
+			login(admin, ADMIN)
+			created = admin.post(
+				"/admin/doctors",
+				data={
+					"email": email,
+					"full_name": "Dr. Initial Name",
+					"specialty": "General Medicine",
+					"experience_years": "7",
+					"password": initial_password,
+					"confirm_password": initial_password,
+				},
+			)
+			assert created.url.path == "/admin/doctors"
+			user_id = int(psql(f"SELECT id FROM users WHERE email = '{email}'"))
+			doctor_id = int(psql(f"SELECT id FROM doctors WHERE user_id = {user_id}"))
+			assert psql(f"SELECT role FROM users WHERE id = {user_id}") == "doctor"
+			assert "Dr. Initial Name" in admin.get("/doctors").text
+
+			updated = admin.post(
+				f"/admin/doctors/{doctor_id}",
+				data={
+					"full_name": "Dr. Updated Name",
+					"specialty": "Cardiology",
+					"experience_years": "9",
+				},
+			)
+			assert "Doctor details updated." in updated.text
+			assert psql(
+				f"SELECT full_name || '|' || specialty || '|' || experience_years "
+				f"FROM doctors WHERE id = {doctor_id}"
+			) == "Dr. Updated Name|Cardiology|9"
+
+			reset = admin.post(
+				f"/admin/users/{user_id}/password",
+				data={
+					"new_password": reset_password,
+					"confirm_password": reset_password,
+				},
+			)
+			assert "Password reset." in reset.text
+			doctor_login = doctor.post(
+				"/login", data={"email": email, "password": reset_password}
+			)
+			assert "Role: doctor" in doctor_login.text
+
+			slot_id = int(
+				psql(
+					f"""
+					INSERT INTO slots (doctor_id, starts_at, ends_at)
+					VALUES (
+						{doctor_id},
+						CURRENT_TIMESTAMP + INTERVAL '100 days',
+						CURRENT_TIMESTAMP + INTERVAL '100 days 30 minutes'
+					)
+					RETURNING id
+					"""
+				)
+			)
+			admin.post(f"/admin/doctors/{doctor_id}/deactivate")
+			assert "Inactive" in admin.get("/admin/doctors").text
+			assert "Dr. Updated Name" not in admin.get("/doctors").text
+			blocked_doctor = doctor.get("/me")
+			assert blocked_doctor.status_code == 403
+			assert "Account is blocked" in blocked_doctor.text
+
+			login(patient, PAT)
+			patient_id = int(psql(f"SELECT id FROM users WHERE email = '{PAT}'"))
+			assert psql(
+				f"""
+				BEGIN;
+				SET LOCAL ROLE app_patient;
+				SELECT set_config('app.user_id', '{patient_id}', true) IS NOT NULL;
+				SELECT CASE WHEN public.is_valid_free_slot(
+					{slot_id},
+					{doctor_id},
+					(SELECT starts_at FROM slots WHERE id = {slot_id}),
+					(SELECT ends_at FROM slots WHERE id = {slot_id})
+				) THEN 'allowed' ELSE 'denied' END;
+				"""
+			) == "denied"
+			patient.post(f"/slots/{slot_id}/book")
+			assert psql(
+				f"SELECT count(*) FROM appointments WHERE slot_id = {slot_id}"
+			) == "0"
+
+			reactivated = admin.post(f"/admin/doctors/{doctor_id}/activate")
+			assert "Doctor reactivated." in reactivated.text
+			assert "Dr. Updated Name" in admin.get("/doctors").text
+			doctor_login = doctor.post(
+				"/login", data={"email": email, "password": reset_password}
+			)
+			assert "Role: doctor" in doctor_login.text
+	finally:
+		if doctor_id is not None:
+			psql(
+				f"""
+				DELETE FROM audit_events
+				WHERE target_type = 'doctor'
+				  AND target_id IN ({doctor_id}, COALESCE({user_id}, 0));
+				DELETE FROM appointments
+				WHERE slot_id IN (SELECT id FROM slots WHERE doctor_id = {doctor_id});
+				DELETE FROM slots WHERE doctor_id = {doctor_id};
+				DELETE FROM doctors WHERE id = {doctor_id};
+				"""
+			)
+		if user_id is not None:
+			psql(
+				f"""
+				DELETE FROM audit_events
+				WHERE target_id = {user_id} AND target_type = 'doctor';
+				DELETE FROM users WHERE id = {user_id};
+				"""
+			)
+
+
+def test_admin_can_create_staff_and_reset_password():
+	email = f"managed-registrar-{uuid.uuid4().hex}@example.test"
+	initial_password = "RegistrarInitial#417"
+	reset_password = "RegistrarReset#583"
+	user_id = None
+	try:
+		with client() as admin, client() as registrar:
+			login(admin, ADMIN)
+			invalid_role = admin.post(
+				"/admin/users",
+				data={
+					"email": email,
+					"role": "patient",
+					"password": initial_password,
+					"confirm_password": initial_password,
+				},
+			)
+			assert "Choose registrar or admin." in invalid_role.text
+			created = admin.post(
+				"/admin/users",
+				data={
+					"email": email,
+					"role": "registrar",
+					"password": initial_password,
+					"confirm_password": initial_password,
+				},
+			)
+			assert "Staff account created." in created.text
+			user_id = int(psql(f"SELECT id FROM users WHERE email = '{email}'"))
+			assert psql(f"SELECT role FROM users WHERE id = {user_id}") == "registrar"
+			admin.post(
+				f"/admin/users/{user_id}/password",
+				data={
+					"new_password": reset_password,
+					"confirm_password": reset_password,
+				},
+			)
+			registrar_login = registrar.post(
+				"/login", data={"email": email, "password": reset_password}
+			)
+			assert "Role: registrar" in registrar_login.text
+	finally:
+		if user_id is not None:
+			psql(
+				f"""
+				DELETE FROM audit_events
+				WHERE target_id = {user_id} AND target_type = 'registrar';
+				DELETE FROM users WHERE id = {user_id};
+				"""
+			)
+
+
+def test_admin_clinic_settings_are_visible_and_admin_only():
+	old_settings = psql(
+		"SELECT address || '|' || phone FROM clinic_settings WHERE id = 1"
+	)
+	old_address, old_phone = old_settings.split("|", 1)
+	try:
+		with client() as admin, client() as doctor, client() as guest:
+			login(admin, ADMIN)
+			saved = admin.post(
+				"/admin/settings",
+				data={"address": "42 Test Street", "phone": "+374 00 123456"},
+			)
+			assert "Clinic settings saved." in saved.text
+			home = guest.get("/")
+			assert "42 Test Street" in home.text
+			assert "+374 00 123456" in home.text
+
+			login(doctor, DOC)
+			forbidden = doctor.get("/admin/settings")
+			assert "/login" in str(forbidden.url)
+
+	finally:
+		psql(
+			"UPDATE clinic_settings "
+			"SET address = "
+			+ "'" + old_address.replace("'", "''") + "', phone = '"
+			+ old_phone.replace("'", "''")
+			+ "' WHERE id = 1"
+		)

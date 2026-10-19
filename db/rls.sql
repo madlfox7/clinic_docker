@@ -100,6 +100,23 @@ AS $function$
   );
 $function$;
 
+CREATE OR REPLACE FUNCTION public.doctor_is_active(target_doctor_id int)
+RETURNS boolean
+LANGUAGE sql
+STABLE
+SECURITY DEFINER
+SET search_path = pg_catalog, public, pg_temp
+AS $function$
+  SELECT EXISTS (
+    SELECT 1
+    FROM public.doctors AS d
+    JOIN public.users AS u ON u.id = d.user_id
+    WHERE d.id = target_doctor_id
+      AND u.role = 'doctor'
+      AND NOT u.blocked
+  );
+$function$;
+
 CREATE OR REPLACE FUNCTION public.is_valid_free_slot(
   target_slot_id int,
   target_doctor_id int,
@@ -120,6 +137,7 @@ AS $function$
       AND s.starts_at = target_starts_at
       AND s.ends_at = target_ends_at
       AND s.starts_at > CURRENT_TIMESTAMP
+      AND public.doctor_is_active(target_doctor_id)
       AND NOT EXISTS (
         SELECT 1
         FROM public.appointments AS a
@@ -176,22 +194,69 @@ BEGIN
 END;
 $function$;
 
+CREATE OR REPLACE FUNCTION public.admin_reset_user_password(
+  target_user_id integer,
+  replacement_hash text
+)
+RETURNS text
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = pg_catalog, public, pg_temp
+AS $function$
+DECLARE
+  actor_id integer := NULLIF(current_setting('app.user_id', true), '')::integer;
+  target_role text;
+BEGIN
+  IF current_setting('role', true) IS DISTINCT FROM 'app_admin'
+     OR replacement_hash IS NULL
+     OR length(replacement_hash) = 0
+     OR NOT EXISTS (
+       SELECT 1
+       FROM public.users
+       WHERE id = actor_id AND role = 'admin' AND NOT blocked
+     ) THEN
+    RAISE EXCEPTION 'invalid admin password-reset context'
+      USING ERRCODE = '42501';
+  END IF;
+
+  UPDATE public.users
+  SET password_hash = replacement_hash
+  WHERE id = target_user_id
+  RETURNING role INTO target_role;
+
+  RETURN target_role;
+END;
+$function$;
+
 REVOKE ALL ON FUNCTION public.current_patient_is_active() FROM PUBLIC;
 REVOKE ALL ON FUNCTION public.scheduled_slot_is_taken(integer) FROM PUBLIC;
+REVOKE ALL ON FUNCTION public.doctor_is_active(integer) FROM PUBLIC;
 REVOKE ALL ON FUNCTION public.is_valid_free_slot(integer, integer, timestamp, timestamp) FROM PUBLIC;
 REVOKE ALL ON FUNCTION public.record_audit_event(text, text, integer) FROM PUBLIC;
+REVOKE ALL ON FUNCTION public.admin_reset_user_password(integer, text) FROM PUBLIC;
 GRANT EXECUTE ON FUNCTION public.current_patient_is_active() TO app_patient;
 GRANT EXECUTE ON FUNCTION public.scheduled_slot_is_taken(integer)
+  TO app_patient, app_registrar, app_admin;
+GRANT EXECUTE ON FUNCTION public.doctor_is_active(integer)
   TO app_patient, app_registrar, app_admin;
 GRANT EXECUTE ON FUNCTION public.is_valid_free_slot(integer, integer, timestamp, timestamp)
   TO app_patient;
 GRANT EXECUTE ON FUNCTION public.record_audit_event(text, text, integer)
   TO app_patient, app_doctor, app_registrar, app_admin;
+GRANT EXECUTE ON FUNCTION public.admin_reset_user_password(integer, text)
+  TO app_admin;
 
 GRANT USAGE ON SCHEMA public
   TO app_guest, app_patient, app_doctor, app_registrar, app_admin;
 
 GRANT SELECT ON public.doctors TO app_guest, app_patient, app_doctor, app_registrar, app_admin;
+GRANT INSERT (user_id, full_name, specialty, experience_years),
+  UPDATE (full_name, specialty, experience_years)
+  ON public.doctors TO app_admin;
+GRANT USAGE, SELECT ON SEQUENCE public.doctors_id_seq TO app_admin;
+GRANT SELECT ON public.clinic_settings
+  TO app_guest, app_patient, app_doctor, app_registrar, app_admin;
+GRANT UPDATE (address, phone) ON public.clinic_settings TO app_admin;
 GRANT INSERT (email, password_hash, role, blocked) ON public.users TO app_guest;
 GRANT USAGE, SELECT ON SEQUENCE public.users_id_seq TO app_guest;
 GRANT SELECT ON public.slots, public.work_hours, public.time_off, public.holidays
@@ -215,7 +280,9 @@ GRANT USAGE, SELECT ON SEQUENCE public.time_off_requests_id_seq TO app_doctor;
 
 GRANT SELECT (id, email, role, blocked) ON public.users TO app_registrar;
 GRANT SELECT (id, email, role, blocked) ON public.users TO app_admin;
+GRANT INSERT (email, password_hash, role, blocked) ON public.users TO app_admin;
 GRANT UPDATE (blocked) ON public.users TO app_admin;
+GRANT USAGE, SELECT ON SEQUENCE public.users_id_seq TO app_admin;
 GRANT SELECT ON public.audit_events TO app_admin;
 GRANT SELECT ON public.time_off_requests TO app_admin;
 GRANT UPDATE (status, decided_by, decided_at)
@@ -293,6 +360,8 @@ CREATE POLICY appointments_registrar_select ON public.appointments
 CREATE POLICY appointments_registrar_insert ON public.appointments
   FOR INSERT TO app_registrar
   WITH CHECK (
+    public.doctor_is_active(doctor_id)
+    AND
     EXISTS (
       SELECT 1
       FROM public.users AS u
@@ -453,6 +522,7 @@ DROP POLICY IF EXISTS users_clinic_api_select ON public.users;
 DROP POLICY IF EXISTS users_registrar_select ON public.users;
 DROP POLICY IF EXISTS users_admin_select ON public.users;
 DROP POLICY IF EXISTS users_admin_update ON public.users;
+DROP POLICY IF EXISTS users_admin_insert ON public.users;
 DROP POLICY IF EXISTS users_guest_insert ON public.users;
 CREATE POLICY users_clinic_api_select ON public.users
   FOR SELECT TO clinic_api USING (true);
@@ -462,11 +532,24 @@ CREATE POLICY users_admin_select ON public.users
   FOR SELECT TO app_admin USING (true);
 CREATE POLICY users_admin_update ON public.users
   FOR UPDATE TO app_admin
-  USING (role = 'patient')
-  WITH CHECK (role = 'patient');
+  USING (role IN ('patient', 'doctor'))
+  WITH CHECK (role IN ('patient', 'doctor'));
+CREATE POLICY users_admin_insert ON public.users
+  FOR INSERT TO app_admin
+  WITH CHECK (role IN ('doctor', 'registrar', 'admin') AND NOT blocked);
 CREATE POLICY users_guest_insert ON public.users
   FOR INSERT TO app_guest
   WITH CHECK (role = 'patient' AND NOT blocked);
+
+DROP POLICY IF EXISTS clinic_settings_select ON public.clinic_settings;
+DROP POLICY IF EXISTS clinic_settings_admin_update ON public.clinic_settings;
+CREATE POLICY clinic_settings_select ON public.clinic_settings
+  FOR SELECT TO app_guest, app_patient, app_doctor, app_registrar, app_admin
+  USING (id = 1);
+CREATE POLICY clinic_settings_admin_update ON public.clinic_settings
+  FOR UPDATE TO app_admin
+  USING (id = 1)
+  WITH CHECK (id = 1);
 
 DROP POLICY IF EXISTS work_hours_patient_select ON public.work_hours;
 DROP POLICY IF EXISTS work_hours_registrar_select ON public.work_hours;
@@ -574,6 +657,7 @@ CREATE POLICY time_off_requests_admin_update ON public.time_off_requests
 
 ALTER TABLE public.slots ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.users ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.clinic_settings ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.work_hours ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.time_off ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.holidays ENABLE ROW LEVEL SECURITY;
