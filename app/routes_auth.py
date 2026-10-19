@@ -1,4 +1,5 @@
 import re
+from urllib.parse import urlencode
 
 from psycopg2.errors import UniqueViolation
 from fastapi import APIRouter, Form, Request
@@ -371,6 +372,12 @@ def logout(request: Request):
 
 @router.get("/doctors")
 def doctors_list(request: Request):
+    user = viewer(request)
+    selected_patient_email = ""
+    if user and user["role"] == "registrar":
+        candidate = request.query_params.get("patient_email", "").strip()
+        if within_length(candidate, MAX_EMAIL_LENGTH):
+            selected_patient_email = candidate
     conn = db()
     cur = conn.cursor()
     cur.execute(
@@ -385,16 +392,26 @@ def doctors_list(request: Request):
     rows = cur.fetchall()
     cur.close()
     conn.close()
-    doctors = [
-        {"id": r[0], "full_name": r[1], "specialty": r[2], "experience_years": r[3]}
-        for r in rows
-    ]
-    user = viewer(request)
+    doctors = []
+    for row in rows:
+        slots_url = f"/doctors/{row[0]}/slots"
+        if selected_patient_email:
+            slots_url += f"?{urlencode({'patient_email': selected_patient_email})}"
+        doctors.append(
+            {
+                "id": row[0],
+                "full_name": row[1],
+                "specialty": row[2],
+                "experience_years": row[3],
+                "slots_url": slots_url,
+            }
+        )
     return templates.TemplateResponse(
         "doctors.html",
         {
             "request": request,
             "doctors": doctors,
             "role": user["role"] if user else "guest",
+            "selected_patient_email": selected_patient_email,
         },
     )

@@ -1,10 +1,11 @@
 from datetime import date, timedelta
 from urllib.parse import urlencode
 
-from fastapi import APIRouter, Form, Request
+from fastapi import APIRouter, Form, HTTPException, Request
 from fastapi.responses import RedirectResponse
 
 from db import (
+    MAX_EMAIL_LENGTH,
     MAX_TEXT_LENGTH,
     db_as,
     parse_strict_int,
@@ -16,6 +17,131 @@ from routes_auth import require_user
 
 
 router = APIRouter()
+
+
+@router.get("/registrar/patients")
+def registrar_patients(request: Request):
+    user, denied = require_user(request, "registrar")
+    if denied:
+        return denied
+    query = request.query_params.get("q", "").strip()
+    if len(query) > MAX_EMAIL_LENGTH:
+        return templates.TemplateResponse(
+            "registrar_patients.html",
+            {
+                "request": request,
+                "role": user["role"],
+                "patients": [],
+                "query": query,
+                "error": "query_too_long",
+            },
+        )
+    conn = db_as(user)
+    cur = conn.cursor()
+    cur.execute(
+        """
+        SELECT u.id, u.email, u.blocked, count(s.id) AS future_count
+        FROM users u
+        LEFT JOIN appointments a
+          ON a.patient_user_id = u.id AND a.status = 'scheduled'
+        LEFT JOIN slots s
+          ON s.id = a.slot_id AND s.starts_at > CURRENT_TIMESTAMP
+        WHERE u.role = 'patient'
+          AND (%s = '' OR u.email ILIKE %s)
+        GROUP BY u.id, u.email, u.blocked
+        ORDER BY u.email
+        LIMIT 100
+        """,
+        (query, f"%{query}%"),
+    )
+    patients = [
+        {
+            "id": row[0],
+            "email": row[1],
+            "blocked": row[2],
+            "future_count": row[3],
+            "book_url": (
+                f"/registrar/patients/{row[0]}/book"
+                if not row[2]
+                else None
+            ),
+        }
+        for row in cur.fetchall()
+    ]
+    cur.close()
+    conn.close()
+    return templates.TemplateResponse(
+        "registrar_patients.html",
+        {
+            "request": request,
+            "role": user["role"],
+            "patients": patients,
+            "query": query,
+            "error": request.query_params.get("error"),
+        },
+    )
+
+
+@router.get("/registrar/patients/search")
+def registrar_patient_search(request: Request):
+    user, denied = require_user(request, "registrar")
+    if denied:
+        return denied
+    query = request.query_params.get("q", "").strip()
+    if len(query) > MAX_EMAIL_LENGTH:
+        raise HTTPException(status_code=400, detail="Search query is too long.")
+    if len(query) < 2:
+        return []
+    conn = db_as(user)
+    cur = conn.cursor()
+    cur.execute(
+        """
+        SELECT email, blocked
+        FROM users
+        WHERE role = 'patient' AND email ILIKE %s
+        ORDER BY email
+        LIMIT 15
+        """,
+        (f"%{query}%",),
+    )
+    results = [
+        {"email": row[0], "blocked": row[1]}
+        for row in cur.fetchall()
+    ]
+    cur.close()
+    conn.close()
+    return results
+
+
+@router.get("/registrar/patients/{patient_id}/book")
+def registrar_start_booking(request: Request, patient_id: str):
+    user, denied = require_user(request, "registrar")
+    if denied:
+        return denied
+    patient_id = parse_strict_int(patient_id, min_value=1)
+    if patient_id is None:
+        return RedirectResponse("/registrar/patients?error=patient_not_found", status_code=303)
+    conn = db_as(user)
+    cur = conn.cursor()
+    cur.execute(
+        """
+        SELECT email, blocked
+        FROM users
+        WHERE id = %s AND role = 'patient'
+        """,
+        (patient_id,),
+    )
+    patient = cur.fetchone()
+    cur.close()
+    conn.close()
+    if patient is None:
+        return RedirectResponse("/registrar/patients?error=patient_not_found", status_code=303)
+    if patient[1]:
+        return RedirectResponse("/registrar/patients?error=patient_blocked", status_code=303)
+    return RedirectResponse(
+        f"/doctors?{urlencode({'patient_email': patient[0]})}",
+        status_code=303,
+    )
 
 
 def _calendar_state(request: Request):

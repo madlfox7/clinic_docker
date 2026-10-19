@@ -3,12 +3,15 @@
 
 
 <h1>Doctors</h1>
+{% if role == "registrar" and selected_patient_email %}
+  <p>Select a doctor to book for {{ selected_patient_email }}.</p>
+{% endif %}
 <ul>
   {% for d in doctors %}
     <li>
       {{ d.full_name }} — {{ d.specialty }}, {{ d.experience_years }} years of experience
       {% if role in ("patient", "registrar", "admin") %}
-        — <a href="/doctors/{{ d.id }}/slots">{% if role == "admin" %}view slots{% else %}available slots{% endif %}</a>
+        — <a href="{{ d.slots_url }}">{% if role == "admin" %}view slots{% else %}available slots{% endif %}</a>
       {% endif %}
     </li>
   {% endfor %}

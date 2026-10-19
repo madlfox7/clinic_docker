@@ -1,5 +1,6 @@
 import psycopg2
 from typing import Optional
+from urllib.parse import quote
 
 from fastapi import APIRouter, Form, Request
 from fastapi.responses import RedirectResponse
@@ -23,17 +24,27 @@ from routes_auth import require_user
 router = APIRouter()
 
 
-def _overlap_redirect(doctor_id, patient_id, conflict_id, service_id):
+def _patient_email_query(email):
+    if not email or not within_length(email.strip(), MAX_EMAIL_LENGTH):
+        return ""
+    return f"&patient_email={quote(email.strip(), safe='')}"
+
+
+def _overlap_redirect(
+    doctor_id, patient_id, conflict_id, service_id, patient_email_query=""
+):
     if conflict_id:
         return RedirectResponse(
             f"/doctors/{doctor_id}/slots?error=overlap"
             f"&conflict_appointment_id={conflict_id}"
-            f"&conflict_patient_id={patient_id}&service_id={service_id}",
+            f"&conflict_patient_id={patient_id}&service_id={service_id}"
+            f"{patient_email_query}",
             status_code=303,
         )
     return RedirectResponse(
         f"/doctors/{doctor_id}/slots?error=overlap"
-        f"&conflict_patient_id={patient_id}&service_id={service_id}",
+        f"&conflict_patient_id={patient_id}&service_id={service_id}"
+        f"{patient_email_query}",
         status_code=303,
     )
 
@@ -89,6 +100,26 @@ def doctor_slots(request: Request, doctor_id: str):
     doc = cur.fetchone()
     cur.execute("SELECT public.doctor_is_active(%s)", (doctor_id,))
     doctor_active = cur.fetchone()[0]
+    selected_patient = None
+    if role == "registrar":
+        requested_patient_email = request.query_params.get("patient_email", "").strip()
+        if requested_patient_email and within_length(
+            requested_patient_email, MAX_EMAIL_LENGTH
+        ):
+            cur.execute(
+                """
+                SELECT email, blocked
+                FROM users
+                WHERE email = %s AND role = 'patient'
+                """,
+                (requested_patient_email,),
+            )
+            patient_row = cur.fetchone()
+            if patient_row:
+                selected_patient = {
+                    "email": patient_row[0],
+                    "blocked": patient_row[1],
+                }
     if not doctor_active:
         cur.close()
         conn.close()
@@ -265,6 +296,7 @@ def doctor_slots(request: Request, doctor_id: str):
             "cancelled": cancelled,
             "cancel_error": cancel_error,
             "conflict": conflict,
+            "selected_patient": selected_patient,
             "role": role,
         },
     )
@@ -282,6 +314,9 @@ def book_slot(
         return denied
     email = user["email"]
     role = user["role"]
+    patient_email_query = (
+        _patient_email_query(patient_email) if role == "registrar" else ""
+    )
     slot_id = parse_strict_int(slot_id, min_value=1)
     if slot_id is None:
         return RedirectResponse("/doctors", status_code=303)
@@ -343,14 +378,15 @@ def book_slot(
         conn.close()
         return RedirectResponse(
             f"/doctors/{doctor_id}/slots?error=service_mismatch"
-            f"&service_id={service_id}",
+            f"&service_id={service_id}{patient_email_query}",
             status_code=303,
         )
     if not doctor_active:
         cur.close()
         conn.close()
         return RedirectResponse(
-            f"/doctors/{doctor_id}/slots?error=unavailable&service_id={service_id}",
+            f"/doctors/{doctor_id}/slots?error=unavailable"
+            f"&service_id={service_id}{patient_email_query}",
             status_code=303,
         )
     if not service_active or not service_assigned:
@@ -358,21 +394,23 @@ def book_slot(
         conn.close()
         return RedirectResponse(
             f"/doctors/{doctor_id}/slots?error=service_unavailable"
-            f"&service_id={service_id}",
+            f"&service_id={service_id}{patient_email_query}",
             status_code=303,
         )
     if is_past:
         cur.close()
         conn.close()
         return RedirectResponse(
-            f"/doctors/{doctor_id}/slots?error=past&service_id={service_id}",
+            f"/doctors/{doctor_id}/slots?error=past"
+            f"&service_id={service_id}{patient_email_query}",
             status_code=303,
         )
     if is_closed:
         cur.close()
         conn.close()
         return RedirectResponse(
-            f"/doctors/{doctor_id}/slots?error=closed&service_id={service_id}",
+            f"/doctors/{doctor_id}/slots?error=closed"
+            f"&service_id={service_id}{patient_email_query}",
             status_code=303,
         )
     if role == "patient":
@@ -384,7 +422,7 @@ def book_slot(
             conn.close()
             return RedirectResponse(
                 f"/doctors/{doctor_id}/slots?error=patient_required"
-                f"&service_id={service_id}",
+                f"&service_id={service_id}{patient_email_query}",
                 status_code=303,
             )
         if not within_length(target_email, MAX_EMAIL_LENGTH):
@@ -392,7 +430,7 @@ def book_slot(
             conn.close()
             return RedirectResponse(
                 f"/doctors/{doctor_id}/slots?error=patient_not_found"
-                f"&service_id={service_id}",
+                f"&service_id={service_id}{patient_email_query}",
                 status_code=303,
             )
     if role == "patient":
@@ -408,7 +446,7 @@ def book_slot(
             conn.close()
             return RedirectResponse(
                 f"/doctors/{doctor_id}/slots?error=patient_not_found"
-                f"&service_id={service_id}",
+                f"&service_id={service_id}{patient_email_query}",
                 status_code=303,
             )
         patient_id = target[0]
@@ -417,7 +455,7 @@ def book_slot(
             conn.close()
             return RedirectResponse(
                 f"/doctors/{doctor_id}/slots?error=patient_blocked"
-                f"&service_id={service_id}",
+                f"&service_id={service_id}{patient_email_query}",
                 status_code=303,
             )
     cur.execute("SELECT pg_advisory_xact_lock(%s)", (patient_id,))
@@ -428,7 +466,7 @@ def book_slot(
         conn.close()
         return RedirectResponse(
             f"/doctors/{doctor_id}/slots?error=unavailable"
-            f"&service_id={service_id}",
+            f"&service_id={service_id}{patient_email_query}",
             status_code=303,
         )
 
@@ -447,7 +485,10 @@ def book_slot(
     if conflict_row:
         cur.close()
         conn.close()
-        return _overlap_redirect(doctor_id, patient_id, conflict_row[0], service_id)
+        return _overlap_redirect(
+            doctor_id, patient_id, conflict_row[0], service_id,
+            patient_email_query,
+        )
 
     try:
         cur.execute(
@@ -473,7 +514,7 @@ def book_slot(
             conn.close()
             return RedirectResponse(
                 f"/doctors/{doctor_id}/slots?error=unavailable"
-                f"&service_id={service_id}",
+                f"&service_id={service_id}{patient_email_query}",
                 status_code=303,
             )
         record_audit_event(cur, "appointment.book", "appointment", appointment_row[0])
@@ -484,7 +525,7 @@ def book_slot(
         conn.close()
         return RedirectResponse(
             f"/doctors/{doctor_id}/slots?error=unavailable"
-            f"&service_id={service_id}",
+            f"&service_id={service_id}{patient_email_query}",
             status_code=303,
         )
     except psycopg2.errors.ExclusionViolation as exc:
@@ -514,11 +555,12 @@ def book_slot(
         conn.close()
         if constraint == "appointments_no_overlap_per_patient":
             return _overlap_redirect(
-                doctor_id, patient_id, conflict_id, service_id
+                doctor_id, patient_id, conflict_id, service_id,
+                patient_email_query,
             )
         return RedirectResponse(
             f"/doctors/{doctor_id}/slots?error=unavailable"
-            f"&service_id={service_id}",
+            f"&service_id={service_id}{patient_email_query}",
             status_code=303,
         )
     except Exception:
@@ -528,7 +570,7 @@ def book_slot(
         conn.close()
         return RedirectResponse(
             f"/doctors/{doctor_id}/slots?error=could_not_book"
-            f"&service_id={service_id}",
+            f"&service_id={service_id}{patient_email_query}",
             status_code=303,
         )
     cur.close()
@@ -536,7 +578,7 @@ def book_slot(
     if role == "registrar":
         return RedirectResponse(
             f"/doctors/{doctor_id}/slots?booked=1&service_id={service_id}"
-            f"&appointment_id={appointment_row[0]}",
+            f"&appointment_id={appointment_row[0]}{patient_email_query}",
             status_code=303,
         )
     return RedirectResponse(

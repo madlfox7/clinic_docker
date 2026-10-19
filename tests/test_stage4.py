@@ -491,6 +491,81 @@ def test_registrar_books_for_pat2():
 			pat2.post(f"/appointments/{appointment_id}/cancel")
 
 
+def test_registrar_patient_directory_search_and_booking_prefill():
+	with client() as registrar, client() as patient:
+		login(registrar, REG)
+		login(patient, PAT)
+
+		directory = registrar.get("/registrar/patients?q=pat@")
+		assert directory.status_code == 200
+		assert PAT in directory.text
+		assert "Future appointments" in directory.text
+		assert "password_hash" not in directory.text
+		assert "medical records" in directory.text.lower()
+
+		results = registrar.get(
+			"/registrar/patients/search", params={"q": "pat@"}
+		)
+		assert results.status_code == 200
+		found = results.json()
+		assert len(found) <= 15
+		assert any(item["email"] == PAT and item["blocked"] is False for item in found)
+
+		patient_id = psql(f"SELECT id FROM users WHERE email = '{PAT}'")
+		booking_start = registrar.get(
+			f"/registrar/patients/{patient_id}/book"
+		)
+		assert "/doctors?patient_email=pat%40clinic.local" in str(booking_start.url)
+		doctors_page = booking_start
+		doctor_ids = re.findall(
+			r'href="/doctors/(\d+)/slots\?patient_email=pat%40clinic\.local"',
+			doctors_page.text,
+		)
+		assert doctor_ids, "selected patient was not carried to the doctor links"
+		slots_page = None
+		for doctor_id in doctor_ids:
+			candidate = registrar.get(
+				f"/doctors/{doctor_id}/slots?patient_email=pat%40clinic.local"
+			)
+			if slot_ids(candidate.text):
+				slots_page = candidate
+				break
+		assert slots_page is not None, "no free slots were available for patient prefill"
+		assert 'id="registrar-patient-search"' in slots_page.text
+		assert f'value="{PAT}"' in slots_page.text
+		assert f'name="patient_email"' in slots_page.text
+
+		denied = patient.get("/registrar/patients/search?q=pat")
+		assert "/login" in str(denied.url)
+
+
+def test_registrar_patient_directory_marks_blocked_accounts():
+	with client() as registrar, client() as admin:
+		login(registrar, REG)
+		login(admin, ADMIN)
+		patient_id = int(psql(f"SELECT id FROM users WHERE email = '{PAT2}'"))
+		was_blocked = psql(
+			f"SELECT blocked FROM users WHERE id = {patient_id}"
+		) == "t"
+		if not was_blocked:
+			admin.post(f"/admin/users/{patient_id}/block")
+		try:
+			results = registrar.get(
+				"/registrar/patients/search", params={"q": "pat2@"}
+			)
+			assert {"email": PAT2, "blocked": True} in results.json()
+			directory = registrar.get("/registrar/patients?q=pat2@")
+			assert "Blocked" in directory.text
+			assert f"/registrar/patients/{patient_id}/book" not in directory.text
+			blocked_booking = registrar.get(
+				f"/registrar/patients/{patient_id}/book"
+			)
+			assert "error=patient_blocked" in str(blocked_booking.url)
+		finally:
+			if not was_blocked:
+				admin.post(f"/admin/users/{patient_id}/unblock")
+
+
 def test_registrar_can_cancel_patient_appointment():
 	with client() as reg, client() as pat:
 		login(reg, REG)

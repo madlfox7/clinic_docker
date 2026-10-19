@@ -27,6 +27,26 @@
 {% elif not services %}
   <p>No active services are currently assigned to this doctor.</p>
 {% endif %}
+{% if role == "registrar" %}
+  <section id="registrar-patient-picker"
+    data-selected-email="{{ selected_patient.email if selected_patient else '' }}"
+    data-selected-blocked="{{ 'true' if selected_patient and selected_patient.blocked else 'false' }}">
+    <h2>Choose patient</h2>
+    <label>Search by email
+      <input id="registrar-patient-search" type="search" autocomplete="off"
+        placeholder="Type part of an email" value="{{ selected_patient.email if selected_patient else '' }}">
+    </label>
+    <p id="registrar-patient-selection" aria-live="polite">
+      {% if selected_patient %}
+        Selected: {{ selected_patient.email }}
+        {% if selected_patient.blocked %} — Blocked; booking is disabled.{% else %} — Active.{% endif %}
+      {% else %}
+        Search for a patient and select an active account before booking.
+      {% endif %}
+    </p>
+    <ul id="registrar-patient-results" aria-live="polite"></ul>
+  </section>
+{% endif %}
 {% if error == "overlap" %}
 
 <!-- Booking checks & error msgs -->
@@ -111,8 +131,12 @@
         {% if role == "registrar" %}
           <form method="post" action="/slots/{{ s.id }}/book">
           <input type="hidden" name="service_id" value="{{ selected_service.id }}">
-          <input name="patient_email" type="email" placeholder="patient@clinic.local" required>
-          <button type="submit">Book for patient</button>
+          <input type="hidden" name="patient_email"
+            value="{{ selected_patient.email if selected_patient else '' }}">
+          <button type="submit" data-registrar-book
+            {% if not selected_patient or selected_patient.blocked %}disabled{% endif %}>
+            Book for patient
+          </button>
           </form>
         {% elif role == "admin" %}
           Available
@@ -127,4 +151,85 @@
   {% endfor %}
   </ul>
 {% endfor %}
+{% if role == "registrar" %}
+<script>
+  const patientPicker = document.getElementById("registrar-patient-picker");
+  const patientSearch = document.getElementById("registrar-patient-search");
+  const patientResults = document.getElementById("registrar-patient-results");
+  const patientSelection = document.getElementById("registrar-patient-selection");
+  const bookingButtons = document.querySelectorAll("[data-registrar-book]");
+  let searchTimer;
+  let searchRequestId = 0;
+
+  function setSelectedPatient(email, blocked) {
+    patientPicker.dataset.selectedEmail = email || "";
+    patientPicker.dataset.selectedBlocked = blocked ? "true" : "false";
+    document.querySelectorAll('input[name="patient_email"]').forEach((input) => {
+      input.value = email || "";
+    });
+    bookingButtons.forEach((button) => {
+      button.disabled = !email || blocked;
+    });
+    patientSelection.textContent = email
+      ? `Selected: ${email} — ${blocked ? "Blocked; booking is disabled." : "Active."}`
+      : "Search for a patient and select an active account before booking.";
+  }
+
+  function showSearchMessage(message) {
+    patientResults.replaceChildren();
+    const item = document.createElement("li");
+    item.textContent = message;
+    patientResults.append(item);
+  }
+
+  setSelectedPatient(
+    patientPicker.dataset.selectedEmail,
+    patientPicker.dataset.selectedBlocked === "true"
+  );
+
+  patientSearch.addEventListener("input", () => {
+    const query = patientSearch.value.trim();
+    setSelectedPatient("", false);
+    patientResults.replaceChildren();
+    const requestId = ++searchRequestId;
+    window.clearTimeout(searchTimer);
+    if (query.length < 2) return;
+
+    searchTimer = window.setTimeout(async () => {
+      try {
+        const response = await fetch(
+          `/registrar/patients/search?q=${encodeURIComponent(query)}`,
+          { headers: { Accept: "application/json" } }
+        );
+        if (!response.ok) throw new Error("Patient search failed.");
+        const patients = await response.json();
+        if (requestId !== searchRequestId) return;
+        if (!patients.length) {
+          showSearchMessage("No patients found.");
+          return;
+        }
+        patientResults.replaceChildren();
+        patients.forEach((patient) => {
+          const item = document.createElement("li");
+          const button = document.createElement("button");
+          button.type = "button";
+          button.textContent = `${patient.email} — ${patient.blocked ? "Blocked" : "Active"}`;
+          button.disabled = patient.blocked;
+          button.addEventListener("click", () => {
+            patientSearch.value = patient.email;
+            patientResults.replaceChildren();
+            setSelectedPatient(patient.email, patient.blocked);
+          });
+          item.append(button);
+          patientResults.append(item);
+        });
+      } catch (error) {
+        if (requestId === searchRequestId) {
+          showSearchMessage("Could not search patients. Try again.");
+        }
+      }
+    }, 250);
+  });
+</script>
+{% endif %}
 {% endblock %}
