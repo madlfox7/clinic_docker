@@ -6,8 +6,41 @@
 <p>You are logged in as: {{ email }}</p>
 <p>Role: {{ role }}</p>
 {% if role == "patient" %}
-  <p>Patient: here will be only your appointments.</p>
-  <p><a href="/doctors">Doctors</a> | <a href="/my">My appointments</a> | <a href="/my/records">My medical records</a></p>
+  <p>Welcome. This dashboard shows only your upcoming visits and links to your records and booking.</p>
+  <p><a href="/doctors">Find a doctor and choose a service</a> | <a href="/my">All my appointments</a> | <a href="/my/records">My medical records</a></p>
+
+  <h2>Upcoming visits</h2>
+  <ul>
+    {% for visit in upcoming_visits %}
+      <li>
+        {{ visit.starts_at.strftime("%Y-%m-%d %H:%M") }}–{{ visit.ends_at.strftime("%H:%M") }} —
+        {{ visit.doctor_name }} — {{ visit.service_name }}
+      </li>
+    {% else %}
+      <li>No upcoming scheduled visits.</li>
+    {% endfor %}
+  </ul>
+
+  <h2>Change password</h2>
+  {% if password_changed == "1" %}<p>Password changed successfully.</p>{% endif %}
+  {% if password_error == "current" %}<p>Current password is incorrect.</p>
+  {% elif password_error == "invalid" %}<p>Use a non-default password of at least 8 characters.</p>
+  {% elif password_error == "mismatch" %}<p>New password and confirmation do not match.</p>
+  {% elif password_error == "same" %}<p>Choose a password different from your current one.</p>
+  {% elif password_error == "stale" %}<p>Your password changed during this request. Please retry.</p>
+  {% elif password_error == "unavailable" %}<p>Password change is unavailable for this account.</p>{% endif %}
+  <form method="post" action="/me/password">
+    <label>Current password
+      <input type="password" name="current_password" autocomplete="current-password" required>
+    </label>
+    <label>New password
+      <input type="password" name="new_password" minlength="8" maxlength="72" autocomplete="new-password" required>
+    </label>
+    <label>Confirm new password
+      <input type="password" name="confirm_password" minlength="8" maxlength="72" autocomplete="new-password" required>
+    </label>
+    <button type="submit">Change password</button>
+  </form>
 {% elif role == "doctor" %}
   <p>Doctor: here will be only your patients.</p>
   <p><a href="/doctor/appointments">My appointments</a> | <a href="/doctor/calendar">My calendar</a></p>

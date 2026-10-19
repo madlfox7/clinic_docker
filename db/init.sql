@@ -40,12 +40,58 @@ CREATE TABLE IF NOT EXISTS doctors (
   experience_years INTEGER NOT NULL DEFAULT 0
 );
 
+CREATE TABLE IF NOT EXISTS services (
+  id SERIAL PRIMARY KEY,
+  name TEXT NOT NULL UNIQUE CHECK (length(btrim(name)) BETWEEN 1 AND 120),
+  duration_minutes INTEGER NOT NULL CHECK (duration_minutes > 0),
+  buffer_minutes INTEGER NOT NULL DEFAULT 0 CHECK (buffer_minutes >= 0),
+  active BOOLEAN NOT NULL DEFAULT TRUE,
+  CHECK (duration_minutes + buffer_minutes <= 1440)
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS services_name_lower_unique
+ON services (lower(name));
+
+INSERT INTO services (name, duration_minutes, buffer_minutes, active)
+VALUES ('General consultation', 30, 0, TRUE)
+ON CONFLICT (name) DO NOTHING;
+
 CREATE TABLE IF NOT EXISTS slots (
   id SERIAL PRIMARY KEY,
   doctor_id INTEGER NOT NULL REFERENCES doctors(id),
+  service_id INTEGER REFERENCES services(id),
   starts_at TIMESTAMP NOT NULL,
   ends_at TIMESTAMP NOT NULL
 );
+
+ALTER TABLE slots
+  ADD COLUMN IF NOT EXISTS service_id INTEGER REFERENCES services(id);
+
+UPDATE slots
+SET service_id = (SELECT id FROM services WHERE name = 'General consultation')
+WHERE service_id IS NULL;
+
+ALTER TABLE slots
+  ALTER COLUMN service_id SET NOT NULL;
+
+DO $$
+DECLARE
+  default_service_id INTEGER;
+BEGIN
+  SELECT id INTO default_service_id
+  FROM services
+  WHERE name = 'General consultation';
+
+  IF default_service_id IS NULL THEN
+    RAISE EXCEPTION 'default service is missing';
+  END IF;
+
+  EXECUTE format(
+    'ALTER TABLE public.slots ALTER COLUMN service_id SET DEFAULT %s',
+    default_service_id
+  );
+END
+$$;
 
 CREATE TABLE IF NOT EXISTS work_hours (
   id SERIAL PRIMARY KEY,
@@ -128,8 +174,11 @@ CREATE UNIQUE INDEX IF NOT EXISTS appointments_one_scheduled_per_slot
 ON appointments (slot_id)
 WHERE status = 'scheduled';
 
-CREATE UNIQUE INDEX IF NOT EXISTS slots_doctor_start
-ON slots (doctor_id, starts_at);
+DROP INDEX IF EXISTS slots_doctor_start;
+CREATE UNIQUE INDEX IF NOT EXISTS slots_doctor_service_start
+ON slots (doctor_id, service_id, starts_at);
+CREATE INDEX IF NOT EXISTS slots_starts_at
+ON slots (starts_at);
 
 CREATE EXTENSION IF NOT EXISTS btree_gist;
 
@@ -151,6 +200,8 @@ ALTER TABLE appointments
   ALTER COLUMN doctor_id SET NOT NULL,
   ALTER COLUMN starts_at SET NOT NULL,
   ALTER COLUMN ends_at SET NOT NULL;
+CREATE INDEX IF NOT EXISTS appointments_doctor_starts_at
+ON appointments (doctor_id, starts_at);
 
 ALTER TABLE appointments
   ADD COLUMN IF NOT EXISTS period tsrange
@@ -198,18 +249,22 @@ ALTER TABLE slots
   ADD COLUMN IF NOT EXISTS time_range tsrange
   GENERATED ALWAYS AS (tsrange(starts_at, ends_at, '[)')) STORED;
 
+ALTER TABLE slots
+  DROP CONSTRAINT IF EXISTS slots_no_overlap_per_doctor;
+
 DO $$
 BEGIN
   IF NOT EXISTS (
     SELECT 1 FROM pg_constraint
-    WHERE conname = 'slots_no_overlap_per_doctor'
+    WHERE conname = 'slots_no_overlap_per_doctor_service'
       AND conrelid = 'slots'::regclass
       AND contype = 'x'
   ) THEN
     ALTER TABLE slots
-      ADD CONSTRAINT slots_no_overlap_per_doctor
+      ADD CONSTRAINT slots_no_overlap_per_doctor_service
       EXCLUDE USING gist (
         doctor_id WITH =,
+        service_id WITH =,
         time_range WITH &&
       );
   END IF;

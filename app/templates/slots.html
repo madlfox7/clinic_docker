@@ -3,6 +3,30 @@
 
 
 <h1>Slots: {{ doctor.full_name }}</h1>
+<form method="get" action="/doctors/{{ doctor.id }}/slots">
+  <label>Service
+    <select name="service_id" required>
+      {% for service in services %}
+        <option value="{{ service.id }}"
+          {% if selected_service and service.id == selected_service.id %}selected{% endif %}>
+          {{ service.name }} — {{ service.duration_minutes }} min + {{ service.buffer_minutes }} min buffer
+        </option>
+      {% endfor %}
+    </select>
+  </label>
+  <button type="submit">Show slots for this service</button>
+</form>
+{% if service_error %}
+  <p><strong>This service is no longer active. Choose an active service.</strong></p>
+{% elif selected_service %}
+  <p>
+    Selected service: {{ selected_service.name }}.
+    Reserved time includes {{ selected_service.duration_minutes }} minutes for the service
+    and {{ selected_service.buffer_minutes }} minutes for the buffer.
+  </p>
+{% elif not services %}
+  <p>No active services are currently available.</p>
+{% endif %}
 {% if error == "overlap" %}
 
 <!-- Booking checks & error msgs -->
@@ -22,6 +46,10 @@
   </script>
   <p><strong>Booking failed.</strong> This slot is no longer available. Please choose another slot.</p>
   <p>Cause: another patient booked this slot first.</p>
+{% elif error == "service_unavailable" %}
+  <p><strong>Booking failed.</strong> This service is no longer active.</p>
+{% elif error == "service_mismatch" %}
+  <p><strong>Booking failed.</strong> The selected service does not match this slot.</p>
 {% elif error == "patient_not_found" %}
   <p><strong>Booking failed.</strong> Patient account was not found.</p>
 {% elif error == "patient_blocked" %}
@@ -71,13 +99,15 @@
       {% else %}
         {% if role == "registrar" %}
           <form method="post" action="/slots/{{ s.id }}/book">
-            <input name="patient_email" type="email" placeholder="patient@clinic.local" required>
-            <button type="submit">Book for patient</button>
+          <input type="hidden" name="service_id" value="{{ selected_service.id }}">
+          <input name="patient_email" type="email" placeholder="patient@clinic.local" required>
+          <button type="submit">Book for patient</button>
           </form>
         {% elif role == "admin" %}
           Available
         {% else %}
           <form method="post" action="/slots/{{ s.id }}/book" style="display:inline">
+            <input type="hidden" name="service_id" value="{{ selected_service.id }}">
             <button type="submit">Book appointment</button>
           </form>
         {% endif %}

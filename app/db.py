@@ -265,7 +265,6 @@ def seed_work_schedule():
 
 
 def seed_future_slots(cur):
-   
     cur.execute(
         """
         WITH clock AS (
@@ -277,16 +276,24 @@ def seed_future_slots(cur):
         ),
         windows AS (
             SELECT d.id AS doctor_id,
+                   svc.id AS service_id,
                    h.day,
                    (h.day + w.start_time) AS window_start,
                    (h.day + w.end_time) AS window_end,
-                   w.slot_minutes
+                   svc.duration_minutes + svc.buffer_minutes AS total_minutes,
+                   GREATEST(
+                       w.slot_minutes,
+                       svc.duration_minutes + svc.buffer_minutes
+                   ) AS step_minutes
             FROM doctors d
+            JOIN users u ON u.id = d.user_id AND NOT u.blocked
+            CROSS JOIN services svc
             JOIN horizon h ON true
             JOIN work_hours w
               ON w.doctor_id = d.id
              AND w.weekday = (EXTRACT(ISODOW FROM h.day)::int - 1)
-            WHERE w.end_time > w.start_time
+            WHERE svc.active
+              AND w.end_time > w.start_time
               AND NOT EXISTS (SELECT 1 FROM holidays hol WHERE hol.day = h.day)
               AND NOT EXISTS (
                   SELECT 1 FROM time_off t
@@ -296,69 +303,33 @@ def seed_future_slots(cur):
         ),
         grid AS (
             SELECT w.doctor_id,
+                   w.service_id,
                    gs AS starts_at,
-                   gs + make_interval(mins => w.slot_minutes) AS ends_at
+                   gs + make_interval(mins => w.total_minutes) AS ends_at
             FROM windows w
             JOIN clock c ON true
             CROSS JOIN LATERAL generate_series(
                 w.window_start,
-                w.window_end - make_interval(mins => w.slot_minutes),
-                make_interval(mins => w.slot_minutes)
+                w.window_end - make_interval(mins => w.total_minutes),
+                make_interval(mins => w.step_minutes)
             ) AS gs
             WHERE gs > c.now_local
         ),
-        shared_starts AS (
-            SELECT starts_at, ends_at
-            FROM grid
-            GROUP BY starts_at, ends_at
-            HAVING count(DISTINCT doctor_id) = (SELECT count(*) FROM doctors)
-        ),
-        shared_limited AS (
-            SELECT g.doctor_id, g.starts_at, g.ends_at
-            FROM grid g
-            WHERE (g.starts_at, g.ends_at) IN (
-                SELECT starts_at, ends_at
-                FROM shared_starts
-                ORDER BY starts_at
-                LIMIT 4
-            )
-        ),
-        extras AS (
-            SELECT g.doctor_id, g.starts_at, g.ends_at
-            FROM grid g
-            WHERE (
-                NOT EXISTS (SELECT 1 FROM shared_starts)
-                OR g.starts_at >= (SELECT min(starts_at) FROM shared_starts)
-            )
-              AND NOT EXISTS (
-                  SELECT 1 FROM shared_limited s
-                  WHERE s.doctor_id = g.doctor_id
-                    AND g.starts_at < s.ends_at
-                    AND g.ends_at > s.starts_at
-              )
-        ),
-        extras_limited AS (
-            SELECT doctor_id, starts_at, ends_at
-            FROM (
-                SELECT e.doctor_id, e.starts_at, e.ends_at,
-                       row_number() OVER (PARTITION BY e.doctor_id ORDER BY e.starts_at) AS n
-                FROM extras e
-            ) ranked
-            WHERE n <= 2
-        ),
         planned AS (
-            SELECT doctor_id, starts_at, ends_at FROM shared_limited
-            UNION
-            SELECT doctor_id, starts_at, ends_at FROM extras_limited
+            SELECT doctor_id, service_id, starts_at, ends_at
+            FROM (
+                SELECT g.*,
+                       row_number() OVER (
+                           PARTITION BY doctor_id, service_id
+                           ORDER BY starts_at
+                       ) AS slot_number
+                FROM grid g
+            ) ranked
+            WHERE slot_number <= 6
         )
-        INSERT INTO slots (doctor_id, starts_at, ends_at)
-        SELECT p.doctor_id, p.starts_at, p.ends_at
+        INSERT INTO slots (doctor_id, service_id, starts_at, ends_at)
+        SELECT p.doctor_id, p.service_id, p.starts_at, p.ends_at
         FROM planned p
-        WHERE NOT EXISTS (
-            SELECT 1 FROM slots s
-            WHERE s.doctor_id = p.doctor_id
-              AND s.starts_at > (CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Yerevan')
-        )
-        ON CONFLICT (doctor_id, starts_at) DO NOTHING
+        ON CONFLICT (doctor_id, service_id, starts_at) DO NOTHING
         """
     )

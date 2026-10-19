@@ -1,67 +1,309 @@
 from datetime import date, timedelta
-from typing import Optional
+from urllib.parse import urlencode
 
 from fastapi import APIRouter, Form, Request
 from fastapi.responses import RedirectResponse
 
-from db import MAX_TEXT_LENGTH, db_as, record_audit_event, templates, within_length
+from db import (
+    MAX_TEXT_LENGTH,
+    db_as,
+    parse_strict_int,
+    record_audit_event,
+    templates,
+    within_length,
+)
 from routes_auth import require_user
 
 
 router = APIRouter()
 
 
+def _calendar_state(request: Request):
+    errors = []
+    raw_day = request.query_params.get("day")
+    selected_day = date.today()
+    if raw_day is not None:
+        try:
+            parsed_day = date.fromisoformat(raw_day)
+            if parsed_day.isoformat() != raw_day:
+                raise ValueError
+            selected_day = parsed_day
+        except ValueError:
+            errors.append("invalid_day")
+
+    raw_view = request.query_params.get("view", "day")
+    if raw_view not in ("day", "week"):
+        errors.append("invalid_view")
+        view = "day"
+    else:
+        view = raw_view
+    return selected_day, view, errors
+
+
+def _calendar_url(path, view, day, doctor_id=None):
+    params = {"view": view, "day": day.isoformat()}
+    if doctor_id is not None:
+        params["doctor_id"] = str(doctor_id)
+    return f"{path}?{urlencode(params)}"
+
+
+def _calendar_navigation(path, view, selected_day, doctor_id=None):
+    if view == "week":
+        week_start = selected_day - timedelta(days=selected_day.weekday())
+        previous_day = week_start - timedelta(days=7)
+        next_day = week_start + timedelta(days=7)
+    else:
+        previous_day = selected_day - timedelta(days=1)
+        next_day = selected_day + timedelta(days=1)
+    return {
+        "previous_url": _calendar_url(path, view, previous_day, doctor_id),
+        "today_url": _calendar_url(path, view, date.today(), doctor_id),
+        "next_url": _calendar_url(path, view, next_day, doctor_id),
+        "day_view_url": _calendar_url(path, "day", selected_day, doctor_id),
+        "week_view_url": _calendar_url(path, "week", selected_day, doctor_id),
+    }
+
+
+def _load_calendar(cur, start_day, day_count, doctor_id, role):
+    cur.execute(
+        """
+        WITH calendar_days AS (
+            SELECT %s::date + offsets.day_offset AS day
+            FROM generate_series(0, %s::integer) AS offsets(day_offset)
+        )
+        SELECT cd.day,
+               CASE
+                   WHEN %s::integer IS NULL THEN
+                       NOT EXISTS (
+                           SELECT 1 FROM work_hours wh
+                           WHERE wh.weekday = EXTRACT(ISODOW FROM cd.day)::integer - 1
+                       )
+                   ELSE NOT EXISTS (
+                       SELECT 1 FROM work_hours wh
+                       WHERE wh.doctor_id = %s
+                         AND wh.weekday = EXTRACT(ISODOW FROM cd.day)::integer - 1
+                   )
+               END AS day_off,
+               h.name AS holiday_name,
+               EXISTS (
+                   SELECT 1 FROM time_off t
+                   WHERE t.doctor_id = %s
+                     AND cd.day BETWEEN t.starts_on AND t.ends_on
+               ) AS selected_doctor_time_off,
+               s.id, s.doctor_id, d.full_name, svc.name,
+               s.starts_at, s.ends_at,
+               s.starts_at > CURRENT_TIMESTAMP AS slot_future,
+               EXISTS (
+                   SELECT 1 FROM time_off t
+                   WHERE t.doctor_id = s.doctor_id
+                     AND cd.day BETWEEN t.starts_on AND t.ends_on
+               ) AS slot_time_off,
+               a.id, a.starts_at, a.ends_at, a.status,
+               booked_service.name,
+               public.calendar_patient_email(a.patient_user_id, a.doctor_id)
+        FROM calendar_days cd
+        LEFT JOIN holidays h ON h.day = cd.day
+        LEFT JOIN slots s
+          ON s.starts_at >= cd.day::timestamp
+         AND s.starts_at < (cd.day + 1)::timestamp
+         AND (%s::integer IS NULL OR s.doctor_id = %s)
+        LEFT JOIN doctors d ON d.id = s.doctor_id
+        LEFT JOIN services svc ON svc.id = s.service_id
+        LEFT JOIN appointments a
+          ON a.doctor_id = s.doctor_id
+         AND a.starts_at < s.ends_at
+         AND a.ends_at > s.starts_at
+        LEFT JOIN slots booked_slot ON booked_slot.id = a.slot_id
+        LEFT JOIN services booked_service ON booked_service.id = booked_slot.service_id
+        ORDER BY cd.day, s.starts_at, d.full_name, a.starts_at, a.id
+        """,
+        (
+            start_day,
+            day_count - 1,
+            doctor_id,
+            doctor_id,
+            doctor_id,
+            doctor_id,
+            doctor_id,
+        ),
+    )
+    rows = cur.fetchall()
+    calendar_days = {}
+    for day_offset in range(day_count):
+        day = start_day + timedelta(days=day_offset)
+        calendar_days[day] = {
+            "day": day,
+            "is_day_off": False,
+            "holiday_name": None,
+            "selected_doctor_time_off": False,
+            "slots": {},
+            "appointments": {},
+        }
+
+    for row in rows:
+        day_state = calendar_days[row[0]]
+        day_state["is_day_off"] = row[1]
+        day_state["holiday_name"] = row[2]
+        day_state["selected_doctor_time_off"] = row[3]
+        if row[4] is None:
+            continue
+
+        slot = day_state["slots"].setdefault(
+            row[4],
+            {
+                "id": row[4],
+                "doctor_name": row[6],
+                "service_name": row[7],
+                "starts_at": row[8],
+                "ends_at": row[9],
+                "future": row[10],
+                "time_off": row[11],
+                "has_appointment": False,
+            },
+        )
+        if row[12] is not None:
+            slot["has_appointment"] = True
+            appointment = day_state["appointments"].setdefault(
+                row[12],
+                {
+                    "id": row[12],
+                    "doctor_name": row[6],
+                    "service_name": row[16],
+                    "patient_email": row[17],
+                    "starts_at": row[13],
+                    "ends_at": row[14],
+                    "status": row[15],
+                    "time_off": row[11],
+                },
+            )
+            appointment["time_off"] = appointment["time_off"] or row[11]
+
+    result_days = []
+    time_rows = set()
+    for day_state in calendar_days.values():
+        closed_reasons = []
+        if day_state["is_day_off"]:
+            closed_reasons.append("day off")
+        if day_state["holiday_name"]:
+            closed_reasons.append(f"holiday: {day_state['holiday_name']}")
+        if day_state["selected_doctor_time_off"]:
+            closed_reasons.append("doctor time off")
+        events_by_time = {}
+
+        def add_event(event):
+            time_label = event["starts_at"].strftime("%H:%M")
+            time_rows.add(time_label)
+            events_by_time.setdefault(time_label, []).append(event)
+
+        for appointment in day_state["appointments"].values():
+            appointment_reasons = list(closed_reasons)
+            if appointment["time_off"] and "doctor time off" not in appointment_reasons:
+                appointment_reasons.append("doctor time off")
+            appointment["closed_reasons"] = appointment_reasons
+            add_event(appointment)
+
+        if role == "doctor":
+            for slot in day_state["slots"].values():
+                if not slot["service_name"] or slot["has_appointment"]:
+                    continue
+                slot_reasons = list(closed_reasons)
+                if slot["time_off"] and "doctor time off" not in slot_reasons:
+                    slot_reasons.append("doctor time off")
+                if slot_reasons:
+                    status = "closed"
+                elif slot["future"]:
+                    status = "available"
+                else:
+                    status = "past"
+                add_event(
+                    {
+                        "doctor_name": slot["doctor_name"],
+                        "service_name": slot["service_name"],
+                        "patient_email": None,
+                        "starts_at": slot["starts_at"],
+                        "ends_at": slot["ends_at"],
+                        "status": status,
+                        "closed_reasons": slot_reasons,
+                    }
+                )
+
+        for events in events_by_time.values():
+            events.sort(key=lambda event: (event["starts_at"], event["doctor_name"] or ""))
+        result_days.append(
+            {
+                "day": day_state["day"],
+                "closed_reasons": closed_reasons,
+                "closed": bool(closed_reasons),
+                "cells": events_by_time,
+            }
+        )
+    return result_days, sorted(time_rows)
+
+
 @router.get("/registrar/appointments")
-def registrar_appointments(request: Request, day: Optional[date] = None):
+def registrar_appointments(request: Request):
     user, denied = require_user(request, "registrar")
     if denied:
         return denied
-    selected_day = day or date.today()
+
+    selected_day, view, errors = _calendar_state(request)
+    raw_doctor_id = request.query_params.get("doctor_id")
+    doctor_id = parse_strict_int(raw_doctor_id) if raw_doctor_id else None
+    if raw_doctor_id and doctor_id is None:
+        errors.append("invalid_doctor")
+
     conn = db_as(user)
     cur = conn.cursor()
-    cur.execute(
-        """
-        SELECT a.id, d.full_name, s.starts_at, s.ends_at, u.email, a.status
-        FROM appointments a
-        JOIN slots s ON s.id = a.slot_id
-        JOIN doctors d ON d.id = s.doctor_id
-        JOIN users u ON u.id = a.patient_user_id
-        WHERE s.starts_at >= %s
-          AND s.starts_at < %s + INTERVAL '1 day'
-        ORDER BY s.starts_at, d.full_name, u.email
-        """,
-        (selected_day, selected_day),
+    cur.execute("SELECT id, full_name FROM doctors ORDER BY full_name")
+    doctors = [{"id": row[0], "full_name": row[1]} for row in cur.fetchall()]
+    doctor_ids = {doctor["id"] for doctor in doctors}
+    if doctor_id not in doctor_ids:
+        if doctor_id is not None:
+            errors.append("invalid_doctor")
+        doctor_id = None
+
+    day_count = 7 if view == "week" else 1
+    start_day = (
+        selected_day - timedelta(days=selected_day.weekday())
+        if view == "week"
+        else selected_day
     )
-    appointments = [
-        {
-            "id": row[0],
-            "doctor_name": row[1],
-            "starts_at": row[2],
-            "ends_at": row[3],
-            "patient_email": row[4],
-            "status": row[5],
-        }
-        for row in cur.fetchall()
-    ]
+    calendar_days, time_rows = _load_calendar(
+        cur, start_day, day_count, doctor_id, "registrar"
+    )
     cur.close()
     conn.close()
     return templates.TemplateResponse(
-        "registrar_appointments.html",
+        "calendar.html",
         {
             "request": request,
             "role": user["role"],
-            "day": selected_day,
-            "appointments": appointments,
+            "calendar_title": "Appointments by day" if view == "day" else "Appointments by week",
+            "calendar_path": "/registrar/appointments",
+            "selected_day": selected_day,
+            "view": view,
+            "day_count": day_count,
+            "days": calendar_days,
+            "time_rows": time_rows,
+            "doctors": doctors,
+            "doctor_id": doctor_id,
+            "errors": errors,
+            "navigation": _calendar_navigation(
+                "/registrar/appointments", view, selected_day, doctor_id
+            ),
+            "requests": [],
+            "doctor": None,
         },
     )
 
 
 @router.get("/doctor/calendar")
-def doctor_calendar(request: Request, day: Optional[date] = None):
+def doctor_calendar(request: Request):
     user, denied = require_user(request, "doctor")
     if denied:
         return denied
-    selected_day = day or date.today()
+    selected_day, view, errors = _calendar_state(request)
+    doctor_id = None
     conn = db_as(user)
     cur = conn.cursor()
     cur.execute(
@@ -74,74 +316,16 @@ def doctor_calendar(request: Request, day: Optional[date] = None):
         conn.close()
         return RedirectResponse("/me?error=doctor_profile_missing", status_code=303)
 
-    cur.execute(
-        """
-        SELECT s.id, s.starts_at, s.ends_at,
-               a.id, dp.email,
-               EXISTS (
-                   SELECT 1
-                   FROM time_off t
-                   WHERE t.doctor_id = s.doctor_id
-                     AND s.starts_at::date BETWEEN t.starts_on AND t.ends_on
-               )
-               OR EXISTS (
-                   SELECT 1 FROM holidays h WHERE h.day = s.starts_at::date
-               ) AS closed
-        FROM slots s
-        LEFT JOIN appointments a
-          ON a.slot_id = s.id AND a.status = 'scheduled'
-        LEFT JOIN public.doctor_patients(%s) dp
-          ON dp.id = a.patient_user_id
-        WHERE s.doctor_id = %s
-          AND s.starts_at::date = %s
-        ORDER BY s.starts_at
-        """,
-        (user["id"], doctor[0], selected_day),
+    doctor_id = doctor[0]
+    day_count = 7 if view == "week" else 1
+    start_day = (
+        selected_day - timedelta(days=selected_day.weekday())
+        if view == "week"
+        else selected_day
     )
-    slots = [
-        {
-            "id": row[0],
-            "starts_at": row[1],
-            "ends_at": row[2],
-            "appointment_id": row[3],
-            "patient_email": row[4],
-            "closed": row[5],
-        }
-        for row in cur.fetchall()
-    ]
-    cur.execute(
-        """
-        SELECT a.id, a.starts_at, a.ends_at, dp.email
-        FROM appointments a
-        JOIN slots s ON s.id = a.slot_id
-        JOIN public.doctor_patients(%s) dp ON dp.id = a.patient_user_id
-        WHERE s.doctor_id = %s
-          AND s.starts_at::date = %s
-          AND a.status = 'cancelled'
-        ORDER BY a.starts_at
-        """,
-        (user["id"], doctor[0], selected_day),
+    calendar_days, time_rows = _load_calendar(
+        cur, start_day, day_count, doctor_id, "doctor"
     )
-    cancelled = [
-        {
-            "id": row[0],
-            "starts_at": row[1],
-            "ends_at": row[2],
-            "patient_email": row[3],
-        }
-        for row in cur.fetchall()
-    ]
-    cur.execute(
-        """
-        SELECT EXISTS (
-                   SELECT 1 FROM time_off
-                   WHERE doctor_id = %s AND %s BETWEEN starts_on AND ends_on
-               ),
-               (SELECT name FROM holidays WHERE day = %s)
-        """,
-        (doctor[0], selected_day, selected_day),
-    )
-    closure = cur.fetchone()
     cur.execute(
         """
         SELECT id, starts_on, ends_on, comment, status, created_at
@@ -164,23 +348,25 @@ def doctor_calendar(request: Request, day: Optional[date] = None):
     cur.close()
     conn.close()
 
-    closure_reasons = []
-    if closure[0]:
-        closure_reasons.append("doctor time off")
-    if closure[1]:
-        closure_reasons.append(f"holiday: {closure[1]}")
     return templates.TemplateResponse(
-        "doctor_calendar.html",
+        "calendar.html",
         {
             "request": request,
             "role": user["role"],
             "doctor": {"id": doctor[0], "full_name": doctor[1]},
-            "day": selected_day,
-            "previous_day": selected_day - timedelta(days=1),
-            "next_day": selected_day + timedelta(days=1),
-            "slots": slots,
-            "cancelled": cancelled,
-            "closure_reasons": closure_reasons,
+            "calendar_title": f"Calendar: {doctor[1]}",
+            "calendar_path": "/doctor/calendar",
+            "selected_day": selected_day,
+            "view": view,
+            "day_count": day_count,
+            "days": calendar_days,
+            "time_rows": time_rows,
+            "doctors": [],
+            "doctor_id": doctor_id,
+            "errors": errors,
+            "navigation": _calendar_navigation(
+                "/doctor/calendar", view, selected_day
+            ),
             "requests": requests,
             "request_submitted": request.query_params.get("request_submitted"),
             "error": request.query_params.get("error"),

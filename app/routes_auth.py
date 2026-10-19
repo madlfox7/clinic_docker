@@ -13,8 +13,10 @@ from db import (
     MAX_PASSWORD_LENGTH,
     db_as_guest,
     db,
+    db_as,
     load_session_user,
     pwd,
+    record_audit_event,
     templates,
     within_length,
 )
@@ -259,10 +261,106 @@ def me(request: Request):
     user, denied = require_user(request)
     if denied:
         return denied
+    upcoming_visits = []
+    if user["role"] == "patient":
+        conn = db_as(user)
+        try:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT a.id, d.full_name, svc.name, a.starts_at, a.ends_at
+                    FROM appointments a
+                    JOIN slots s ON s.id = a.slot_id
+                    JOIN doctors d ON d.id = a.doctor_id
+                    JOIN services svc ON svc.id = s.service_id
+                    WHERE a.patient_user_id = %s
+                      AND a.status = 'scheduled'
+                      AND a.starts_at > CURRENT_TIMESTAMP
+                    ORDER BY a.starts_at
+                    LIMIT 3
+                    """,
+                    (user["id"],),
+                )
+                upcoming_visits = [
+                    {
+                        "id": row[0],
+                        "doctor_name": row[1],
+                        "service_name": row[2],
+                        "starts_at": row[3],
+                        "ends_at": row[4],
+                    }
+                    for row in cur.fetchall()
+                ]
+        finally:
+            conn.close()
     return templates.TemplateResponse(
         "me.html",
-        {"request": request, "email": user["email"], "role": user["role"]},
+        {
+            "request": request,
+            "email": user["email"],
+            "role": user["role"],
+            "upcoming_visits": upcoming_visits,
+            "password_changed": request.query_params.get("password_changed"),
+            "password_error": request.query_params.get("password_error"),
+        },
     )
+
+
+@router.post("/me/password")
+def change_own_password(
+    request: Request,
+    current_password: str = Form(...),
+    new_password: str = Form(...),
+    confirm_password: str = Form(...),
+):
+    user, denied = require_user(request, "patient")
+    if denied:
+        return denied
+    if (
+        not within_length(new_password, MAX_PASSWORD_LENGTH)
+        or len(new_password) < 8
+        or new_password.strip().casefold() in DEFAULT_REGISTRATION_PASSWORDS
+    ):
+        return RedirectResponse("/me?password_error=invalid", status_code=303)
+    if new_password != confirm_password:
+        return RedirectResponse("/me?password_error=mismatch", status_code=303)
+    if not within_length(current_password, MAX_PASSWORD_LENGTH):
+        return RedirectResponse("/me?password_error=current", status_code=303)
+
+    conn = db_as(user)
+    try:
+        with conn:
+            with conn.cursor() as cur:
+                cur.execute("SELECT public.current_patient_password_hash()")
+                row = cur.fetchone()
+                if row is None or row[0] is None:
+                    return RedirectResponse(
+                        "/me?password_error=unavailable", status_code=303
+                    )
+                current_hash = row[0]
+                if not pwd.verify(current_password, current_hash):
+                    return RedirectResponse(
+                        "/me?password_error=current", status_code=303
+                    )
+                if pwd.verify(new_password, current_hash):
+                    return RedirectResponse(
+                        "/me?password_error=same", status_code=303
+                    )
+                cur.execute(
+                    "SELECT public.change_own_patient_password(%s, %s)",
+                    (current_hash, pwd.hash(new_password)),
+                )
+                changed = cur.fetchone()[0]
+                if not changed:
+                    return RedirectResponse(
+                        "/me?password_error=stale", status_code=303
+                    )
+                record_audit_event(
+                    cur, "user.password_change", "patient", user["id"]
+                )
+    finally:
+        conn.close()
+    return RedirectResponse("/me?password_changed=1", status_code=303)
 
 
 @router.get("/logout")

@@ -94,8 +94,12 @@ SET search_path = pg_catalog, public, pg_temp
 AS $function$
   SELECT EXISTS (
     SELECT 1
-    FROM public.appointments AS a
-    WHERE a.slot_id = target_slot_id
+    FROM public.slots AS s
+    JOIN public.appointments AS a
+      ON a.doctor_id = s.doctor_id
+     AND a.starts_at < s.ends_at
+     AND a.ends_at > s.starts_at
+    WHERE s.id = target_slot_id
       AND a.status = 'scheduled'
   );
 $function$;
@@ -138,10 +142,18 @@ AS $function$
       AND s.ends_at = target_ends_at
       AND s.starts_at > CURRENT_TIMESTAMP
       AND public.doctor_is_active(target_doctor_id)
+      AND EXISTS (
+        SELECT 1
+        FROM public.services AS svc
+        WHERE svc.id = s.service_id
+          AND svc.active
+      )
       AND NOT EXISTS (
         SELECT 1
         FROM public.appointments AS a
-        WHERE a.slot_id = s.id
+        WHERE a.doctor_id = s.doctor_id
+          AND a.starts_at < s.ends_at
+          AND a.ends_at > s.starts_at
           AND a.status = 'scheduled'
       )
       AND NOT EXISTS (
@@ -228,12 +240,113 @@ BEGIN
 END;
 $function$;
 
+CREATE OR REPLACE FUNCTION public.calendar_patient_email(
+  target_patient_id integer,
+  target_doctor_id integer
+)
+RETURNS text
+LANGUAGE plpgsql
+STABLE
+SECURITY DEFINER
+SET search_path = pg_catalog, public, pg_temp
+AS $function$
+DECLARE
+  actor_id integer := NULLIF(current_setting('app.user_id', true), '')::integer;
+  actor_role text := current_setting('role', true);
+  patient_email text;
+BEGIN
+  IF target_patient_id IS NULL OR target_doctor_id IS NULL THEN
+    RETURN NULL;
+  END IF;
+
+  IF actor_role = 'app_registrar' THEN
+    SELECT u.email INTO patient_email
+    FROM public.users AS u
+    WHERE u.id = target_patient_id AND u.role = 'patient';
+    RETURN patient_email;
+  END IF;
+
+  IF actor_role = 'app_doctor'
+     AND EXISTS (
+       SELECT 1
+       FROM public.doctors AS d
+       WHERE d.id = target_doctor_id AND d.user_id = actor_id
+     ) THEN
+    SELECT dp.email INTO patient_email
+    FROM public.doctor_patients(actor_id) AS dp
+    WHERE dp.id = target_patient_id;
+  END IF;
+
+  RETURN patient_email;
+END;
+$function$;
+
+CREATE OR REPLACE FUNCTION public.current_patient_password_hash()
+RETURNS text
+LANGUAGE plpgsql
+STABLE
+SECURITY DEFINER
+SET search_path = pg_catalog, public, pg_temp
+AS $function$
+DECLARE
+  actor_id integer := NULLIF(current_setting('app.user_id', true), '')::integer;
+  stored_hash text;
+BEGIN
+  IF current_setting('role', true) IS DISTINCT FROM 'app_patient'
+     OR actor_id IS NULL THEN
+    RAISE EXCEPTION 'invalid patient password context'
+      USING ERRCODE = '42501';
+  END IF;
+
+  SELECT password_hash INTO stored_hash
+  FROM public.users
+  WHERE id = actor_id AND role = 'patient' AND NOT blocked;
+
+  RETURN stored_hash;
+END;
+$function$;
+
+CREATE OR REPLACE FUNCTION public.change_own_patient_password(
+  expected_password_hash text,
+  replacement_hash text
+)
+RETURNS boolean
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = pg_catalog, public, pg_temp
+AS $function$
+DECLARE
+  actor_id integer := NULLIF(current_setting('app.user_id', true), '')::integer;
+BEGIN
+  IF current_setting('role', true) IS DISTINCT FROM 'app_patient'
+     OR actor_id IS NULL
+     OR expected_password_hash IS NULL
+     OR replacement_hash IS NULL
+     OR length(replacement_hash) = 0 THEN
+    RAISE EXCEPTION 'invalid patient password-change context'
+      USING ERRCODE = '42501';
+  END IF;
+
+  UPDATE public.users
+  SET password_hash = replacement_hash
+  WHERE id = actor_id
+    AND role = 'patient'
+    AND NOT blocked
+    AND password_hash = expected_password_hash;
+
+  RETURN FOUND;
+END;
+$function$;
+
 REVOKE ALL ON FUNCTION public.current_patient_is_active() FROM PUBLIC;
 REVOKE ALL ON FUNCTION public.scheduled_slot_is_taken(integer) FROM PUBLIC;
 REVOKE ALL ON FUNCTION public.doctor_is_active(integer) FROM PUBLIC;
 REVOKE ALL ON FUNCTION public.is_valid_free_slot(integer, integer, timestamp, timestamp) FROM PUBLIC;
 REVOKE ALL ON FUNCTION public.record_audit_event(text, text, integer) FROM PUBLIC;
 REVOKE ALL ON FUNCTION public.admin_reset_user_password(integer, text) FROM PUBLIC;
+REVOKE ALL ON FUNCTION public.calendar_patient_email(integer, integer) FROM PUBLIC;
+REVOKE ALL ON FUNCTION public.current_patient_password_hash() FROM PUBLIC;
+REVOKE ALL ON FUNCTION public.change_own_patient_password(text, text) FROM PUBLIC;
 GRANT EXECUTE ON FUNCTION public.current_patient_is_active() TO app_patient;
 GRANT EXECUTE ON FUNCTION public.scheduled_slot_is_taken(integer)
   TO app_patient, app_registrar, app_admin;
@@ -245,11 +358,21 @@ GRANT EXECUTE ON FUNCTION public.record_audit_event(text, text, integer)
   TO app_patient, app_doctor, app_registrar, app_admin;
 GRANT EXECUTE ON FUNCTION public.admin_reset_user_password(integer, text)
   TO app_admin;
+GRANT EXECUTE ON FUNCTION public.calendar_patient_email(integer, integer)
+  TO app_doctor, app_registrar;
+GRANT EXECUTE ON FUNCTION public.current_patient_password_hash()
+  TO app_patient;
+GRANT EXECUTE ON FUNCTION public.change_own_patient_password(text, text)
+  TO app_patient;
 
 GRANT USAGE ON SCHEMA public
   TO app_guest, app_patient, app_doctor, app_registrar, app_admin;
 
 GRANT SELECT ON public.doctors TO app_guest, app_patient, app_doctor, app_registrar, app_admin;
+GRANT SELECT ON public.services
+  TO app_guest, app_patient, app_doctor, app_registrar, app_admin;
+GRANT INSERT, UPDATE, DELETE ON public.services TO app_admin;
+GRANT USAGE, SELECT ON SEQUENCE public.services_id_seq TO app_admin;
 GRANT INSERT (user_id, full_name, specialty, experience_years),
   UPDATE (full_name, specialty, experience_years)
   ON public.doctors TO app_admin;
@@ -292,7 +415,8 @@ GRANT SELECT ON public.work_hours, public.time_off, public.holidays TO app_admin
 GRANT INSERT, UPDATE ON public.work_hours TO app_admin;
 GRANT INSERT ON public.time_off TO app_admin;
 GRANT INSERT, UPDATE ON public.holidays TO app_admin;
-GRANT INSERT (doctor_id, starts_at, ends_at), DELETE ON public.slots TO app_admin;
+GRANT INSERT (doctor_id, service_id, starts_at, ends_at), DELETE
+  ON public.slots TO app_admin;
 GRANT USAGE, SELECT ON SEQUENCE public.slots_id_seq, public.work_hours_id_seq,
   public.time_off_id_seq TO app_admin;
 
@@ -551,6 +675,54 @@ CREATE POLICY clinic_settings_admin_update ON public.clinic_settings
   USING (id = 1)
   WITH CHECK (id = 1);
 
+DROP POLICY IF EXISTS services_active_select ON public.services;
+DROP POLICY IF EXISTS services_appointment_history_select ON public.services;
+DROP POLICY IF EXISTS services_admin_select ON public.services;
+DROP POLICY IF EXISTS services_admin_insert ON public.services;
+DROP POLICY IF EXISTS services_admin_update ON public.services;
+DROP POLICY IF EXISTS services_admin_delete ON public.services;
+CREATE POLICY services_active_select ON public.services
+  FOR SELECT TO app_guest, app_patient, app_doctor, app_registrar
+  USING (active);
+CREATE POLICY services_appointment_history_select ON public.services
+  FOR SELECT TO app_patient, app_doctor, app_registrar
+  USING (
+    EXISTS (
+      SELECT 1
+      FROM public.slots s
+      JOIN public.appointments a ON a.slot_id = s.id
+      WHERE s.service_id = services.id
+        AND (
+          (
+            current_setting('role', true) = 'app_patient'
+            AND a.patient_user_id =
+                current_setting('app.user_id', true)::integer
+          )
+          OR (
+            current_setting('role', true) = 'app_doctor'
+            AND a.doctor_id IN (
+              SELECT d.id FROM public.doctors d
+              WHERE d.user_id = current_setting('app.user_id', true)::integer
+            )
+          )
+          OR current_setting('role', true) = 'app_registrar'
+        )
+    )
+  );
+CREATE POLICY services_admin_select ON public.services
+  FOR SELECT TO app_admin USING (true);
+CREATE POLICY services_admin_insert ON public.services
+  FOR INSERT TO app_admin WITH CHECK (true);
+CREATE POLICY services_admin_update ON public.services
+  FOR UPDATE TO app_admin USING (true) WITH CHECK (true);
+CREATE POLICY services_admin_delete ON public.services
+  FOR DELETE TO app_admin
+  USING (
+    NOT EXISTS (
+      SELECT 1 FROM public.slots s WHERE s.service_id = services.id
+    )
+  );
+
 DROP POLICY IF EXISTS work_hours_patient_select ON public.work_hours;
 DROP POLICY IF EXISTS work_hours_registrar_select ON public.work_hours;
 DROP POLICY IF EXISTS work_hours_doctor_select ON public.work_hours;
@@ -658,6 +830,7 @@ CREATE POLICY time_off_requests_admin_update ON public.time_off_requests
 ALTER TABLE public.slots ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.users ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.clinic_settings ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.services ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.work_hours ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.time_off ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.holidays ENABLE ROW LEVEL SECURITY;

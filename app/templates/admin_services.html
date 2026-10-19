@@ -1,0 +1,60 @@
+{% extends "base.html" %}
+{% block content %}
+<h1>Manage services</h1>
+{% if created == "1" %}<p>Service created. Generate slots to make it bookable.</p>{% endif %}
+{% if updated == "1" %}<p>Service details updated. Existing slots keep their saved times; new durations apply to future slot generation.</p>{% endif %}
+{% if deleted == "1" %}<p>Unused service deleted.</p>{% endif %}
+{% if activation == "activated" %}<p>Service activated. Generate slots to make it bookable.</p>
+{% elif activation == "deactivated" %}<p>Service deactivated; its existing appointments and history are preserved.</p>{% endif %}
+{% if error == "invalid_service" %}<p>Enter a name, a positive duration, and a non-negative buffer. Their total must not exceed 1440 minutes.</p>
+{% elif error == "name_exists" %}<p>A service with this name already exists.</p>
+{% elif error == "service_not_found" %}<p>Service not found.</p>
+{% elif error == "service_in_use" %}<p>Only services with no generated slots can be deleted. Deactivate this service to stop future bookings.</p>{% endif %}
+
+<section>
+  <h2>Add service</h2>
+  <form method="post" action="/admin/services">
+    <label>Name <input name="name" maxlength="120" required></label>
+    <label>Duration (minutes) <input name="duration_minutes" type="number" min="1" max="1440" required></label>
+    <label>Buffer after service (minutes) <input name="buffer_minutes" type="number" min="0" max="1440" value="0" required></label>
+    <button type="submit">Create service</button>
+  </form>
+</section>
+
+<p>All active services are available for every active doctor. Deactivate a service to stop new bookings; existing slots and visits are retained.</p>
+{% for service in services %}
+  <section>
+    <h2>{{ service.name }} — {{ "Active" if service.active else "Inactive" }}</h2>
+    <p>{{ service.slot_count }} generated slot(s)</p>
+    <form method="post" action="/admin/services/{{ service.id }}">
+      <label>Name <input name="name" value="{{ service.name }}" maxlength="120" required></label>
+      <label>Duration (minutes)
+        <input name="duration_minutes" type="number" min="1" max="1440" value="{{ service.duration_minutes }}" required>
+      </label>
+      <label>Buffer after service (minutes)
+        <input name="buffer_minutes" type="number" min="0" max="1440" value="{{ service.buffer_minutes }}" required>
+      </label>
+      <button type="submit">Save service</button>
+    </form>
+    {% if service.active %}
+      <form method="post" action="/admin/services/{{ service.id }}/deactivate">
+        <button type="submit">Deactivate service</button>
+      </form>
+    {% else %}
+      <form method="post" action="/admin/services/{{ service.id }}/activate">
+        <button type="submit">Activate service</button>
+      </form>
+    {% endif %}
+    {% if service.slot_count == 0 %}
+      <form method="post" action="/admin/services/{{ service.id }}/delete"
+        onsubmit="return confirm('Permanently delete this unused service?')">
+        <button type="submit">Delete unused service</button>
+      </form>
+    {% else %}
+      <p>Cannot delete a service with generated slots; deactivate it instead.</p>
+    {% endif %}
+  </section>
+{% else %}
+  <p>No services configured.</p>
+{% endfor %}
+{% endblock %}

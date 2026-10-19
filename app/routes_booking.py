@@ -1,4 +1,6 @@
 import psycopg2
+from typing import Optional
+
 from fastapi import APIRouter, Form, Request
 from fastapi.responses import RedirectResponse
 
@@ -21,14 +23,17 @@ from routes_auth import require_user
 router = APIRouter()
 
 
-def _overlap_redirect(doctor_id, patient_id, conflict_id):
+def _overlap_redirect(doctor_id, patient_id, conflict_id, service_id):
     if conflict_id:
         return RedirectResponse(
-            f"/doctors/{doctor_id}/slots?error=overlap&conflict_appointment_id={conflict_id}&conflict_patient_id={patient_id}",
+            f"/doctors/{doctor_id}/slots?error=overlap"
+            f"&conflict_appointment_id={conflict_id}"
+            f"&conflict_patient_id={patient_id}&service_id={service_id}",
             status_code=303,
         )
     return RedirectResponse(
-        f"/doctors/{doctor_id}/slots?error=overlap&conflict_patient_id={patient_id}",
+        f"/doctors/{doctor_id}/slots?error=overlap"
+        f"&conflict_patient_id={patient_id}&service_id={service_id}",
         status_code=303,
     )
 
@@ -49,6 +54,34 @@ def doctor_slots(request: Request, doctor_id: str):
     conflict = None
     conn = db_as(user)
     cur = conn.cursor()
+    cur.execute(
+        """
+        SELECT id, name, duration_minutes, buffer_minutes
+        FROM services
+        WHERE active
+        ORDER BY name, id
+        """
+    )
+    services = [
+        {
+            "id": row[0],
+            "name": row[1],
+            "duration_minutes": row[2],
+            "buffer_minutes": row[3],
+        }
+        for row in cur.fetchall()
+    ]
+    raw_service_id = request.query_params.get("service_id")
+    requested_service_id = (
+        parse_strict_int(raw_service_id, min_value=1)
+        if raw_service_id is not None
+        else (services[0]["id"] if services else None)
+    )
+    selected_service = next(
+        (item for item in services if item["id"] == requested_service_id),
+        None,
+    )
+    service_error = raw_service_id is not None and selected_service is None
     cur.execute("SELECT id, full_name FROM doctors WHERE id=%s", (doctor_id,))
     doc = cur.fetchone()
     cur.execute("SELECT public.doctor_is_active(%s)", (doctor_id,))
@@ -101,42 +134,53 @@ def doctor_slots(request: Request, doctor_id: str):
                 "starts_at": row[1],
                 "ends_at": row[2],
             }
-    cur.execute(
-        """
-        SELECT s.id, s.starts_at, s.ends_at,
-               public.scheduled_slot_is_taken(s.id) AS taken,
-             EXISTS(
-                 SELECT 1
-                 FROM appointments a
-                 WHERE a.slot_id = s.id
-                AND a.status = 'scheduled'
-                AND a.patient_user_id = %s
-                             ) AS mine,
-                             (
-                                     SELECT a.id
-                                     FROM appointments a
-                                     WHERE a.slot_id = s.id
-                                         AND a.status = 'scheduled'
-                                     LIMIT 1
-                             ) AS appointment_id
-                               , (
-                                   EXISTS (
-                                       SELECT 1 FROM time_off t
-                                       WHERE t.doctor_id=s.doctor_id
-                                         AND s.starts_at::date BETWEEN t.starts_on AND t.ends_on
-                                   )
-                                   OR EXISTS (
-                                       SELECT 1 FROM holidays h WHERE h.day=s.starts_at::date
-                                   )
-                               ) AS closed
-                               , s.starts_at <= CURRENT_TIMESTAMP AS is_past
-        FROM slots s
-        WHERE s.doctor_id=%s
-        ORDER BY s.starts_at
-        """,
-         (user["id"], doctor_id),
-    )
-    rows = cur.fetchall()
+    if selected_service is None:
+        rows = []
+    else:
+        cur.execute(
+            """
+            SELECT s.id, s.starts_at, s.ends_at, svc.name,
+                   svc.duration_minutes, svc.buffer_minutes,
+                   public.scheduled_slot_is_taken(s.id) AS taken,
+                   EXISTS (
+                       SELECT 1
+                       FROM appointments a
+                       WHERE a.doctor_id = s.doctor_id
+                         AND a.status = 'scheduled'
+                         AND a.patient_user_id = %s
+                         AND a.starts_at < s.ends_at
+                         AND a.ends_at > s.starts_at
+                   ) AS mine,
+                   (
+                       SELECT a.id
+                       FROM appointments a
+                       WHERE a.doctor_id = s.doctor_id
+                         AND a.status = 'scheduled'
+                         AND a.starts_at < s.ends_at
+                         AND a.ends_at > s.starts_at
+                       ORDER BY a.starts_at
+                       LIMIT 1
+                   ) AS appointment_id,
+                   (
+                       EXISTS (
+                           SELECT 1 FROM time_off t
+                           WHERE t.doctor_id = s.doctor_id
+                             AND s.starts_at::date BETWEEN t.starts_on AND t.ends_on
+                       )
+                       OR EXISTS (
+                           SELECT 1 FROM holidays h WHERE h.day = s.starts_at::date
+                       )
+                   ) AS closed,
+                   s.starts_at <= CURRENT_TIMESTAMP AS is_past
+            FROM slots s
+            JOIN services svc ON svc.id = s.service_id AND svc.active
+            WHERE s.doctor_id = %s
+              AND s.service_id = %s
+            ORDER BY s.starts_at
+            """,
+            (user["id"], doctor_id, selected_service["id"]),
+        )
+        rows = cur.fetchall()
     cur.close()
     conn.close()
     if not doc:
@@ -147,11 +191,14 @@ def doctor_slots(request: Request, doctor_id: str):
             "id": row[0],
             "starts_at": row[1],
             "ends_at": row[2],
-            "taken": row[3],
-            "mine": row[4],
-            "appointment_id": row[5],
-            "closed": row[6],
-            "past": row[7],
+            "service_name": row[3],
+            "duration_minutes": row[4],
+            "buffer_minutes": row[5],
+            "taken": row[6],
+            "mine": row[7],
+            "appointment_id": row[8],
+            "closed": row[9],
+            "past": row[10],
         }
         slots_by_day.setdefault(row[1].date(), []).append(slot)
     days = [
@@ -167,6 +214,9 @@ def doctor_slots(request: Request, doctor_id: str):
             "request": request,
             "doctor": {"id": doc[0], "full_name": doc[1]},
             "days": days,
+            "services": services,
+            "selected_service": selected_service,
+            "service_error": service_error,
             "error": error,
             "booked": booked,
             "cancelled": cancelled,
@@ -178,7 +228,12 @@ def doctor_slots(request: Request, doctor_id: str):
 
 
 @router.post("/slots/{slot_id}/book")
-def book_slot(request: Request, slot_id: str, patient_email: str = Form(None)):
+def book_slot(
+    request: Request,
+    slot_id: str,
+    patient_email: str = Form(None),
+    service_id: Optional[str] = Form(None),
+):
     user, denied = require_user(request, "patient", "registrar")
     if denied:
         return denied
@@ -187,13 +242,23 @@ def book_slot(request: Request, slot_id: str, patient_email: str = Form(None)):
     slot_id = parse_strict_int(slot_id, min_value=1)
     if slot_id is None:
         return RedirectResponse("/doctors", status_code=303)
+    raw_service_id = service_id
+    requested_service_id = (
+        parse_strict_int(raw_service_id, min_value=1)
+        if raw_service_id is not None
+        else None
+    )
     conn = db_as(user)
     cur = conn.cursor()
     cur.execute(
         """
-        SELECT s.doctor_id, s.starts_at, s.ends_at,
+        SELECT s.doctor_id, s.service_id, s.starts_at, s.ends_at,
                s.starts_at <= CURRENT_TIMESTAMP AS is_past,
                public.doctor_is_active(s.doctor_id) AS doctor_active,
+               EXISTS (
+                   SELECT 1 FROM services svc
+                   WHERE svc.id = s.service_id AND svc.active
+               ) AS service_active,
                EXISTS (
                    SELECT 1 FROM time_off t
                    WHERE t.doctor_id=s.doctor_id
@@ -211,19 +276,53 @@ def book_slot(request: Request, slot_id: str, patient_email: str = Form(None)):
         cur.close()
         conn.close()
         return RedirectResponse("/doctors", status_code=303)
-    doctor_id, starts_at, ends_at, is_past, doctor_active, is_closed = slot
+    (
+        doctor_id,
+        service_id,
+        starts_at,
+        ends_at,
+        is_past,
+        doctor_active,
+        service_active,
+        is_closed,
+    ) = slot
+    if raw_service_id is not None and requested_service_id != service_id:
+        cur.close()
+        conn.close()
+        return RedirectResponse(
+            f"/doctors/{doctor_id}/slots?error=service_mismatch"
+            f"&service_id={service_id}",
+            status_code=303,
+        )
     if not doctor_active:
         cur.close()
         conn.close()
-        return RedirectResponse(f"/doctors/{doctor_id}/slots?error=unavailable", status_code=303)
+        return RedirectResponse(
+            f"/doctors/{doctor_id}/slots?error=unavailable&service_id={service_id}",
+            status_code=303,
+        )
+    if not service_active:
+        cur.close()
+        conn.close()
+        return RedirectResponse(
+            f"/doctors/{doctor_id}/slots?error=service_unavailable"
+            f"&service_id={service_id}",
+            status_code=303,
+        )
     if is_past:
         cur.close()
         conn.close()
-        return RedirectResponse(f"/doctors/{doctor_id}/slots?error=past", status_code=303)
+        return RedirectResponse(
+            f"/doctors/{doctor_id}/slots?error=past&service_id={service_id}",
+            status_code=303,
+        )
     if is_closed:
         cur.close()
         conn.close()
-        return RedirectResponse(f"/doctors/{doctor_id}/slots?error=closed", status_code=303)
+        return RedirectResponse(
+            f"/doctors/{doctor_id}/slots?error=closed&service_id={service_id}",
+            status_code=303,
+        )
     if role == "patient":
         target_email = email
     else:
@@ -232,13 +331,17 @@ def book_slot(request: Request, slot_id: str, patient_email: str = Form(None)):
             cur.close()
             conn.close()
             return RedirectResponse(
-                f"/doctors/{doctor_id}/slots?error=patient_required", status_code=303
+                f"/doctors/{doctor_id}/slots?error=patient_required"
+                f"&service_id={service_id}",
+                status_code=303,
             )
         if not within_length(target_email, MAX_EMAIL_LENGTH):
             cur.close()
             conn.close()
             return RedirectResponse(
-                f"/doctors/{doctor_id}/slots?error=patient_not_found", status_code=303
+                f"/doctors/{doctor_id}/slots?error=patient_not_found"
+                f"&service_id={service_id}",
+                status_code=303,
             )
     if role == "patient":
         patient_id = user["id"]
@@ -252,25 +355,30 @@ def book_slot(request: Request, slot_id: str, patient_email: str = Form(None)):
             cur.close()
             conn.close()
             return RedirectResponse(
-                f"/doctors/{doctor_id}/slots?error=patient_not_found", status_code=303
+                f"/doctors/{doctor_id}/slots?error=patient_not_found"
+                f"&service_id={service_id}",
+                status_code=303,
             )
         patient_id = target[0]
         if target[2]:
             cur.close()
             conn.close()
             return RedirectResponse(
-                f"/doctors/{doctor_id}/slots?error=patient_blocked", status_code=303
+                f"/doctors/{doctor_id}/slots?error=patient_blocked"
+                f"&service_id={service_id}",
+                status_code=303,
             )
     cur.execute("SELECT pg_advisory_xact_lock(%s)", (patient_id,))
 
-    cur.execute(
-        "SELECT 1 FROM appointments WHERE slot_id=%s AND status='scheduled'",
-        (slot_id,),
-    )
-    if cur.fetchone():
+    cur.execute("SELECT public.scheduled_slot_is_taken(%s)", (slot_id,))
+    if cur.fetchone()[0]:
         cur.close()
         conn.close()
-        return RedirectResponse(f"/doctors/{doctor_id}/slots?error=unavailable", status_code=303)
+        return RedirectResponse(
+            f"/doctors/{doctor_id}/slots?error=unavailable"
+            f"&service_id={service_id}",
+            status_code=303,
+        )
 
     cur.execute(
         """
@@ -288,7 +396,7 @@ def book_slot(request: Request, slot_id: str, patient_email: str = Form(None)):
     if conflict_row:
         cur.close()
         conn.close()
-        return _overlap_redirect(doctor_id, patient_id, conflict_row[0])
+        return _overlap_redirect(doctor_id, patient_id, conflict_row[0], service_id)
 
     try:
         cur.execute(
@@ -310,7 +418,9 @@ def book_slot(request: Request, slot_id: str, patient_email: str = Form(None)):
             cur.close()
             conn.close()
             return RedirectResponse(
-                f"/doctors/{doctor_id}/slots?error=unavailable", status_code=303
+                f"/doctors/{doctor_id}/slots?error=unavailable"
+                f"&service_id={service_id}",
+                status_code=303,
             )
         record_audit_event(cur, "appointment.book", "appointment", appointment_row[0])
         conn.commit()
@@ -318,7 +428,11 @@ def book_slot(request: Request, slot_id: str, patient_email: str = Form(None)):
         conn.rollback()
         cur.close()
         conn.close()
-        return RedirectResponse(f"/doctors/{doctor_id}/slots?error=unavailable", status_code=303)
+        return RedirectResponse(
+            f"/doctors/{doctor_id}/slots?error=unavailable"
+            f"&service_id={service_id}",
+            status_code=303,
+        )
     except psycopg2.errors.ExclusionViolation as exc:
         conn.rollback()
         set_db_context(conn, user)
@@ -345,18 +459,31 @@ def book_slot(request: Request, slot_id: str, patient_email: str = Form(None)):
         cur.close()
         conn.close()
         if constraint == "appointments_no_overlap_per_patient":
-            return _overlap_redirect(doctor_id, patient_id, conflict_id)
-        return RedirectResponse(f"/doctors/{doctor_id}/slots?error=unavailable", status_code=303)
+            return _overlap_redirect(
+                doctor_id, patient_id, conflict_id, service_id
+            )
+        return RedirectResponse(
+            f"/doctors/{doctor_id}/slots?error=unavailable"
+            f"&service_id={service_id}",
+            status_code=303,
+        )
     except Exception:
         log.exception("could not book slot %s", slot_id)
         conn.rollback()
         cur.close()
         conn.close()
-        return RedirectResponse(f"/doctors/{doctor_id}/slots?error=could_not_book", status_code=303)
+        return RedirectResponse(
+            f"/doctors/{doctor_id}/slots?error=could_not_book"
+            f"&service_id={service_id}",
+            status_code=303,
+        )
     cur.close()
     conn.close()
     if role == "registrar":
-        return RedirectResponse(f"/doctors/{doctor_id}/slots?booked=1", status_code=303)
+        return RedirectResponse(
+            f"/doctors/{doctor_id}/slots?booked=1&service_id={service_id}",
+            status_code=303,
+        )
     return RedirectResponse("/my", status_code=303)
 
 
@@ -375,7 +502,7 @@ def cancel_appointment(request: Request, appointment_id: str):
     cur = conn.cursor()
     cur.execute(
         """
-         SELECT s.doctor_id, a.patient_user_id,
+         SELECT s.doctor_id, s.service_id, a.patient_user_id,
               s.starts_at > CURRENT_TIMESTAMP AS is_future, a.status
         FROM appointments a
         JOIN slots s ON s.id=a.slot_id
@@ -391,7 +518,7 @@ def cancel_appointment(request: Request, appointment_id: str):
             return RedirectResponse("/my?cancel_error=1", status_code=303)
         return RedirectResponse("/doctors", status_code=303)
 
-    doctor_id, patient_user_id, is_future, appointment_status = appointment
+    doctor_id, service_id, patient_user_id, is_future, appointment_status = appointment
     if appointment_status != "scheduled":
         cur.close()
         conn.close()
@@ -399,7 +526,8 @@ def cancel_appointment(request: Request, appointment_id: str):
             return RedirectResponse("/my?cancel_error=1", status_code=303)
         if role == "registrar":
             return RedirectResponse(
-                f"/doctors/{doctor_id}/slots?cancel_error=1", status_code=303
+                f"/doctors/{doctor_id}/slots?cancel_error=1&service_id={service_id}",
+                status_code=303,
             )
         return RedirectResponse("/doctors", status_code=303)
 
@@ -407,7 +535,7 @@ def cancel_appointment(request: Request, appointment_id: str):
         cur.close()
         conn.close()
         return RedirectResponse(
-            f"/doctors/{doctor_id}/slots?cancel_error=past",
+            f"/doctors/{doctor_id}/slots?cancel_error=past&service_id={service_id}",
             status_code=303,
         )
 
@@ -466,8 +594,14 @@ def cancel_appointment(request: Request, appointment_id: str):
     if role == "admin":
         return RedirectResponse("/admin/schedule?visit_cancelled=1", status_code=303)
     if updated:
-        return RedirectResponse(f"/doctors/{doctor_id}/slots?cancelled=1", status_code=303)
-    return RedirectResponse(f"/doctors/{doctor_id}/slots?cancel_error=1", status_code=303)
+        return RedirectResponse(
+            f"/doctors/{doctor_id}/slots?cancelled=1&service_id={service_id}",
+            status_code=303,
+        )
+    return RedirectResponse(
+        f"/doctors/{doctor_id}/slots?cancel_error=1&service_id={service_id}",
+        status_code=303,
+    )
 
 
 @router.get("/my")
@@ -482,11 +616,12 @@ def my_appointments(request: Request):
     cur = conn.cursor()
     cur.execute(
         """
-         SELECT a.id, d.full_name, s.starts_at, s.ends_at, a.status,
+         SELECT a.id, d.full_name, svc.name, s.starts_at, s.ends_at, a.status,
               s.starts_at > CURRENT_TIMESTAMP AS cancellable
          FROM appointments a
          JOIN slots s ON s.id=a.slot_id
          JOIN doctors d ON d.id=s.doctor_id
+          JOIN services svc ON svc.id=s.service_id
          WHERE a.patient_user_id=%s
          ORDER BY s.starts_at
          """,
@@ -496,10 +631,11 @@ def my_appointments(request: Request):
         {
             "id": r[0],
             "doctor_name": r[1],
-            "starts_at": r[2],
-            "ends_at": r[3],
-            "status": r[4],
-            "cancellable": r[5],
+            "service_name": r[2],
+            "starts_at": r[3],
+            "ends_at": r[4],
+            "status": r[5],
+            "cancellable": r[6],
         }
         for r in cur.fetchall()
     ]
@@ -527,9 +663,10 @@ def doctor_appointments(request: Request):
     cur = conn.cursor()
     cur.execute(
         """
-        SELECT a.id, dp.email, s.starts_at, s.ends_at, a.status, dp.blocked
+        SELECT a.id, dp.email, svc.name, s.starts_at, s.ends_at, a.status, dp.blocked
         FROM appointments a
         JOIN slots s ON s.id=a.slot_id
+        JOIN services svc ON svc.id=s.service_id
         JOIN doctors d ON d.id=s.doctor_id
         JOIN public.doctor_patients(%s) dp ON dp.id=a.patient_user_id
         WHERE d.user_id=%s
@@ -541,10 +678,11 @@ def doctor_appointments(request: Request):
         {
             "id": r[0],
             "patient_email": r[1],
-            "starts_at": r[2],
-            "ends_at": r[3],
-            "status": r[4],
-            "patient_blocked": r[5],
+            "service_name": r[2],
+            "starts_at": r[3],
+            "ends_at": r[4],
+            "status": r[5],
+            "patient_blocked": r[6],
         }
         for r in cur.fetchall()
     ]
