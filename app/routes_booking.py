@@ -49,6 +49,7 @@ def doctor_slots(request: Request, doctor_id: str):
         return RedirectResponse("/doctors", status_code=303)
     error = request.query_params.get("error")
     booked = request.query_params.get("booked")
+    booking_confirmation = None
     cancelled = request.query_params.get("cancelled")
     cancel_error = request.query_params.get("cancel_error")
     conflict = None
@@ -133,6 +134,39 @@ def doctor_slots(request: Request, doctor_id: str):
                 "doctor_name": row[0],
                 "starts_at": row[1],
                 "ends_at": row[2],
+            }
+    raw_confirmation_id = request.query_params.get("appointment_id")
+    confirmation_id = (
+        parse_strict_int(raw_confirmation_id, min_value=1)
+        if raw_confirmation_id is not None
+        else None
+    )
+    if role == "registrar" and booked == "1" and confirmation_id is not None:
+        cur.execute(
+            """
+            SELECT d.full_name, u.email, svc.name, svc.duration_minutes,
+                   svc.buffer_minutes, a.starts_at, a.ends_at
+            FROM appointments a
+            JOIN doctors d ON d.id = a.doctor_id
+            JOIN users u ON u.id = a.patient_user_id
+            JOIN slots s ON s.id = a.slot_id
+            JOIN services svc ON svc.id = s.service_id
+            WHERE a.id = %s
+              AND a.doctor_id = %s
+              AND a.status = 'scheduled'
+            """,
+            (confirmation_id, doctor_id),
+        )
+        row = cur.fetchone()
+        if row:
+            booking_confirmation = {
+                "doctor_name": row[0],
+                "patient_email": row[1],
+                "service_name": row[2],
+                "duration_minutes": row[3],
+                "buffer_minutes": row[4],
+                "starts_at": row[5],
+                "ends_at": row[6],
             }
     if selected_service is None:
         rows = []
@@ -219,6 +253,7 @@ def doctor_slots(request: Request, doctor_id: str):
             "service_error": service_error,
             "error": error,
             "booked": booked,
+            "booking_confirmation": booking_confirmation,
             "cancelled": cancelled,
             "cancel_error": cancel_error,
             "conflict": conflict,
@@ -481,10 +516,14 @@ def book_slot(
     conn.close()
     if role == "registrar":
         return RedirectResponse(
-            f"/doctors/{doctor_id}/slots?booked=1&service_id={service_id}",
+            f"/doctors/{doctor_id}/slots?booked=1&service_id={service_id}"
+            f"&appointment_id={appointment_row[0]}",
             status_code=303,
         )
-    return RedirectResponse("/my", status_code=303)
+    return RedirectResponse(
+        f"/my?booked=1&appointment_id={appointment_row[0]}",
+        status_code=303,
+    )
 
 
 @router.post("/appointments/{appointment_id}/cancel")
@@ -617,13 +656,28 @@ def my_appointments(request: Request):
     cur.execute(
         """
          SELECT a.id, d.full_name, svc.name, s.starts_at, s.ends_at, a.status,
-              s.starts_at > CURRENT_TIMESTAMP AS cancellable
+              s.starts_at > CURRENT_TIMESTAMP AS cancellable,
+              svc.duration_minutes, svc.buffer_minutes
          FROM appointments a
          JOIN slots s ON s.id=a.slot_id
          JOIN doctors d ON d.id=s.doctor_id
           JOIN services svc ON svc.id=s.service_id
          WHERE a.patient_user_id=%s
-         ORDER BY s.starts_at
+         ORDER BY
+              CASE
+                WHEN a.status = 'scheduled'
+                 AND s.starts_at > CURRENT_TIMESTAMP THEN 0
+                ELSE 1
+              END,
+              CASE
+                WHEN a.status = 'scheduled'
+                 AND s.starts_at > CURRENT_TIMESTAMP THEN s.starts_at
+              END ASC,
+              CASE
+                WHEN a.status != 'scheduled'
+                  OR s.starts_at <= CURRENT_TIMESTAMP THEN s.starts_at
+              END DESC,
+              a.id DESC
          """,
          (user["id"],),
     )
@@ -636,9 +690,27 @@ def my_appointments(request: Request):
             "ends_at": r[4],
             "status": r[5],
             "cancellable": r[6],
+            "duration_minutes": r[7],
+            "buffer_minutes": r[8],
         }
         for r in cur.fetchall()
     ]
+    booking_confirmation = None
+    raw_confirmation_id = request.query_params.get("appointment_id")
+    confirmation_id = (
+        parse_strict_int(raw_confirmation_id, min_value=1)
+        if raw_confirmation_id is not None
+        else None
+    )
+    if request.query_params.get("booked") == "1" and confirmation_id is not None:
+        booking_confirmation = next(
+            (
+                item
+                for item in items
+                if item["id"] == confirmation_id and item["status"] == "scheduled"
+            ),
+            None,
+        )
     cur.close()
     conn.close()
     return templates.TemplateResponse(
@@ -647,6 +719,7 @@ def my_appointments(request: Request):
             "request": request,
             "items": items,
             "role": role,
+            "booking_confirmation": booking_confirmation,
             "cancelled": cancelled,
             "cancel_error": cancel_error,
         },

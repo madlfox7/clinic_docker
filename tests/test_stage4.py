@@ -139,6 +139,10 @@ def test_book_cancel_frees_slot_for_other_patient():
 
 		booked = pat.post(f"/slots/{slot_id}/book")
 		assert booked.status_code == 200
+		assert "Appointment confirmed" in booked.text
+		assert "Appointment booked successfully." in booked.text
+		assert "Service duration" in booked.text
+		assert re.search(r"\d+ min", booked.text)
 		assert "My appointments" in booked.text or "scheduled" in booked.text
 
 		blocked = pat2.post(f"/slots/{slot_id}/book")
@@ -148,6 +152,12 @@ def test_book_cancel_frees_slot_for_other_patient():
 		new_ids = set(appointment_ids(mine.text)) - existing_ids
 		assert new_ids, "cancel button missing after book"
 		appointment_id = new_ids.pop()
+		assert "min service" in mine.text
+		assert "return confirm('Cancel this appointment?')" in mine.text
+		other_confirmation = pat2.get(
+			f"/my?booked=1&appointment_id={appointment_id}"
+		)
+		assert "Appointment confirmed" not in other_confirmation.text
 		pat.post(f"/appointments/{appointment_id}/cancel")
 
 		existing_pat2_ids = set(appointment_ids(pat2.get("/my").text))
@@ -428,6 +438,9 @@ def test_registrar_books_for_pat2():
 		assert r is not None, "no free slot without patient overlap for registrar test"
 		assert r.status_code == 200
 		assert "Appointment booked successfully." in r.text
+		assert "Appointment confirmed" in r.text
+		assert "Patient" in r.text
+		assert "Service duration" in r.text
 		assert "patient_required" not in r.text
 		assert "patient_not_found" not in r.text
 		mine = pat2.get("/my")
