@@ -343,6 +343,21 @@ def test_medical_records_are_scoped_and_audited():
 			assert "saved=prescription" in str(saved_prescription.url)
 			assert "Prescription saved." in saved_prescription.text
 
+			patient_id = psql(f"SELECT id FROM users WHERE email = '{PAT}'")
+			patient_list = doctor.get("/doctor/patients")
+			assert patient_list.status_code == 200
+			assert PAT in patient_list.text
+			assert "Next appointment" in patient_list.text
+			patient_history = doctor.get(f"/doctor/patients/{patient_id}")
+			assert patient_history.status_code == 200
+			assert note_body in patient_history.text
+			assert prescription_body in patient_history.text
+			other_patient_history = other_doctor.get(
+				f"/doctor/patients/{patient_id}"
+			)
+			assert note_body not in other_patient_history.text
+			assert prescription_body not in other_patient_history.text
+
 			patient_records = pat.get("/my/records")
 			assert note_body in patient_records.text
 			assert prescription_body in patient_records.text
@@ -354,6 +369,7 @@ def test_medical_records_are_scoped_and_audited():
 			audit = admin.get("/admin/audit")
 			assert audit.status_code == 200
 			assert "medical.records.view" in audit.text
+			assert "medical.patient_history.view" in audit.text
 			assert "medical.note.save" in audit.text
 			assert "medical.prescription.add" in audit.text
 			assert note_body not in audit.text
@@ -374,6 +390,9 @@ def test_medical_records_are_scoped_and_audited():
 			assert prescription_body in cancelled_records.text
 			assert "read-only" in cancelled_records.text
 			assert "<textarea" not in cancelled_records.text
+			cancelled_history = doctor.get(f"/doctor/patients/{patient_id}")
+			assert "cancelled" in cancelled_history.text
+			assert note_body in cancelled_history.text
 
 			patient_records = pat.get("/my/records")
 			assert note_body in patient_records.text

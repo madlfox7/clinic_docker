@@ -15,6 +15,177 @@ from routes_auth import require_user
 router = APIRouter()
 
 
+@router.get("/doctor/patients")
+def doctor_patients(request: Request):
+    user, denied = require_user(request, "doctor")
+    if denied:
+        return denied
+
+    conn = db_as(user)
+    cur = conn.cursor()
+    cur.execute(
+        """
+        SELECT dp.id, dp.email, dp.blocked,
+               COUNT(a.id) AS visit_count,
+               COUNT(a.id) FILTER (
+                   WHERE a.status = 'scheduled' AND a.starts_at > CURRENT_TIMESTAMP
+               ) AS upcoming_count,
+               MIN(a.starts_at) FILTER (
+                   WHERE a.status = 'scheduled' AND a.starts_at > CURRENT_TIMESTAMP
+               ) AS next_visit,
+               MAX(a.starts_at) FILTER (
+                   WHERE a.starts_at <= CURRENT_TIMESTAMP
+               ) AS last_visit
+        FROM public.doctor_patients(%s) dp
+        JOIN appointments a ON a.patient_user_id = dp.id
+        JOIN doctors d ON d.id = a.doctor_id
+        WHERE d.user_id = %s
+        GROUP BY dp.id, dp.email, dp.blocked
+        ORDER BY MAX(a.starts_at) DESC, lower(dp.email), dp.id
+        """,
+        (user["id"], user["id"]),
+    )
+    patients = [
+        {
+            "id": row[0],
+            "email": row[1],
+            "blocked": row[2],
+            "visit_count": row[3],
+            "upcoming_count": row[4],
+            "next_visit": row[5],
+            "last_visit": row[6],
+        }
+        for row in cur.fetchall()
+    ]
+    cur.close()
+    conn.close()
+    return templates.TemplateResponse(
+        "doctor_patients.html",
+        {
+            "request": request,
+            "role": user["role"],
+            "patients": patients,
+            "error": request.query_params.get("error"),
+        },
+    )
+
+
+@router.get("/doctor/patients/{patient_id}")
+def doctor_patient_history(request: Request, patient_id: str):
+    user, denied = require_user(request, "doctor")
+    if denied:
+        return denied
+    patient_id = parse_strict_int(patient_id, min_value=1)
+    if patient_id is None:
+        return RedirectResponse(
+            "/doctor/patients?error=patient_unavailable", status_code=303
+        )
+
+    conn = db_as(user)
+    cur = conn.cursor()
+    cur.execute(
+        "SELECT id, full_name FROM doctors WHERE user_id = %s",
+        (user["id"],),
+    )
+    doctor = cur.fetchone()
+    if doctor is None:
+        cur.close()
+        conn.close()
+        return RedirectResponse("/me?error=doctor_profile_missing", status_code=303)
+
+    cur.execute(
+        """
+        SELECT id, email, blocked
+        FROM public.doctor_patients(%s)
+        WHERE id = %s
+        """,
+        (user["id"], patient_id),
+    )
+    patient = cur.fetchone()
+    if patient is None:
+        cur.close()
+        conn.close()
+        return RedirectResponse(
+            "/doctor/patients?error=patient_unavailable", status_code=303
+        )
+
+    cur.execute(
+        """
+        SELECT a.id, svc.name, a.starts_at, a.ends_at, a.status,
+               a.starts_at > CURRENT_TIMESTAMP - INTERVAL '12 months'
+        FROM appointments a
+        JOIN slots s ON s.id = a.slot_id
+        JOIN services svc ON svc.id = s.service_id
+        WHERE a.doctor_id = %s
+          AND a.patient_user_id = %s
+        ORDER BY a.starts_at DESC, a.id DESC
+        """,
+        (doctor[0], patient_id),
+    )
+    visits = [
+        {
+            "id": row[0],
+            "service_name": row[1],
+            "starts_at": row[2],
+            "ends_at": row[3],
+            "status": row[4],
+            "records_available": row[5],
+            "notes": [],
+            "prescriptions": [],
+        }
+        for row in cur.fetchall()
+    ]
+    visits_by_id = {visit["id"]: visit for visit in visits}
+
+    cur.execute(
+        """
+        SELECT appointment_id, body
+        FROM visit_notes
+        WHERE doctor_id = %s AND patient_user_id = %s
+        ORDER BY appointment_id DESC, id
+        """,
+        (doctor[0], patient_id),
+    )
+    for appointment_id, body in cur.fetchall():
+        visit = visits_by_id.get(appointment_id)
+        if visit is not None:
+            visit["notes"].append(body)
+
+    cur.execute(
+        """
+        SELECT appointment_id, body
+        FROM prescriptions
+        WHERE doctor_id = %s AND patient_user_id = %s
+        ORDER BY appointment_id DESC, id
+        """,
+        (doctor[0], patient_id),
+    )
+    for appointment_id, body in cur.fetchall():
+        visit = visits_by_id.get(appointment_id)
+        if visit is not None:
+            visit["prescriptions"].append(body)
+
+    record_audit_event(cur, "medical.patient_history.view", "patient", patient_id)
+    conn.commit()
+    cur.close()
+    conn.close()
+
+    return templates.TemplateResponse(
+        "doctor_patient_history.html",
+        {
+            "request": request,
+            "role": user["role"],
+            "doctor_name": doctor[1],
+            "patient": {
+                "id": patient[0],
+                "email": patient[1],
+                "blocked": patient[2],
+            },
+            "visits": visits,
+        },
+    )
+
+
 @router.get("/doctor/appointments/{appointment_id}/records")
 def doctor_records(request: Request, appointment_id: str):
     user, denied = require_user(request, "doctor")

@@ -1,0 +1,27 @@
+{% extends "base.html" %}
+{% block content %}
+
+<h1>My patients</h1>
+{% if error == "patient_unavailable" %}
+  <p>Patient is not available in your care list.</p>
+{% endif %}
+<table>
+  <thead>
+    <tr><th>Patient</th><th>Visits</th><th>Upcoming</th><th>Next appointment</th><th>Last visit</th><th>Account</th></tr>
+  </thead>
+  <tbody>
+    {% for patient in patients %}
+      <tr>
+        <td><a href="/doctor/patients/{{ patient.id }}">{{ patient.email }}</a></td>
+        <td>{{ patient.visit_count }}</td>
+        <td>{{ patient.upcoming_count }}</td>
+        <td>{% if patient.next_visit %}{{ patient.next_visit.strftime("%Y-%m-%d %H:%M") }}{% else %}—{% endif %}</td>
+        <td>{% if patient.last_visit %}{{ patient.last_visit.strftime("%Y-%m-%d %H:%M") }}{% else %}—{% endif %}</td>
+        <td>{% if patient.blocked %}Blocked{% else %}Active{% endif %}</td>
+      </tr>
+    {% else %}
+      <tr><td colspan="6">No patients in your care list.</td></tr>
+    {% endfor %}
+  </tbody>
+</table>
+{% endblock %}

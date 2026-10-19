@@ -1,0 +1,40 @@
+{% extends "base.html" %}
+{% block content %}
+
+<h1>Patient history</h1>
+<p>{{ patient.email }} — {{ doctor_name }}</p>
+{% if patient.blocked %}<p><strong>Patient account is blocked.</strong></p>{% endif %}
+<p><a href="/doctor/patients">Back to my patients</a></p>
+
+<h2>Visit history</h2>
+{% for visit in visits %}
+  <section>
+    <h3>{{ visit.starts_at.strftime("%Y-%m-%d %H:%M") }} — {{ visit.service_name }}</h3>
+    <p>
+      {{ visit.starts_at.strftime("%H:%M") }}–{{ visit.ends_at.strftime("%H:%M") }}
+      — {{ visit.status }}
+      {% if visit.records_available %}
+        — <a href="/doctor/appointments/{{ visit.id }}/records">Open visit record</a>
+      {% endif %}
+    </p>
+    <h4>Clinical notes</h4>
+    <ul>
+      {% for note in visit.notes %}
+        <li><pre>{{ note }}</pre></li>
+      {% else %}
+        <li>No clinical notes recorded.</li>
+      {% endfor %}
+    </ul>
+    <h4>Prescriptions</h4>
+    <ul>
+      {% for prescription in visit.prescriptions %}
+        <li><pre>{{ prescription }}</pre></li>
+      {% else %}
+        <li>No prescriptions recorded.</li>
+      {% endfor %}
+    </ul>
+  </section>
+{% else %}
+  <p>No visit history is available.</p>
+{% endfor %}
+{% endblock %}
