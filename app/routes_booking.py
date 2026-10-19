@@ -7,6 +7,7 @@ from fastapi.responses import RedirectResponse
 
 from db import (
     MAX_EMAIL_LENGTH,
+    contains_nul,
     db_as,
     log,
     parse_strict_int,
@@ -25,7 +26,11 @@ router = APIRouter()
 
 
 def _patient_email_query(email):
-    if not email or not within_length(email.strip(), MAX_EMAIL_LENGTH):
+    if (
+        not email
+        or contains_nul(email)
+        or not within_length(email.strip(), MAX_EMAIL_LENGTH)
+    ):
         return ""
     return f"&patient_email={quote(email.strip(), safe='')}"
 
@@ -103,8 +108,12 @@ def doctor_slots(request: Request, doctor_id: str):
     selected_patient = None
     if role == "registrar":
         requested_patient_email = request.query_params.get("patient_email", "").strip()
-        if requested_patient_email and within_length(
+        if (
+            requested_patient_email
+            and not contains_nul(requested_patient_email)
+            and within_length(
             requested_patient_email, MAX_EMAIL_LENGTH
+            )
         ):
             cur.execute(
                 """
@@ -425,7 +434,9 @@ def book_slot(
                 f"&service_id={service_id}{patient_email_query}",
                 status_code=303,
             )
-        if not within_length(target_email, MAX_EMAIL_LENGTH):
+        if contains_nul(target_email) or not within_length(
+            target_email, MAX_EMAIL_LENGTH
+        ):
             cur.close()
             conn.close()
             return RedirectResponse(

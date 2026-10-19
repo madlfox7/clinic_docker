@@ -12,6 +12,7 @@ from fastapi.responses import RedirectResponse
 from db import (
     MAX_EMAIL_LENGTH,
     MAX_PASSWORD_LENGTH,
+    contains_nul,
     db_as_guest,
     db,
     db_as,
@@ -83,7 +84,7 @@ def _register_page(
 
 
 def _normalize_registration_email(email: str) -> str | None:
-    if not within_length(email, MAX_EMAIL_LENGTH):
+    if contains_nul(email) or not within_length(email, MAX_EMAIL_LENGTH):
         return None
     normalized = email.strip().lower()
     if not EMAIL_PATTERN.fullmatch(normalized):
@@ -180,6 +181,8 @@ def register(
     if status == "ok":
         return RedirectResponse("/me", status_code=303)
 
+    if contains_nul(email, password, confirm_password):
+        return _register_page(request, "NUL characters are not allowed.", 400)
     normalized_email = _normalize_registration_email(email)
     if normalized_email is None:
         return _register_page(request, "Enter a valid email address.", 400, email)
@@ -236,23 +239,41 @@ def login(request: Request, email: str = Form(...), password: str = Form(...)):
         return _login_page(request, "Account is blocked", 403)
     if status == "ok":
         return _login_page(request, None, role=user["role"], email=user["email"])
+    if contains_nul(email, password):
+        return _login_page(request, "NUL characters are not allowed.", 400)
     if not within_length(email, MAX_EMAIL_LENGTH) or not within_length(password, MAX_PASSWORD_LENGTH):
         return _login_page(request, "Invalid email or password", 401)
+    client_source = request.headers.get("x-real-ip")
+    if (
+        not client_source
+        or contains_nul(client_source)
+        or not within_length(client_source, 128)
+    ):
+        client_source = request.client.host if request.client else "unknown"
     conn = db()
     try:
         with conn.cursor() as cur:
             cur.execute(
                 """
-                SELECT id, email, role, blocked, auth_version
-                FROM public.authenticate_user(%s, %s)
+                SELECT id, email, role, blocked, auth_version, rate_limited
+                FROM public.authenticate_user(%s, %s, %s)
                 """,
-                (email, password),
+                (email, password, client_source),
             )
             row = cur.fetchone()
+        conn.commit()
     finally:
         conn.close()
     if not row:
         return _login_page(request, "Invalid email or password", 401)
+    if row[5]:
+        response = _login_page(
+            request,
+            "Too many login attempts. Try again in 15 minutes.",
+            429,
+        )
+        response.headers["Retry-After"] = "900"
+        return response
     if row[3]:
         return _login_page(request, "Account is blocked", 403)
     request.session.clear()
@@ -322,6 +343,8 @@ def change_own_password(
     user, denied = require_user(request)
     if denied:
         return denied
+    if contains_nul(current_password, new_password, confirm_password):
+        return RedirectResponse("/me?password_error=invalid", status_code=303)
     if (
         not within_length(new_password, MAX_PASSWORD_LENGTH)
         or len(new_password) < 8
@@ -376,7 +399,7 @@ def doctors_list(request: Request):
     selected_patient_email = ""
     if user and user["role"] == "registrar":
         candidate = request.query_params.get("patient_email", "").strip()
-        if within_length(candidate, MAX_EMAIL_LENGTH):
+        if not contains_nul(candidate) and within_length(candidate, MAX_EMAIL_LENGTH):
             selected_patient_email = candidate
     conn = db()
     cur = conn.cursor()

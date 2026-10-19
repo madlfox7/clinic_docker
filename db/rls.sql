@@ -277,22 +277,64 @@ BEGIN
 END;
 $function$;
 
-CREATE OR REPLACE FUNCTION public.authenticate_user(
+DROP FUNCTION IF EXISTS public.authenticate_user(text, text);
+DROP FUNCTION IF EXISTS public.authenticate_user(text, text, text);
+CREATE FUNCTION public.authenticate_user(
   candidate_email text,
-  candidate_password text
+  candidate_password text,
+  candidate_source text
 )
 RETURNS TABLE (
   id integer,
   email text,
   role text,
   blocked boolean,
-  auth_version bigint
+  auth_version bigint,
+  rate_limited boolean
 )
-LANGUAGE sql
+LANGUAGE plpgsql
 SECURITY DEFINER
 SET search_path = pg_catalog, public, pg_temp
 AS $function$
-  SELECT u.id, u.email, u.role, u.blocked, u.auth_version
+DECLARE
+  email_key bytea := public.digest(lower(coalesce(candidate_email, '')), 'sha256');
+  source_key bytea := public.digest(coalesce(candidate_source, ''), 'sha256');
+  pair_failed_attempts integer := 0;
+  pair_window_started_at timestamptz;
+  source_failed_attempts bigint := 0;
+BEGIN
+  PERFORM pg_advisory_xact_lock(
+    hashtextextended(encode(email_key, 'hex') || ':' || encode(source_key, 'hex'), 0)
+  );
+
+  DELETE FROM public.login_attempts
+  WHERE last_attempt_at < CURRENT_TIMESTAMP - INTERVAL '1 day';
+
+  SELECT failed_attempts, window_started_at
+  INTO pair_failed_attempts, pair_window_started_at
+  FROM public.login_attempts
+  WHERE email_fingerprint = email_key
+    AND source_fingerprint = source_key;
+
+  SELECT coalesce(sum(failed_attempts), 0)
+  INTO source_failed_attempts
+  FROM public.login_attempts
+  WHERE source_fingerprint = source_key
+    AND last_attempt_at > CURRENT_TIMESTAMP - INTERVAL '15 minutes';
+
+  IF (
+       pair_window_started_at > CURRENT_TIMESTAMP - INTERVAL '15 minutes'
+       AND pair_failed_attempts >= 5
+     )
+     OR source_failed_attempts >= 100 THEN
+    RETURN QUERY
+    SELECT NULL::integer, NULL::text, NULL::text, NULL::boolean,
+           NULL::bigint, TRUE;
+    RETURN;
+  END IF;
+
+  RETURN QUERY
+  SELECT u.id, u.email, u.role, u.blocked, u.auth_version, FALSE
   FROM public.users AS u
   WHERE candidate_email IS NOT NULL
     AND candidate_password IS NOT NULL
@@ -310,6 +352,35 @@ AS $function$
                 THEN '$2a$' || substring(u.password_hash FROM 5)
               ELSE u.password_hash
             END;
+
+  IF FOUND THEN
+    DELETE FROM public.login_attempts
+    WHERE email_fingerprint = email_key
+      AND source_fingerprint = source_key;
+    RETURN;
+  END IF;
+
+  INSERT INTO public.login_attempts (
+    email_fingerprint, source_fingerprint, failed_attempts,
+    window_started_at, last_attempt_at
+  )
+  VALUES (email_key, source_key, 1, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+  ON CONFLICT (email_fingerprint, source_fingerprint)
+  DO UPDATE SET
+    failed_attempts = CASE
+      WHEN public.login_attempts.window_started_at
+           <= CURRENT_TIMESTAMP - INTERVAL '15 minutes'
+        THEN 1
+      ELSE public.login_attempts.failed_attempts + 1
+    END,
+    window_started_at = CASE
+      WHEN public.login_attempts.window_started_at
+           <= CURRENT_TIMESTAMP - INTERVAL '15 minutes'
+        THEN CURRENT_TIMESTAMP
+      ELSE public.login_attempts.window_started_at
+    END,
+    last_attempt_at = CURRENT_TIMESTAMP;
+END;
 $function$;
 
 CREATE OR REPLACE FUNCTION public.bootstrap_seed_admin(
@@ -488,7 +559,7 @@ REVOKE ALL ON FUNCTION public.doctor_is_active(integer) FROM PUBLIC;
 REVOKE ALL ON FUNCTION public.is_valid_free_slot(integer, integer, timestamp, timestamp, timestamp) FROM PUBLIC;
 REVOKE ALL ON FUNCTION public.record_audit_event(text, text, integer) FROM PUBLIC;
 REVOKE ALL ON FUNCTION public.admin_reset_user_password(integer, text) FROM PUBLIC;
-REVOKE ALL ON FUNCTION public.authenticate_user(text, text) FROM PUBLIC;
+REVOKE ALL ON FUNCTION public.authenticate_user(text, text, text) FROM PUBLIC;
 REVOKE ALL ON FUNCTION public.bootstrap_seed_admin(text, text) FROM PUBLIC;
 REVOKE ALL ON FUNCTION public.calendar_patient_email(integer, integer) FROM PUBLIC;
 REVOKE ALL ON FUNCTION public.change_own_patient_password(text, text, text) FROM PUBLIC;
@@ -504,7 +575,7 @@ GRANT EXECUTE ON FUNCTION public.record_audit_event(text, text, integer)
   TO app_patient, app_doctor, app_registrar, app_admin;
 GRANT EXECUTE ON FUNCTION public.admin_reset_user_password(integer, text)
   TO app_admin;
-GRANT EXECUTE ON FUNCTION public.authenticate_user(text, text) TO clinic_api;
+GRANT EXECUTE ON FUNCTION public.authenticate_user(text, text, text) TO clinic_api;
 GRANT EXECUTE ON FUNCTION public.bootstrap_seed_admin(text, text) TO clinic_api;
 GRANT EXECUTE ON FUNCTION public.calendar_patient_email(integer, integer)
   TO app_doctor, app_registrar;

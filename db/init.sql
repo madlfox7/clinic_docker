@@ -12,6 +12,20 @@ CREATE TABLE IF NOT EXISTS users (
   auth_version BIGINT NOT NULL DEFAULT 0 CHECK (auth_version >= 0)
 );
 
+CREATE TABLE IF NOT EXISTS login_attempts (
+  email_fingerprint BYTEA NOT NULL,
+  source_fingerprint BYTEA NOT NULL,
+  failed_attempts INTEGER NOT NULL CHECK (failed_attempts > 0),
+  window_started_at TIMESTAMPTZ NOT NULL,
+  last_attempt_at TIMESTAMPTZ NOT NULL,
+  PRIMARY KEY (email_fingerprint, source_fingerprint)
+);
+
+CREATE INDEX IF NOT EXISTS login_attempts_source_recent_idx
+  ON login_attempts (source_fingerprint, last_attempt_at);
+CREATE INDEX IF NOT EXISTS login_attempts_cleanup_idx
+  ON login_attempts (last_attempt_at);
+
 CREATE EXTENSION IF NOT EXISTS pgcrypto;
 
 ALTER TABLE users

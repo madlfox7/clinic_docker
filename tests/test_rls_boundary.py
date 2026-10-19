@@ -49,9 +49,13 @@ def test_clinic_api_authenticates_without_reading_password_hash():
                     'clinic_api', 'public.users', 'password_hash', 'SELECT'
                 )::text,
                 (SELECT role
-                 FROM public.authenticate_user('pat@clinic.local', 'password123')),
+                 FROM public.authenticate_user(
+                   'pat@clinic.local', 'password123', '127.0.0.1'
+                 )),
                 (SELECT count(*)
-                 FROM public.authenticate_user('pat@clinic.local', 'wrong'))
+                 FROM public.authenticate_user(
+                   'pat@clinic.local', 'wrong', '127.0.0.1'
+                 ))
             ROLLBACK;
             """,
         ],

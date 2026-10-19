@@ -10,6 +10,7 @@
 {% elif error == "name_exists" %}<p>A service with this name already exists.</p>
 {% elif error == "service_not_found" %}<p>Service not found.</p>
 {% elif error == "invalid_doctor" %}<p>One or more selected doctors are unavailable.</p>
+{% elif error == "future_appointments" %}<p>Cannot remove doctors from this service while {{ request.query_params.get("count", "some") }} future scheduled appointment(s) remain. Keep the assignments or cancel those appointments first.</p>
 {% elif error == "service_in_use" %}<p>Only services with no generated slots can be deleted. Deactivate this service to stop future bookings.</p>{% endif %}
 
 <section>

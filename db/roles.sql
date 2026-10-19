@@ -65,6 +65,8 @@ REVOKE ALL PRIVILEGES ON ALL TABLES IN SCHEMA public
   FROM app_guest, app_patient, app_doctor, app_registrar, app_admin;
 REVOKE ALL PRIVILEGES ON ALL SEQUENCES IN SCHEMA public
   FROM app_guest, app_patient, app_doctor, app_registrar, app_admin;
+REVOKE ALL PRIVILEGES ON public.login_attempts
+  FROM PUBLIC, clinic_api, app_guest, app_patient, app_doctor, app_registrar, app_admin;
 
 DO $$
 BEGIN

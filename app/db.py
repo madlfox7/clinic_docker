@@ -37,6 +37,10 @@ def within_length(raw, max_length: int) -> bool:
     return isinstance(raw, str) and len(raw.encode("utf-8")) <= max_length
 
 
+def contains_nul(*values) -> bool:
+    return any(isinstance(value, str) and "\x00" in value for value in values)
+
+
 
 def parse_strict_int(raw, min_value: int = PG_INT_MIN, max_value: int = PG_INT_MAX):
     """Strict int parsing (like ft_atoi with no leniency): rejects None, empty, whitespace,

@@ -3,6 +3,7 @@ from fastapi.responses import RedirectResponse
 
 from db import (
     MAX_RECORD_BODY_LENGTH,
+    contains_nul,
     db_as,
     parse_strict_int,
     record_audit_event,
@@ -279,6 +280,11 @@ def save_doctor_record(
             "/doctor/appointments?error=record_unavailable", status_code=303
         )
 
+    if contains_nul(record_type, body):
+        return RedirectResponse(
+            f"/doctor/appointments/{appointment_id}/records?error=invalid_text",
+            status_code=303,
+        )
     record_type = record_type.strip().lower()
     body = body.strip()
     if record_type not in ("note", "prescription"):

@@ -10,6 +10,7 @@ from db import (
     MAX_PASSWORD_LENGTH,
     MAX_SLOT_MINUTES,
     MAX_TEXT_LENGTH,
+    contains_nul,
     db_as,
     parse_strict_int,
     pwd,
@@ -31,7 +32,8 @@ router = APIRouter()
 
 def _valid_admin_password(password: str) -> bool:
     return (
-        within_length(password, MAX_PASSWORD_LENGTH)
+        not contains_nul(password)
+        and within_length(password, MAX_PASSWORD_LENGTH)
         and len(password) >= 8
         and password.strip().casefold() not in DEFAULT_REGISTRATION_PASSWORDS
     )
@@ -280,6 +282,8 @@ def admin_services(request: Request):
 
 
 def _validate_service_details(name: str, duration: str, buffer: str):
+    if contains_nul(name):
+        return None
     name = name.strip()
     duration_minutes = parse_strict_int(
         duration, min_value=1, max_value=MAX_SLOT_MINUTES
@@ -328,6 +332,28 @@ def _replace_service_doctors(cur, service_id, doctor_ids):
             """,
             (doctor_id, service_id),
         )
+
+
+def _future_appointments_for_removed_service_doctors(cur, service_id, doctor_ids):
+    cur.execute(
+        """
+        SELECT d.full_name, count(a.id)
+        FROM doctor_services ds
+        JOIN doctors d ON d.id = ds.doctor_id
+        JOIN slots s
+          ON s.doctor_id = ds.doctor_id AND s.service_id = ds.service_id
+        JOIN appointments a
+          ON a.slot_id = s.id
+         AND a.status = 'scheduled'
+         AND a.starts_at > CURRENT_TIMESTAMP
+        WHERE ds.service_id = %s
+          AND NOT (ds.doctor_id = ANY(%s::int[]))
+        GROUP BY d.id, d.full_name
+        ORDER BY d.full_name
+        """,
+        (service_id, doctor_ids),
+    )
+    return cur.fetchall()
 
 
 @router.post("/admin/services")
@@ -397,6 +423,23 @@ def update_service(
                 if not _valid_service_doctors(cur, parsed_doctor_ids):
                     return RedirectResponse(
                         "/admin/services?error=invalid_doctor", status_code=303
+                    )
+                cur.execute(
+                    "SELECT id FROM services WHERE id = %s",
+                    (parsed_service_id,),
+                )
+                if cur.fetchone() is None:
+                    return RedirectResponse(
+                        "/admin/services?error=service_not_found", status_code=303
+                    )
+                affected_appointments = _future_appointments_for_removed_service_doctors(
+                    cur, parsed_service_id, parsed_doctor_ids
+                )
+                if affected_appointments:
+                    count = sum(row[1] for row in affected_appointments)
+                    return RedirectResponse(
+                        f"/admin/services?error=future_appointments&count={count}",
+                        status_code=303,
                     )
                 cur.execute(
                     """
@@ -590,7 +633,8 @@ def create_doctor(
             "/admin/doctors/new?error=invalid_email", status_code=303
         )
     if (
-        not within_length(full_name, 120)
+        contains_nul(full_name, specialty)
+        or not within_length(full_name, 120)
         or not full_name
         or not within_length(specialty, 120)
         or not specialty
@@ -667,7 +711,8 @@ def update_doctor(
     if parsed_doctor_id is None:
         return RedirectResponse("/admin/doctors?error=doctor_not_found", status_code=303)
     if (
-        not within_length(full_name, 120)
+        contains_nul(full_name, specialty)
+        or not within_length(full_name, 120)
         or not full_name
         or not within_length(specialty, 120)
         or not specialty
@@ -796,6 +841,10 @@ def update_admin_settings(
     admin_user, denied = require_user(request, "admin")
     if denied:
         return denied
+    if contains_nul(address, phone):
+        return RedirectResponse(
+            "/admin/settings?error=invalid_text", status_code=303
+        )
     address = address.strip()
     phone = phone.strip()
     if not within_length(address, 300) or not address:
@@ -1346,6 +1395,10 @@ def admin_save_holiday(
     admin_user, denied = require_user(request, "admin")
     if denied:
         return denied
+    if contains_nul(name):
+        return RedirectResponse(
+            "/admin/schedule?error=holiday_name_invalid", status_code=303
+        )
     holiday_name = name.strip()
     if not holiday_name:
         return RedirectResponse("/admin/schedule?error=holiday_name_required", status_code=303)
@@ -1560,7 +1613,7 @@ def _generate_slots_for_doctors(
                             cur.execute("RELEASE SAVEPOINT generate_slot")
                         start_at += step_duration
 
-                current_date += timedelta(days=1)
+            current_date += timedelta(days=1)
         record_audit_event(cur, "schedule.slots.generate", "doctor", doctor_id)
 
     conn.commit()

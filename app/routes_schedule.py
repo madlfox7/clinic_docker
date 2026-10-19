@@ -7,6 +7,7 @@ from fastapi.responses import RedirectResponse
 from db import (
     MAX_EMAIL_LENGTH,
     MAX_TEXT_LENGTH,
+    contains_nul,
     db_as,
     parse_strict_int,
     record_audit_event,
@@ -25,15 +26,15 @@ def registrar_patients(request: Request):
     if denied:
         return denied
     query = request.query_params.get("q", "").strip()
-    if len(query) > MAX_EMAIL_LENGTH:
+    if contains_nul(query) or len(query) > MAX_EMAIL_LENGTH:
         return templates.TemplateResponse(
             "registrar_patients.html",
             {
                 "request": request,
                 "role": user["role"],
                 "patients": [],
-                "query": query,
-                "error": "query_too_long",
+                "query": "",
+                "error": "query_invalid",
             },
         )
     conn = db_as(user)
@@ -88,8 +89,8 @@ def registrar_patient_search(request: Request):
     if denied:
         return denied
     query = request.query_params.get("q", "").strip()
-    if len(query) > MAX_EMAIL_LENGTH:
-        raise HTTPException(status_code=400, detail="Search query is too long.")
+    if contains_nul(query) or len(query) > MAX_EMAIL_LENGTH:
+        raise HTTPException(status_code=400, detail="Invalid search query.")
     if len(query) < 2:
         return []
     conn = db_as(user)
@@ -512,6 +513,10 @@ def submit_time_off_request(
     user, denied = require_user(request, "doctor")
     if denied:
         return denied
+    if contains_nul(comment):
+        return RedirectResponse(
+            "/doctor/calendar?error=request_comment_invalid", status_code=303
+        )
     note = comment.strip()
     redirect_url = f"/doctor/calendar?day={starts_on.isoformat()}"
     if starts_on < date.today():

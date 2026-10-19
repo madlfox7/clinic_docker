@@ -106,6 +106,109 @@ def test_bad_password_rejected():
 		assert "Invalid email or password" in r.text
 
 
+def test_login_throttles_repeated_failed_attempts():
+	email = f"throttle-{uuid.uuid4().hex}@clinic.local"
+	password = "Throttle-Check-2026!"
+	with client() as c:
+		created = c.post(
+			"/register",
+			data={
+				"email": email,
+				"password": password,
+				"confirm_password": password,
+			},
+		)
+		assert "registered=1" in str(created.url)
+		try:
+			for _ in range(5):
+				failed = c.post(
+					"/login", data={"email": email, "password": "incorrect"}
+				)
+				assert failed.status_code == 401
+			throttled = c.post(
+				"/login", data={"email": email, "password": password}
+			)
+			assert throttled.status_code == 429
+			assert throttled.headers["Retry-After"] == "900"
+		finally:
+			psql(
+				f"""
+				DELETE FROM login_attempts
+				WHERE email_fingerprint = public.digest(lower('{email}'), 'sha256');
+				DELETE FROM users WHERE email = '{email}'
+				"""
+			)
+
+
+def test_nul_characters_are_rejected_before_database_use():
+	nul = "\x00"
+	with client() as guest, client() as admin, client() as doctor, client() as registrar:
+		login(admin, ADMIN)
+		login(doctor, DOC)
+		login(registrar, REG)
+
+		login_nul = guest.post(
+			"/login", data={"email": PAT, "password": f"bad{nul}password"}
+		)
+		assert login_nul.status_code == 400
+		assert "NUL characters are not allowed" in login_nul.text
+		register_nul = guest.post(
+			"/register",
+			data={
+				"email": f"bad{nul}@clinic.local",
+				"password": "New-Password-2026!",
+				"confirm_password": "New-Password-2026!",
+			},
+		)
+		assert register_nul.status_code == 400
+
+		service_nul = admin.post(
+			"/admin/services",
+			data={
+				"name": f"bad{nul}service",
+				"duration_minutes": "30",
+				"buffer_minutes": "0",
+			},
+		)
+		assert "error=invalid_service" in str(service_nul.url)
+		holiday_nul = admin.post(
+			"/admin/holidays",
+			data={
+				"holiday_day": psql("SELECT CURRENT_DATE + 30"),
+				"name": f"bad{nul}holiday",
+			},
+		)
+		assert "error=holiday_name_invalid" in str(holiday_nul.url)
+		comment_nul = doctor.post(
+			"/doctor/time-off-requests",
+			data={
+				"starts_on": psql("SELECT CURRENT_DATE + 30"),
+				"ends_on": psql("SELECT CURRENT_DATE + 30"),
+				"comment": f"bad{nul}comment",
+			},
+		)
+		assert "error=request_comment_invalid" in str(comment_nul.url)
+		record_nul = doctor.post(
+			"/doctor/appointments/1/records",
+			data={"record_type": "note", "body": f"bad{nul}note"},
+		)
+		assert record_nul.history
+		assert "error=invalid_text" in record_nul.history[0].headers["location"]
+		settings_nul = admin.post(
+			"/admin/settings", data={"address": "address", "phone": f"bad{nul}phone"}
+		)
+		assert "error=invalid_text" in str(settings_nul.url)
+		_, slot_id = open_free_slot_page(registrar)
+		booking_nul = registrar.post(
+			f"/slots/{slot_id}/book", data={"patient_email": f"bad{nul}@clinic.local"}
+		)
+		assert "error=patient_not_found" in str(booking_nul.url)
+		search_nul = registrar.get(
+			"/registrar/patients/search", params={"q": f"bad{nul}"}
+		)
+		assert search_nul.status_code == 400
+
+
 def test_already_logged_in_admin_is_not_asked_for_credentials():
 	with client() as c:
 		login(c, ADMIN)
@@ -795,6 +898,55 @@ def test_admin_slot_generator_respects_time_off_and_role():
 			data={"from_date": "2026-10-19", "to_date": "2026-10-19"},
 		)
 		assert "/login" in str(unauthorized.url)
+
+
+def test_slot_generator_advances_across_nonworking_dates():
+	with client() as admin:
+		login(admin, ADMIN)
+		anna_id = int(psql("SELECT id FROM doctors WHERE full_name = 'Anna Ohanyan'"))
+		levon_id = int(psql("SELECT id FROM doctors WHERE full_name = 'Levon Petrosyan'"))
+		saturday = psql(
+			f"""
+			SELECT (CURRENT_DATE + candidate.day_offset)::date
+			FROM generate_series(1, 14) AS candidate(day_offset)
+			WHERE EXTRACT(ISODOW FROM CURRENT_DATE + candidate.day_offset)::int = 6
+			  AND NOT EXISTS (
+			        SELECT 1 FROM work_hours w
+			        WHERE w.doctor_id = {anna_id} AND w.weekday = 5
+			      )
+			ORDER BY candidate.day_offset
+			LIMIT 1
+			"""
+		)
+		tuesday = psql(
+			f"""
+			SELECT (CURRENT_DATE + candidate.day_offset)::date
+			FROM generate_series(1, 14) AS candidate(day_offset)
+			WHERE EXTRACT(ISODOW FROM CURRENT_DATE + candidate.day_offset)::int = 2
+			  AND NOT EXISTS (
+			        SELECT 1 FROM work_hours w
+			        WHERE w.doctor_id = {levon_id} AND w.weekday = 1
+			      )
+			ORDER BY candidate.day_offset
+			LIMIT 1
+			"""
+		)
+		anna_result = admin.post(
+			f"/admin/doctors/{anna_id}/generate",
+			data={"from_date": saturday, "to_date": saturday},
+		)
+		levon_result = admin.post(
+			"/admin/schedule/generate",
+			data={
+				"doctor_ids": [str(levon_id)],
+				"from_date": tuesday,
+				"to_date": tuesday,
+			},
+		)
+		assert "generated=0" in str(anna_result.url)
+		assert "skipped=0" in str(anna_result.url)
+		assert "generated=0" in str(levon_result.url)
+		assert "skipped=0" in str(levon_result.url)
 
 
 def test_admin_schedule_configuration_is_admin_only_and_repeatable():
@@ -1763,7 +1915,7 @@ def test_admin_service_duration_buffer_and_booking_overlap():
 		try:
 			warning_page = admin.get("/admin/schedule")
 			assert service_name in warning_page.text
-			assert "does not fit within the doctor's working window" in warning_page.text
+			assert "do not fit within the doctor's working window" in warning_page.text
 			not_assigned = patient.get(
 				f"/doctors/{other_doctor_id}/slots?service_id={service_id}"
 			)
@@ -1883,6 +2035,19 @@ def test_admin_service_duration_buffer_and_booking_overlap():
 				WHERE s.id = {new_slot_id}
 				"""
 			) == "45|60|45|15"
+			remove_assignments = admin.post(
+				f"/admin/services/{service_id}",
+				data={
+					"name": service_name,
+					"duration_minutes": "45",
+					"buffer_minutes": "15",
+				},
+			)
+			assert "error=future_appointments" in str(remove_assignments.url)
+			assert "future scheduled appointment(s)" in remove_assignments.text
+			assert psql(
+				f"SELECT count(*) FROM doctor_services WHERE service_id = {service_id}"
+			) == "2"
 			admin.post(
 				f"/admin/services/{service_id}",
 				data={
@@ -1977,16 +2142,19 @@ def test_service_buffer_reserves_doctor_not_patient_across_doctors():
 				int(slot_id)
 				for slot_id in psql(
 					f"""
-					INSERT INTO slots (
+					WITH inserted_slots AS (
+					  INSERT INTO slots (
 					  doctor_id, service_id, starts_at, ends_at,
 					  duration_minutes, buffer_minutes
-					)
-					VALUES
+					  )
+					  VALUES
 					  ({doctor_a}, {service_id}, '{selected_day} 10:00', '{selected_day} 11:00', 30, 30),
 					  ({doctor_b}, {service_id}, '{selected_day} 10:30', '{selected_day} 11:30', 30, 30)
-					RETURNING id
+					  RETURNING id
+					)
+					SELECT string_agg(id::text, ',') FROM inserted_slots
 					"""
-				).splitlines()
+				).split(",")
 			]
 			assert len(slot_ids_created) == 2
 			first = patient.post(

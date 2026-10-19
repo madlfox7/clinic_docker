@@ -2,7 +2,9 @@
 {% block content %}
 <h1>Patients</h1>
 <p>Patient contact and booking information only; medical records are not shown here.</p>
-{% if error == "query_too_long" %}
+{% if error == "query_invalid" %}
+  <p>Search text contains invalid characters or exceeds 254 characters.</p>
+{% elif error == "query_too_long" %}
   <p>Search email must be no longer than 254 characters.</p>
 {% elif error == "patient_not_found" %}
   <p>Patient account was not found.</p>
