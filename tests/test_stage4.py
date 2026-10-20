@@ -753,6 +753,7 @@ def test_last_admin_reset_link_is_server_only():
 	assert issued.returncode == 0, issued.stderr
 	assert "Reset link sent." in issued.stdout
 	assert "token=" not in issued.stdout
+	assert "token=" not in issued.stderr
 	assert len(mailpit_messages(ADMIN)) == before + 1
 	psql(
 		"UPDATE password_reset_tokens SET used_at = CURRENT_TIMESTAMP "

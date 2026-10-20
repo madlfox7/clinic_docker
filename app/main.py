@@ -1,4 +1,6 @@
+import logging
 import os
+import re
 
 from fastapi import FastAPI
 from starlette.middleware.sessions import SessionMiddleware
@@ -37,6 +39,32 @@ def _session_secret() -> str:
 
 
 SESSION_SECRET = _session_secret()
+
+_TOKEN_QUERY = re.compile(r"([?&]token=)[^&\s\"]+")
+
+
+class _RedactTokenFilter(logging.Filter):
+    """Drop one-time link tokens before uvicorn writes the access line."""
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        if isinstance(record.args, tuple):
+            record.args = tuple(
+                _TOKEN_QUERY.sub(r"\1redacted", item) if isinstance(item, str) else item
+                for item in record.args
+            )
+        elif isinstance(record.args, dict):
+            record.args = {
+                key: _TOKEN_QUERY.sub(r"\1redacted", value) if isinstance(value, str) else value
+                for key, value in record.args.items()
+            }
+        if isinstance(record.msg, str) and "token=" in record.msg:
+            record.msg = _TOKEN_QUERY.sub(r"\1redacted", record.msg)
+        return True
+
+
+_redact_tokens = _RedactTokenFilter()
+for _logger_name in ("uvicorn.access", "uvicorn", "uvicorn.error"):
+    logging.getLogger(_logger_name).addFilter(_redact_tokens)
 
 
 

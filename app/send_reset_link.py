@@ -41,18 +41,45 @@ def main() -> int:
             file=sys.stderr,
         )
         return 1
+    user_id = _user_id_for(email)
     try:
         send_password_reset(email.lower(), token)
-    except Exception as exc:
-        print(f"SMTP failed: {exc}", file=sys.stderr)
+    except Exception:
+        _revoke_reset_token(token)
         print(
-            "Server recovery link (not shown in the web interface): "
-            f"/reset-password?token={token}",
+            f"Failed to send reset email to user_id={user_id}.",
             file=sys.stderr,
         )
         return 1
     print("Reset link sent.")
     return 0
+
+
+def _user_id_for(email: str):
+    conn = db()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT id FROM users WHERE lower(email) = lower(%s)",
+                (email,),
+            )
+            row = cur.fetchone()
+        return row[0] if row else "unknown"
+    finally:
+        conn.close()
+
+
+def _revoke_reset_token(token: str) -> None:
+    conn = db()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT public.revoke_patient_password_reset(%s)",
+                (token,),
+            )
+        conn.commit()
+    finally:
+        conn.close()
 
 
 if __name__ == "__main__":
