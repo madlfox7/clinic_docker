@@ -270,10 +270,206 @@ BEGIN
   SET password_hash = replacement_hash,
       auth_version = auth_version + 1
   WHERE id = target_user_id
-    AND role IN ('patient', 'registrar')
+    AND id <> actor_id
+    AND role IN ('registrar', 'admin')
   RETURNING role INTO target_role;
 
   RETURN target_role;
+END;
+$function$;
+
+CREATE OR REPLACE FUNCTION public.request_patient_password_reset(
+  candidate_email text,
+  candidate_source text
+)
+RETURNS TABLE (
+  reset_token text,
+  rate_limited boolean
+)
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = pg_catalog, public, pg_temp
+AS $function$
+DECLARE
+  normalized_email text := lower(btrim(coalesce(candidate_email, '')));
+  email_key bytea := public.digest(normalized_email, 'sha256');
+  source_key bytea := public.digest(coalesce(candidate_source, ''), 'sha256');
+  attempt_count integer;
+  attempt_window timestamptz;
+  attempt_found boolean;
+  source_count integer;
+  target_id integer;
+  raw_token text;
+BEGIN
+  PERFORM pg_advisory_xact_lock(
+    hashtextextended(encode(email_key, 'hex') || ':' || encode(source_key, 'hex'), 0)
+  );
+
+  DELETE FROM public.password_reset_attempts
+  WHERE last_request_at < CURRENT_TIMESTAMP - INTERVAL '1 day';
+  DELETE FROM public.password_reset_tokens
+  WHERE expires_at < CURRENT_TIMESTAMP - INTERVAL '1 day';
+
+  SELECT request_count, window_started_at
+  INTO attempt_count, attempt_window
+  FROM public.password_reset_attempts
+  WHERE email_fingerprint = email_key
+    AND source_fingerprint = source_key
+  FOR UPDATE;
+  attempt_found := FOUND;
+
+  IF attempt_found
+     AND attempt_window > CURRENT_TIMESTAMP - INTERVAL '15 minutes'
+     AND attempt_count >= 5 THEN
+    RETURN QUERY SELECT NULL::text, TRUE;
+    RETURN;
+  END IF;
+
+  SELECT coalesce(sum(request_count), 0)
+  INTO source_count
+  FROM public.password_reset_attempts
+  WHERE source_fingerprint = source_key
+    AND window_started_at > CURRENT_TIMESTAMP - INTERVAL '15 minutes';
+
+  IF source_count >= 100 THEN
+    RETURN QUERY SELECT NULL::text, TRUE;
+    RETURN;
+  END IF;
+
+  IF attempt_found AND attempt_window > CURRENT_TIMESTAMP - INTERVAL '15 minutes' THEN
+    UPDATE public.password_reset_attempts
+    SET request_count = request_count + 1,
+        last_request_at = CURRENT_TIMESTAMP
+    WHERE email_fingerprint = email_key
+      AND source_fingerprint = source_key;
+  ELSIF attempt_found THEN
+    UPDATE public.password_reset_attempts
+    SET request_count = 1,
+        window_started_at = CURRENT_TIMESTAMP,
+        last_request_at = CURRENT_TIMESTAMP
+    WHERE email_fingerprint = email_key
+      AND source_fingerprint = source_key;
+  ELSE
+    INSERT INTO public.password_reset_attempts (
+      email_fingerprint, source_fingerprint, request_count,
+      window_started_at, last_request_at
+    )
+    VALUES (email_key, source_key, 1, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP);
+  END IF;
+
+  IF candidate_email IS NULL
+     OR length(normalized_email) NOT BETWEEN 3 AND 254
+     OR position('@' IN normalized_email) = 0 THEN
+    RETURN QUERY SELECT NULL::text, FALSE;
+    RETURN;
+  END IF;
+
+  SELECT u.id
+  INTO target_id
+  FROM public.users AS u
+  WHERE lower(u.email) = normalized_email
+    AND u.role = 'patient'
+    AND NOT u.blocked;
+
+  IF target_id IS NULL THEN
+    RETURN QUERY SELECT NULL::text, FALSE;
+    RETURN;
+  END IF;
+
+  UPDATE public.password_reset_tokens
+  SET used_at = CURRENT_TIMESTAMP
+  WHERE user_id = target_id
+    AND used_at IS NULL;
+
+  raw_token := encode(public.gen_random_bytes(32), 'hex');
+  INSERT INTO public.password_reset_tokens (user_id, token_hash, expires_at)
+  VALUES (
+    target_id,
+    public.digest(raw_token, 'sha256'),
+    CURRENT_TIMESTAMP + INTERVAL '15 minutes'
+  );
+
+  RETURN QUERY SELECT raw_token, FALSE;
+END;
+$function$;
+
+DROP FUNCTION IF EXISTS public.consume_patient_password_reset(text, text);
+CREATE OR REPLACE FUNCTION public.consume_patient_password_reset(
+  raw_token text,
+  candidate_password text,
+  replacement_hash text
+)
+RETURNS TABLE (
+  result text,
+  resulting_auth_version bigint
+)
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = pg_catalog, public, pg_temp
+AS $function$
+DECLARE
+  token_id bigint;
+  target_id integer;
+  changed_auth_version bigint;
+BEGIN
+  IF raw_token IS NULL
+     OR raw_token !~ '^[0-9a-f]{64}$'
+     OR replacement_hash IS NULL
+     OR replacement_hash !~ '^\$2[aby]\$[0-9]{2}\$[./A-Za-z0-9]{53}$' THEN
+    RETURN QUERY SELECT 'invalid'::text, NULL::bigint;
+    RETURN;
+  END IF;
+
+  SELECT t.id, u.id
+  INTO token_id, target_id
+  FROM public.password_reset_tokens AS t
+  JOIN public.users AS u ON u.id = t.user_id
+  WHERE t.token_hash = public.digest(raw_token, 'sha256')
+    AND t.used_at IS NULL
+    AND t.expires_at > CURRENT_TIMESTAMP
+    AND u.role = 'patient'
+    AND NOT u.blocked
+  FOR UPDATE OF t, u;
+
+  IF NOT FOUND THEN
+    RETURN QUERY SELECT 'invalid'::text, NULL::bigint;
+    RETURN;
+  END IF;
+
+  IF candidate_password IS NOT NULL
+     AND (
+       lower(candidate_password) = (
+         SELECT lower(email) FROM public.users WHERE id = target_id
+       )
+       OR lower(candidate_password) = split_part(
+         (SELECT lower(email) FROM public.users WHERE id = target_id),
+         '@',
+         1
+       )
+     ) THEN
+    RETURN QUERY SELECT 'weak'::text, NULL::bigint;
+    RETURN;
+  END IF;
+
+  UPDATE public.users
+  SET password_hash = replacement_hash,
+      auth_version = public.users.auth_version + 1
+  WHERE id = target_id
+  RETURNING public.users.auth_version INTO changed_auth_version;
+
+  UPDATE public.password_reset_tokens
+  SET used_at = CURRENT_TIMESTAMP
+  WHERE id = token_id
+     OR (user_id = target_id AND used_at IS NULL);
+
+  INSERT INTO public.audit_events (
+    actor_user_id, actor_role, action, target_type, target_id
+  )
+  VALUES (
+    target_id, 'patient', 'user.password_recovery', 'user', target_id
+  );
+
+  RETURN QUERY SELECT 'changed'::text, changed_auth_version;
 END;
 $function$;
 
@@ -302,6 +498,16 @@ DECLARE
   pair_failed_attempts integer := 0;
   pair_window_started_at timestamptz;
   source_failed_attempts bigint := 0;
+  dummy_hash constant text := '$2a$12$vDAC/mONY1XhFCXLJzJKEeuU11gysuOWcZeEh61E/Bys6htguv6eC';
+  matched_id integer;
+  matched_email text;
+  matched_role text;
+  matched_blocked boolean;
+  matched_auth_version bigint;
+  stored_hash text;
+  password_to_check text;
+  password_matches boolean := FALSE;
+  user_found boolean := FALSE;
 BEGIN
   PERFORM pg_advisory_xact_lock(
     hashtextextended(encode(email_key, 'hex') || ':' || encode(source_key, 'hex'), 0)
@@ -333,30 +539,36 @@ BEGIN
     RETURN;
   END IF;
 
-  RETURN QUERY
-  SELECT u.id, u.email, u.role, u.blocked, u.auth_version, FALSE
+  -- One cost-12 crypt runs whether or not the email exists.
+  SELECT u.id, u.email, u.role, u.blocked, u.auth_version, u.password_hash
+  INTO matched_id, matched_email, matched_role, matched_blocked,
+       matched_auth_version, stored_hash
   FROM public.users AS u
   WHERE candidate_email IS NOT NULL
-    AND candidate_password IS NOT NULL
-    AND octet_length(candidate_password) <= 72
-    AND lower(u.email) = lower(candidate_email)
-    AND public.crypt(
-          candidate_password,
-          CASE
-            WHEN left(u.password_hash, 4) = '$2b$'
-              THEN '$2a$' || substring(u.password_hash FROM 5)
-            ELSE u.password_hash
-          END
-        ) = CASE
-              WHEN left(u.password_hash, 4) = '$2b$'
-                THEN '$2a$' || substring(u.password_hash FROM 5)
-              ELSE u.password_hash
-            END;
+    AND lower(u.email) = lower(candidate_email);
+  user_found := FOUND;
 
-  IF FOUND THEN
+  password_to_check := candidate_password;
+  IF NOT user_found OR stored_hash IS NULL
+     OR password_to_check IS NULL
+     OR octet_length(password_to_check) > 72 THEN
+    stored_hash := dummy_hash;
+    IF password_to_check IS NULL OR octet_length(password_to_check) > 72 THEN
+      password_to_check := 'invalid-password';
+    END IF;
+  ELSIF left(stored_hash, 4) = '$2b$' THEN
+    stored_hash := '$2a$' || substring(stored_hash FROM 5);
+  END IF;
+
+  password_matches := public.crypt(password_to_check, stored_hash) = stored_hash;
+
+  IF user_found AND password_matches AND stored_hash IS DISTINCT FROM dummy_hash THEN
     DELETE FROM public.login_attempts
     WHERE email_fingerprint = email_key
       AND source_fingerprint = source_key;
+    RETURN QUERY
+    SELECT matched_id, matched_email, matched_role, matched_blocked,
+           matched_auth_version, FALSE;
     RETURN;
   END IF;
 
@@ -575,6 +787,34 @@ GRANT EXECUTE ON FUNCTION public.record_audit_event(text, text, integer)
   TO app_patient, app_doctor, app_registrar, app_admin;
 GRANT EXECUTE ON FUNCTION public.admin_reset_user_password(integer, text)
   TO app_admin;
+CREATE OR REPLACE FUNCTION public.revoke_patient_password_reset(raw_token text)
+RETURNS void
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = pg_catalog, public, pg_temp
+AS $function$
+BEGIN
+  IF raw_token IS NULL OR raw_token !~ '^[0-9a-f]{64}$' THEN
+    RETURN;
+  END IF;
+
+  UPDATE public.password_reset_tokens
+  SET used_at = CURRENT_TIMESTAMP
+  WHERE token_hash = public.digest(raw_token, 'sha256')
+    AND used_at IS NULL;
+END;
+$function$;
+
+REVOKE ALL ON FUNCTION public.request_patient_password_reset(text, text) FROM PUBLIC;
+REVOKE ALL ON FUNCTION public.consume_patient_password_reset(text, text, text) FROM PUBLIC;
+REVOKE ALL ON FUNCTION public.revoke_patient_password_reset(text) FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION public.request_patient_password_reset(text, text) TO clinic_api;
+GRANT EXECUTE ON FUNCTION public.consume_patient_password_reset(text, text, text) TO clinic_api;
+GRANT EXECUTE ON FUNCTION public.revoke_patient_password_reset(text) TO clinic_api;
+REVOKE ALL ON TABLE public.password_reset_tokens, public.password_reset_attempts
+  FROM PUBLIC, clinic_api, app_guest, app_patient, app_doctor, app_registrar, app_admin;
+REVOKE ALL ON SEQUENCE public.password_reset_tokens_id_seq
+  FROM PUBLIC, clinic_api, app_guest, app_patient, app_doctor, app_registrar, app_admin;
 GRANT EXECUTE ON FUNCTION public.authenticate_user(text, text, text) TO clinic_api;
 GRANT EXECUTE ON FUNCTION public.bootstrap_seed_admin(text, text) TO clinic_api;
 GRANT EXECUTE ON FUNCTION public.calendar_patient_email(integer, integer)

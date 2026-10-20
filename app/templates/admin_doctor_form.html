@@ -4,7 +4,7 @@
 {% if error == "invalid_email" %}<p>Enter a valid email address.</p>
 {% elif error == "email_exists" %}<p>An account with this email already exists.</p>
 {% elif error == "invalid_details" %}<p>Enter a name and specialty, and experience from 0 to 80 years.</p>
-{% elif error == "invalid_password" %}<p>Password must be at least 8 characters and not a common default password.</p>
+{% elif error == "invalid_password" %}<p>Choose a non-default password.</p>
 {% elif error == "password_mismatch" %}<p>Passwords do not match.</p>{% endif %}
 <form method="post" action="/admin/doctors">
   <label>Email <input name="email" type="email" maxlength="254" required></label>

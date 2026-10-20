@@ -12,7 +12,6 @@ from db import (
     log,
     parse_strict_int,
     record_audit_event,
-    set_db_context,
     templates,
     within_length,
 )
@@ -35,21 +34,10 @@ def _patient_email_query(email):
     return f"&patient_email={quote(email.strip(), safe='')}"
 
 
-def _overlap_redirect(
-    doctor_id, patient_id, conflict_id, service_id, patient_email_query=""
-):
-    if conflict_id:
-        return RedirectResponse(
-            f"/doctors/{doctor_id}/slots?error=overlap"
-            f"&conflict_appointment_id={conflict_id}"
-            f"&conflict_patient_id={patient_id}&service_id={service_id}"
-            f"{patient_email_query}",
-            status_code=303,
-        )
+def _overlap_redirect(doctor_id, service_id, patient_email_query=""):
     return RedirectResponse(
         f"/doctors/{doctor_id}/slots?error=overlap"
-        f"&conflict_patient_id={patient_id}&service_id={service_id}"
-        f"{patient_email_query}",
+        f"&service_id={service_id}{patient_email_query}",
         status_code=303,
     )
 
@@ -133,50 +121,40 @@ def doctor_slots(request: Request, doctor_id: str):
         cur.close()
         conn.close()
         return RedirectResponse("/doctors", status_code=303)
-    conflict_appointment_id = request.query_params.get("conflict_appointment_id")
-    conflict_patient_id = request.query_params.get("conflict_patient_id")
-    if error == "overlap" and conflict_appointment_id and role == "patient":
-        cur.execute(
-            """
-            SELECT d.full_name, a.starts_at, a.ends_at
-            FROM appointments a
-            JOIN slots s ON s.id = a.slot_id
-            JOIN doctors d ON d.id = s.doctor_id
-            WHERE a.id=%s AND a.patient_user_id=%s AND a.status='scheduled'
-            """,
-            (conflict_appointment_id, user["id"]),
-        )
-        row = cur.fetchone()
-        if row:
-            conflict = {
-                "doctor_name": row[0],
-                "starts_at": row[1],
-                "ends_at": row[2],
-            }
-    elif (
-        error == "overlap"
-        and conflict_appointment_id
-        and conflict_patient_id
-        and role == "registrar"
-        and parse_strict_int(conflict_patient_id, min_value=1) is not None
-    ):
-        cur.execute(
-            """
-            SELECT d.full_name, a.starts_at, a.ends_at
-            FROM appointments a
-            JOIN slots s ON s.id = a.slot_id
-            JOIN doctors d ON d.id = s.doctor_id
-            WHERE a.id=%s AND a.patient_user_id=%s AND a.status='scheduled'
-            """,
-            (conflict_appointment_id, conflict_patient_id),
-        )
-        row = cur.fetchone()
-        if row:
-            conflict = {
-                "doctor_name": row[0],
-                "starts_at": row[1],
-                "ends_at": row[2],
-            }
+    conflict_candidates = []
+    if error == "overlap" and role in ("patient", "registrar"):
+        if role == "patient":
+            conflict_patient_id = user["id"]
+        elif selected_patient:
+            cur.execute(
+                "SELECT id FROM users WHERE email=%s AND role='patient'",
+                (selected_patient["email"],),
+            )
+            found = cur.fetchone()
+            conflict_patient_id = found[0] if found else None
+        else:
+            conflict_patient_id = None
+        if conflict_patient_id is not None:
+            cur.execute(
+                """
+                SELECT d.full_name, a.starts_at, a.ends_at
+                FROM appointments a
+                JOIN doctors d ON d.id = a.doctor_id
+                WHERE a.patient_user_id=%s
+                  AND a.status='scheduled'
+                  AND a.ends_at > CURRENT_TIMESTAMP
+                ORDER BY a.starts_at
+                """,
+                (conflict_patient_id,),
+            )
+            conflict_candidates = [
+                {
+                    "doctor_name": row[0],
+                    "starts_at": row[1],
+                    "ends_at": row[2],
+                }
+                for row in cur.fetchall()
+            ]
     raw_confirmation_id = request.query_params.get("appointment_id")
     confirmation_id = (
         parse_strict_int(raw_confirmation_id, min_value=1)
@@ -290,6 +268,22 @@ def doctor_slots(request: Request, doctor_id: str):
         }
         for day, day_slots in sorted(slots_by_day.items())
     ]
+    if conflict_candidates:
+        visible_slots = [
+            slot
+            for day_slots in slots_by_day.values()
+            for slot in day_slots
+        ]
+        for candidate in conflict_candidates:
+            if any(
+                candidate["starts_at"] < slot["ends_at"]
+                and candidate["ends_at"] > slot["starts_at"]
+                for slot in visible_slots
+            ):
+                conflict = candidate
+                break
+        if conflict is None:
+            conflict = conflict_candidates[0]
     return templates.TemplateResponse(
         "slots.html",
         {
@@ -496,10 +490,7 @@ def book_slot(
     if conflict_row:
         cur.close()
         conn.close()
-        return _overlap_redirect(
-            doctor_id, patient_id, conflict_row[0], service_id,
-            patient_email_query,
-        )
+        return _overlap_redirect(doctor_id, service_id, patient_email_query)
 
     try:
         cur.execute(
@@ -541,34 +532,11 @@ def book_slot(
         )
     except psycopg2.errors.ExclusionViolation as exc:
         conn.rollback()
-        set_db_context(conn, user)
         constraint = exc.diag.constraint_name if exc.diag is not None else None
-        conflict_id = None
-        if constraint == "appointments_no_overlap_per_patient":
-            try:
-                cur.execute(
-                    """
-                    SELECT a.id
-                    FROM appointments a
-                    WHERE a.patient_user_id = %s
-                      AND a.status = 'scheduled'
-                      AND a.starts_at < %s
-                      AND a.ends_at > %s
-                    """,
-                    (patient_id, visit_ends_at, starts_at),
-                )
-                row = cur.fetchone()
-                conflict_id = row[0] if row else None
-            except Exception:
-                log.exception("could not load patient overlap for slot %s", slot_id)
-                conn.rollback()
         cur.close()
         conn.close()
         if constraint == "appointments_no_overlap_per_patient":
-            return _overlap_redirect(
-                doctor_id, patient_id, conflict_id, service_id,
-                patient_email_query,
-            )
+            return _overlap_redirect(doctor_id, service_id, patient_email_query)
         return RedirectResponse(
             f"/doctors/{doctor_id}/slots?error=unavailable"
             f"&service_id={service_id}{patient_email_query}",

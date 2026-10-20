@@ -54,12 +54,23 @@ services:
       PGTZ: Asia/Yerevan
       SESSION_SECRET: ${SESSION_SECRET:-dev-secret-change-me}
       DATABASE_URL: postgresql://clinic_api:${CLINIC_API_PASSWORD:?Set CLINIC_API_PASSWORD in .env}@db:5432/${POSTGRES_DB:?Set POSTGRES_DB in .env}
+      SMTP_HOST: ${SMTP_HOST:-mailpit}
+      SMTP_PORT: ${SMTP_PORT:-1025}
+      SMTP_FROM: ${SMTP_FROM:-noreply@clinic.local}
+      SMTP_STARTTLS: ${SMTP_STARTTLS:-false}
+      SMTP_SSL: ${SMTP_SSL:-false}
+      SMTP_USERNAME: ${SMTP_USERNAME:-}
+      SMTP_PASSWORD: ${SMTP_PASSWORD:-}
+      SMTP_TIMEOUT: ${SMTP_TIMEOUT:-5}
+      PUBLIC_BASE_URL: ${PUBLIC_BASE_URL:-http://localhost:8080}
     networks:
       - frontend
       - backend
     depends_on:
       seed:
         condition: service_completed_successfully
+      mailpit:
+        condition: service_started
     restart: unless-stopped
 
   seed:
@@ -79,6 +90,15 @@ services:
       migrate:
         condition: service_completed_successfully
     command: ["python", "seed.py"]
+
+  mailpit:
+    image: axllent/mailpit:v1.27.1
+    ports:
+      - "127.0.0.1:8025:8025"
+      - "127.0.0.1:1025:1025"
+    networks:
+      - frontend
+    restart: unless-stopped
 
   proxy:
     build:

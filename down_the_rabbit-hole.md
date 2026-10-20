@@ -452,7 +452,7 @@ python3 -m pytest -v tests/test_stage4.py::test_admin_schedule_configuration_is_
 
 ## 11. Ошибки бронирования
 
-При конфликте времени API перенаправляет на `/doctors/{doctor_id}/slots` с параметрами `error=overlap` и `conflict_appointment_id`. Для registrar также передаётся `conflict_patient_id`, чтобы показать конфликт выбранного пациента.
+При конфликте времени API перенаправляет на `/doctors/{doctor_id}/slots` с параметрами `error=overlap` и `service_id`. Для регистратора также сохраняется уже введённый `patient_email`. Идентификаторы пациента и записи в адрес не попадают: страницу слотов сама находит ближайший конфликт по сессии пациента или по этому email.
 
 Страница слотов показывает:
 

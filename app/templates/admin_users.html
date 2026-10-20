@@ -9,11 +9,11 @@
 {% if error == "invalid_email" %}<p>Enter a valid email address.</p>
 {% elif error == "email_exists" %}<p>An account with this email already exists.</p>
 {% elif error == "invalid_role" %}<p>Choose registrar or admin.</p>
-{% elif error == "invalid_password" %}<p>Password must be at least 8 characters and not a common default password.</p>
+{% elif error == "invalid_password" %}<p>Choose a non-default password.</p>
 {% elif error == "password_mismatch" %}<p>Passwords do not match.</p>
 {% elif error == "user_not_found" %}<p>User not found.</p>
 {% elif error == "self_block" %}<p>You cannot block or unblock your own administrator account.</p>
-{% elif error == "password_reset_not_allowed" %}<p>Password resets are available only for patients and registrars.</p>{% endif %}
+{% elif error == "password_reset_not_allowed" %}<p>Password resets are available only for registrars and other administrators.</p>{% endif %}
 {% if future_cancelled is not none %}
   <p>Cancelled {{ future_cancelled }} future appointment(s).</p>
 {% endif %}
@@ -39,13 +39,14 @@
     {% for user in staff_users %}
       <li>
         {{ user.email }} — {{ user.role }} — {{ "Blocked" if user.blocked else "Active" }}
-        {% if user.role == "registrar" %}
+        {% if user.role == "registrar" or (user.role == "admin" and user.id != current_admin_id) %}
           <form method="post" action="/admin/users/{{ user.id }}/password">
             <label>New password <input name="new_password" type="password" minlength="8" maxlength="72" required></label>
             <label>Confirm <input name="confirm_password" type="password" minlength="8" maxlength="72" required></label>
             <button type="submit">Reset password</button>
           </form>
-        {% elif user.role == "admin" %}
+        {% endif %}
+        {% if user.role == "admin" %}
           {% if user.id == current_admin_id %}
             <strong>Your own administrator account cannot be blocked.</strong>
           {% elif user.blocked %}
@@ -89,11 +90,6 @@
           <button type="submit">Cancel future appointments</button>
         </form>
       {% endif %}
-      <form method="post" action="/admin/users/{{ user.id }}/password">
-        <label>New password <input name="new_password" type="password" minlength="8" maxlength="72" required></label>
-        <label>Confirm <input name="confirm_password" type="password" minlength="8" maxlength="72" required></label>
-        <button type="submit">Reset password</button>
-      </form>
     </li>
   {% endfor %}
 </ul>

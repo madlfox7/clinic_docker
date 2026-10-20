@@ -17,11 +17,13 @@ from db import (
     db,
     db_as,
     load_session_user,
+    log,
     pwd,
     record_audit_event,
     templates,
     within_length,
 )
+from mailer import send_password_reset, smtp_ready
 
 router = APIRouter()
 
@@ -41,7 +43,29 @@ DEFAULT_REGISTRATION_PASSWORDS = {
     "welcome1",
     "changeme",
     "passw0rd",
+    "11111111",
+    "aaaaaaaa",
 }
+
+
+def is_weak_password(password: str, email: str | None = None) -> bool:
+    """Reject blank, repeated, listed, and email-derived passwords before hashing."""
+    if not isinstance(password, str) or contains_nul(password):
+        return True
+    if not within_length(password, MAX_PASSWORD_LENGTH):
+        return True
+    stripped = password.strip()
+    if len(stripped) < 8:
+        return True
+    folded = stripped.casefold()
+    if folded in DEFAULT_REGISTRATION_PASSWORDS or len(set(folded)) == 1:
+        return True
+    if email:
+        normalized = email.strip().casefold()
+        local_part = normalized.split("@", 1)[0]
+        if folded == normalized or (local_part and folded == local_part):
+            return True
+    return False
 
 
 def _login_page(
@@ -51,6 +75,7 @@ def _login_page(
     role: str = "guest",
     email=None,
     registered: bool = False,
+    password_reset: bool = False,
 ):
     return templates.TemplateResponse(
         "login.html",
@@ -60,6 +85,7 @@ def _login_page(
             "role": role,
             "email": email,
             "registered": registered,
+            "password_reset": password_reset,
         },
         status_code=status_code,
     )
@@ -155,6 +181,7 @@ def login_form(request: Request):
         request,
         None,
         registered=request.query_params.get("registered") == "1",
+        password_reset=request.query_params.get("reset") == "1",
     )
 
 
@@ -193,7 +220,7 @@ def register(
             400,
             normalized_email,
         )
-    if password.strip().casefold() in DEFAULT_REGISTRATION_PASSWORDS:
+    if is_weak_password(password, normalized_email):
         return _register_page(
             request,
             "Choose a non-default password.",
@@ -283,6 +310,203 @@ def login(request: Request, email: str = Form(...), password: str = Form(...)):
     return RedirectResponse("/me", status_code=303)
 
 
+RESET_TOKEN_PATTERN = re.compile(r"^[0-9a-f]{64}$")
+
+
+def _client_source(request: Request) -> str:
+    client_source = request.headers.get("x-real-ip")
+    if (
+        not client_source
+        or contains_nul(client_source)
+        or not within_length(client_source, 128)
+    ):
+        return request.client.host if request.client else "unknown"
+    return client_source
+
+
+def _forgot_password_page(
+    request: Request,
+    error: str | None = None,
+    status_code: int = 200,
+    sent: bool = False,
+):
+    return templates.TemplateResponse(
+        "forgot_password.html",
+        {
+            "request": request,
+            "role": "guest",
+            "error": error,
+            "sent": sent,
+        },
+        status_code=status_code,
+    )
+
+
+def _revoke_reset_token(token: str) -> None:
+    conn = db()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT public.revoke_patient_password_reset(%s)",
+                (token,),
+            )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def _reset_password_page(
+    request: Request,
+    token: str,
+    error: str | None = None,
+    status_code: int = 200,
+):
+    return templates.TemplateResponse(
+        "reset_password.html",
+        {
+            "request": request,
+            "role": "guest",
+            "token": token,
+            "error": error,
+        },
+        status_code=status_code,
+    )
+
+
+@router.get("/forgot-password")
+def forgot_password_form(request: Request):
+    user, status = load_session_user(request)
+    if status == "ok":
+        return RedirectResponse("/me", status_code=303)
+    if status == "blocked":
+        return _login_page(request, "Account is blocked", 403)
+    return _forgot_password_page(
+        request,
+        sent=request.query_params.get("sent") == "1",
+    )
+
+
+@router.post("/forgot-password")
+def forgot_password(request: Request, email: str = Form(...)):
+    user, status = load_session_user(request)
+    if status == "ok":
+        return RedirectResponse("/me", status_code=303)
+    if status == "blocked":
+        return _login_page(request, "Account is blocked", 403)
+    if contains_nul(email) or any(char in email for char in "\r\n"):
+        return _forgot_password_page(request, "NUL characters are not allowed.", 400)
+    if not within_length(email, MAX_EMAIL_LENGTH):
+        return _forgot_password_page(request, "Enter a valid email address.", 400)
+    if not smtp_ready():
+        return _forgot_password_page(
+            request,
+            "The reset email could not be sent. Try again later.",
+            503,
+        )
+    conn = db()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT reset_token, rate_limited
+                FROM public.request_patient_password_reset(%s, %s)
+                """,
+                (email, _client_source(request)),
+            )
+            row = cur.fetchone()
+        conn.commit()
+    finally:
+        conn.close()
+    if row and row[1]:
+        response = _forgot_password_page(
+            request,
+            "Too many password reset attempts. Try again later.",
+            429,
+        )
+        response.headers["Retry-After"] = "900"
+        return response
+    token = row[0] if row else None
+    if token:
+        try:
+            send_password_reset(email.strip().lower(), token)
+        except Exception:
+            log.exception("could not send password reset email")
+            try:
+                _revoke_reset_token(token)
+            except Exception:
+                log.exception("could not revoke undelivered password reset token")
+            return _forgot_password_page(
+                request,
+                "The reset email could not be sent. Try again later.",
+                503,
+            )
+    return RedirectResponse("/forgot-password?sent=1", status_code=303)
+
+
+@router.get("/reset-password")
+def reset_password_form(request: Request, token: str = ""):
+    user, status = load_session_user(request)
+    if status == "ok":
+        return RedirectResponse("/me", status_code=303)
+    if not RESET_TOKEN_PATTERN.fullmatch(token):
+        return _reset_password_page(
+            request, "", "This reset link is invalid or has expired.", 400
+        )
+    return _reset_password_page(request, token)
+
+
+@router.post("/reset-password")
+def reset_password(
+    request: Request,
+    token: str = Form(...),
+    new_password: str = Form(...),
+    confirm_password: str = Form(...),
+):
+    user, status = load_session_user(request)
+    if status == "ok":
+        return RedirectResponse("/me", status_code=303)
+    if contains_nul(token, new_password, confirm_password):
+        return _reset_password_page(request, "", "NUL characters are not allowed.", 400)
+    if not RESET_TOKEN_PATTERN.fullmatch(token):
+        return _reset_password_page(
+            request, "", "This reset link is invalid or has expired.", 400
+        )
+    if new_password != confirm_password:
+        return _reset_password_page(request, token, "Passwords do not match.", 400)
+    if (
+        not within_length(new_password, MAX_PASSWORD_LENGTH)
+        or len(new_password) < 8
+        or is_weak_password(new_password)
+    ):
+        return _reset_password_page(
+            request, token, "Choose a non-default password.", 400
+        )
+    conn = db()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT result, resulting_auth_version
+                FROM public.consume_patient_password_reset(%s, %s, %s)
+                """,
+                (token, new_password, pwd.hash(new_password)),
+            )
+            row = cur.fetchone()
+        conn.commit()
+    finally:
+        conn.close()
+    if row and row[0] == "weak":
+        return _reset_password_page(
+            request, token, "Choose a non-default password.", 400
+        )
+    if row is None or row[0] != "changed":
+        return _reset_password_page(
+            request, "", "This reset link is invalid or has expired.", 400
+        )
+    request.session.clear()
+    return RedirectResponse("/login?reset=1", status_code=303)
+
+
 @router.get("/me")
 def me(request: Request):
     user, denied = require_user(request)
@@ -348,7 +572,7 @@ def change_own_password(
     if (
         not within_length(new_password, MAX_PASSWORD_LENGTH)
         or len(new_password) < 8
-        or new_password.strip().casefold() in DEFAULT_REGISTRATION_PASSWORDS
+        or is_weak_password(new_password, user["email"])
     ):
         return RedirectResponse("/me?password_error=invalid", status_code=303)
     if new_password != confirm_password:

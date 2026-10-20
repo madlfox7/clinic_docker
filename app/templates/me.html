@@ -35,7 +35,7 @@
 <h2>Change password</h2>
 {% if password_changed == "1" %}<p>Password changed successfully.</p>{% endif %}
 {% if password_error == "current" %}<p>Current password is incorrect.</p>
-{% elif password_error == "invalid" %}<p>Use a non-default password of at least 8 characters.</p>
+{% elif password_error == "invalid" %}<p>Choose a non-default password.</p>
 {% elif password_error == "mismatch" %}<p>New password and confirmation do not match.</p>
 {% elif password_error == "same" %}<p>Choose a password different from your current one.</p>
 {% elif password_error == "stale" %}<p>Your password changed during this request. Please retry.</p>

@@ -1,6 +1,8 @@
 import os
 import re
+import statistics
 import subprocess
+import time
 import uuid
 from datetime import date, timedelta
 from pathlib import Path
@@ -18,6 +20,7 @@ from tests.clinical_notes import (
 ROOT = Path(__file__).resolve().parents[1]
 
 BASE = os.environ.get("CLINIC_TEST_BASE", "http://localhost:8080")
+MAILPIT = os.environ.get("CLINIC_MAILPIT", "http://127.0.0.1:8025")
 PASSWORD = "password123"
 
 PAT = "pat@clinic.local"
@@ -34,6 +37,28 @@ def client():
 
 def login(c: httpx.Client, email: str) -> httpx.Response:
 	return c.post("/login", data={"email": email, "password": PASSWORD})
+
+
+def mailpit_messages(address: str) -> list[dict]:
+	response = httpx.get(
+		f"{MAILPIT}/api/v1/search",
+		params={"query": f"to:{address}"},
+		timeout=5,
+	)
+	response.raise_for_status()
+	return response.json().get("messages") or []
+
+
+def latest_reset_token(address: str) -> str:
+	messages = mailpit_messages(address)
+	assert messages, "reset email was not delivered"
+	message_id = messages[0].get("ID") or messages[0].get("Id")
+	message = httpx.get(f"{MAILPIT}/api/v1/message/{message_id}", timeout=5)
+	message.raise_for_status()
+	body = message.json().get("Text") or ""
+	match = re.search(r"token=([0-9a-f]{64})", body)
+	assert match, body
+	return match.group(1)
 
 
 def test_application_database_timezone_is_yerevan():
@@ -209,6 +234,110 @@ def test_nul_characters_are_rejected_before_database_use():
 		assert search_nul.status_code == 400
 
 
+def test_weak_passwords_are_rejected_without_creating_users():
+	stamp = uuid.uuid4().hex
+	email = f"weak-{stamp}@example.com"
+	cases = (
+		"11111111",
+		"aaaaaaaa",
+		"        ",
+		email,
+		"password",
+		"12345678",
+	)
+	with client() as guest, client() as admin, client() as patient:
+		for password in cases:
+			rejected = guest.post(
+				"/register",
+				data={
+					"email": email,
+					"password": password,
+					"confirm_password": password,
+				},
+			)
+			assert rejected.status_code == 400
+			assert "Choose a non-default password." in rejected.text
+			assert psql(
+				f"SELECT count(*) FROM users WHERE lower(email) = lower('{email}')"
+			) == "0"
+		login(admin, ADMIN)
+		staff_email = f"weak-staff-{stamp}@example.com"
+		staff = admin.post(
+			"/admin/users",
+			data={
+				"email": staff_email,
+				"role": "registrar",
+				"password": "aaaaaaaa",
+				"confirm_password": "aaaaaaaa",
+			},
+		)
+		assert "error=invalid_password" in str(staff.url)
+		assert "Choose a non-default password." in staff.text
+		assert psql(
+			f"SELECT count(*) FROM users WHERE email = '{staff_email}'"
+		) == "0"
+		login(patient, PAT)
+		changed = patient.post(
+			"/me/password",
+			data={
+				"current_password": PASSWORD,
+				"new_password": "        ",
+				"confirm_password": "        ",
+			},
+		)
+		assert "password_error=invalid" in str(changed.url)
+		assert "Choose a non-default password." in changed.text
+	with client() as patient:
+		assert login(patient, PAT).status_code == 200
+
+
+def test_login_timing_does_not_reveal_whether_email_exists():
+	email = f"timing-{uuid.uuid4().hex}@example.com"
+	password = "Timing-Equal-2026!"
+	with client() as guest:
+		created = guest.post(
+			"/register",
+			data={
+				"email": email,
+				"password": password,
+				"confirm_password": password,
+			},
+		)
+		assert "registered=1" in str(created.url)
+	try:
+		existing = []
+		missing = []
+		for index in range(3):
+			with client() as existing_client:
+				started = time.perf_counter()
+				failed = existing_client.post(
+					"/login", data={"email": email, "password": "wrong-password"}
+				)
+				existing.append(time.perf_counter() - started)
+				assert failed.status_code == 401
+			with client() as missing_client:
+				started = time.perf_counter()
+				failed = missing_client.post(
+					"/login",
+					data={
+						"email": f"missing-{index}-{uuid.uuid4().hex}@example.com",
+						"password": "wrong-password",
+					},
+				)
+				missing.append(time.perf_counter() - started)
+				assert failed.status_code == 401
+		delta = abs(statistics.median(existing) - statistics.median(missing))
+		assert delta < 0.15, (existing, missing, delta)
+	finally:
+		psql(
+			f"""
+			DELETE FROM login_attempts
+			WHERE email_fingerprint = public.digest(lower('{email}'), 'sha256');
+			DELETE FROM users WHERE email = '{email}'
+			"""
+		)
+
+
 def test_already_logged_in_admin_is_not_asked_for_credentials():
 	with client() as c:
 		login(c, ADMIN)
@@ -374,11 +503,185 @@ def test_overlap_same_time_other_doctor():
 			page = str(r.url) + r.text.lower()
 			if "overlap" not in page:
 				pytest.skip("seed slots on two doctors did not overlap in time")
+			assert "conflict_patient_id" not in str(r.url)
+			assert "conflict_appointment_id" not in str(r.url)
+			assert "conflict_patient_id" not in r.text
+			assert "conflict_appointment_id" not in r.text
 		finally:
 			mine = c.get("/my")
 			created_ids = set(appointment_ids(mine.text)) - existing_ids
 			for appointment_id in created_ids:
 				c.post(f"/appointments/{appointment_id}/cancel")
+
+
+def test_overlap_redirect_hides_patient_and_appointment_ids():
+	service_id = psql("SELECT id FROM services WHERE name = 'General consultation'")
+	anna = psql("SELECT id FROM doctors WHERE full_name = 'Anna Ohanyan'")
+	levon = psql("SELECT id FROM doctors WHERE full_name = 'Levon Petrosyan'")
+	anna_slot = psql(
+		f"""
+		INSERT INTO slots (
+			doctor_id, service_id, starts_at, ends_at, duration_minutes, buffer_minutes
+		)
+		VALUES (
+			{int(anna)}, {int(service_id)},
+			'2037-06-06 10:00', '2037-06-06 10:30', 30, 0
+		)
+		RETURNING id
+		"""
+	)
+	levon_slot = psql(
+		f"""
+		INSERT INTO slots (
+			doctor_id, service_id, starts_at, ends_at, duration_minutes, buffer_minutes
+		)
+		VALUES (
+			{int(levon)}, {int(service_id)},
+			'2037-06-06 10:15', '2037-06-06 10:45', 30, 0
+		)
+		RETURNING id
+		"""
+	)
+	try:
+		with client() as patient, client() as registrar:
+			login(patient, PAT)
+			login(registrar, REG)
+			booked = patient.post(
+				f"/slots/{int(anna_slot)}/book",
+				data={"service_id": service_id},
+			)
+			assert booked.status_code == 200
+			assert "booked" in str(booked.url)
+			overlapped = patient.post(
+				f"/slots/{int(levon_slot)}/book",
+				data={"service_id": service_id},
+			)
+			assert "error=overlap" in str(overlapped.url)
+			assert "conflict_patient_id" not in str(overlapped.url)
+			assert "conflict_appointment_id" not in str(overlapped.url)
+			assert "Anna Ohanyan" in overlapped.text
+			registrar_overlap = registrar.post(
+				f"/slots/{int(levon_slot)}/book",
+				data={"service_id": service_id, "patient_email": PAT},
+			)
+			location = str(registrar_overlap.url)
+			assert "error=overlap" in location
+			assert "patient_email=" in location
+			assert "conflict_patient_id" not in location
+			assert "conflict_appointment_id" not in location
+			assert "Anna Ohanyan" in registrar_overlap.text
+			assert "conflict_patient_id" not in registrar_overlap.text
+			assert "conflict_appointment_id" not in registrar_overlap.text
+	finally:
+		psql(
+			f"""
+			DELETE FROM appointments
+			WHERE slot_id IN ({int(anna_slot)}, {int(levon_slot)});
+			DELETE FROM slots
+			WHERE id IN ({int(anna_slot)}, {int(levon_slot)});
+			"""
+		)
+
+
+def test_patient_recovers_password_without_admin_reset():
+	email = f"recover-patient-{uuid.uuid4().hex}@example.test"
+	password = "Clinic-Patient-Recover-2026!"
+	replacement = "Clinic-Patient-Recovered-2026!"
+	user_id = None
+	try:
+		with (
+			client() as guest,
+			client() as other_session,
+			client() as admin,
+			client() as doctor,
+		):
+			registered = guest.post(
+				"/register",
+				data={
+					"email": email,
+					"password": password,
+					"confirm_password": password,
+				},
+			)
+			assert "Account created." in registered.text
+			user_id = int(psql(f"SELECT id FROM users WHERE email = '{email}'"))
+			login(admin, ADMIN)
+			users_page = admin.get("/admin/users")
+			assert "Forgot password?" not in users_page.text
+			assert f'action="/admin/users/{user_id}/password"' not in users_page.text
+			denied = admin.post(
+				f"/admin/users/{user_id}/password",
+				data={
+					"new_password": replacement,
+					"confirm_password": replacement,
+				},
+			)
+			assert "password_reset_not_allowed" in str(denied.url)
+			assert "Role: patient" in guest.post(
+				"/login", data={"email": email, "password": password}
+			).text
+			other_session.post("/login", data={"email": email, "password": password})
+			logout(guest)
+			login_page = guest.get("/login")
+			assert "Forgot password?" in login_page.text
+			doctor_messages = len(mailpit_messages(DOC))
+			doctor_reset = doctor.post(
+				"/forgot-password", data={"email": DOC}
+			)
+			assert "sent=1" in str(doctor_reset.url)
+			assert "token=" not in str(doctor_reset.url)
+			assert "reset-password?token=" not in doctor_reset.text
+			assert len(mailpit_messages(DOC)) == doctor_messages
+			sent = guest.post("/forgot-password", data={"email": email})
+			assert "sent=1" in str(sent.url)
+			assert "token=" not in str(sent.url)
+			assert "reset link has been sent" in sent.text
+			assert "reset-password?token=" not in sent.text
+			token = latest_reset_token(email)
+			weak = guest.post(
+				"/reset-password",
+				data={
+					"token": token,
+					"new_password": "password123",
+					"confirm_password": "password123",
+				},
+			)
+			assert "Choose a non-default password." in weak.text
+			changed = guest.post(
+				"/reset-password",
+				data={
+					"token": token,
+					"new_password": replacement,
+					"confirm_password": replacement,
+				},
+			)
+			assert "Password updated." in changed.text
+			assert other_session.get("/me").url.path == "/login"
+			assert "Invalid email or password" in guest.post(
+				"/login", data={"email": email, "password": password}
+			).text
+			assert "Role: patient" in guest.post(
+				"/login", data={"email": email, "password": replacement}
+			).text
+			logout(guest)
+			reused = guest.post(
+				"/reset-password",
+				data={
+					"token": token,
+					"new_password": "Clinic-Patient-Again-2026!",
+					"confirm_password": "Clinic-Patient-Again-2026!",
+				},
+			)
+			assert "invalid or has expired" in reused.text
+	finally:
+		if user_id:
+			psql(
+				f"""
+				DELETE FROM audit_events
+				WHERE actor_user_id = {user_id} OR target_id = {user_id};
+				DELETE FROM users WHERE id = {user_id};
+				"""
+			)
 
 
 def test_patient_cannot_open_doctor_appointments():
@@ -2430,7 +2733,7 @@ def test_admin_can_create_update_deactivate_and_reactivate_doctor():
 				},
 			)
 			assert "password_reset_not_allowed" in str(reset.url)
-			assert "only for patients and registrars" in reset.text
+			assert "only for registrars and other administrators" in reset.text
 			denied_doctor_login = doctor.post(
 				"/login", data={"email": email, "password": reset_password}
 			)
@@ -2598,7 +2901,7 @@ def test_admin_can_create_staff_and_reset_password():
 			)
 			assert (
 				f'action="/admin/users/{other_admin_id}/password"'
-				not in admin.get("/admin/users").text
+				in admin.get("/admin/users").text
 			)
 			managed_admin_login = managed_admin.post(
 				"/login",
@@ -2657,14 +2960,32 @@ def test_admin_can_create_staff_and_reset_password():
 				"/login",
 				data={"email": admin_email, "password": initial_password},
 			).text
-			denied_admin_reset = admin.post(
+			own_admin_id = int(psql(f"SELECT id FROM users WHERE email = '{ADMIN}'"))
+			denied_self_reset = admin.post(
+				f"/admin/users/{own_admin_id}/password",
+				data={
+					"new_password": reset_password,
+					"confirm_password": reset_password,
+				},
+			)
+			assert "password_reset_not_allowed" in str(denied_self_reset.url)
+			admin_reset = admin.post(
 				f"/admin/users/{other_admin_id}/password",
 				data={
 					"new_password": reset_password,
 					"confirm_password": reset_password,
 				},
 			)
-			assert "password_reset_not_allowed" in str(denied_admin_reset.url)
+			assert "Password reset." in admin_reset.text
+			assert managed_admin.get("/me").url.path == "/login"
+			assert "Invalid email or password" in managed_admin.post(
+				"/login",
+				data={"email": admin_email, "password": initial_password},
+			).text
+			assert "Role: admin" in managed_admin.post(
+				"/login",
+				data={"email": admin_email, "password": reset_password},
+			).text
 
 			created = admin.post(
 				"/admin/users",

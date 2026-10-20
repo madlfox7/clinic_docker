@@ -19,8 +19,8 @@ from db import (
     within_length,
 )
 from routes_auth import (
-    DEFAULT_REGISTRATION_PASSWORDS,
     _normalize_registration_email,
+    is_weak_password,
     require_user,
 )
 
@@ -30,13 +30,8 @@ from routes_auth import (
 
 router = APIRouter()
 
-def _valid_admin_password(password: str) -> bool:
-    return (
-        not contains_nul(password)
-        and within_length(password, MAX_PASSWORD_LENGTH)
-        and len(password) >= 8
-        and password.strip().casefold() not in DEFAULT_REGISTRATION_PASSWORDS
-    )
+def _valid_admin_password(password: str, email: str | None = None) -> bool:
+    return not is_weak_password(password, email)
 
 @router.get("/admin/audit")
 def admin_audit(request: Request):
@@ -153,7 +148,7 @@ def create_staff_user(
         return RedirectResponse("/admin/users?error=invalid_email", status_code=303)
     if role not in ("registrar", "admin"):
         return RedirectResponse("/admin/users?error=invalid_role", status_code=303)
-    if not _valid_admin_password(password):
+    if not _valid_admin_password(password, normalized_email):
         return RedirectResponse("/admin/users?error=invalid_password", status_code=303)
     if password != confirm_password:
         return RedirectResponse("/admin/users?error=password_mismatch", status_code=303)
@@ -201,6 +196,15 @@ def reset_user_password(
     try:
         with conn:
             with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT email FROM users WHERE id = %s",
+                    (parsed_user_id,),
+                )
+                target = cur.fetchone()
+                if target and not _valid_admin_password(new_password, target[0]):
+                    return RedirectResponse(
+                        "/admin/users?error=invalid_password", status_code=303
+                    )
                 cur.execute(
                     """
                     SELECT public.admin_reset_user_password(%s, %s)
@@ -643,7 +647,7 @@ def create_doctor(
         return RedirectResponse(
             "/admin/doctors/new?error=invalid_details", status_code=303
         )
-    if not _valid_admin_password(password):
+    if not _valid_admin_password(password, normalized_email):
         return RedirectResponse(
             "/admin/doctors/new?error=invalid_password", status_code=303
         )

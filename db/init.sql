@@ -26,6 +26,30 @@ CREATE INDEX IF NOT EXISTS login_attempts_source_recent_idx
 CREATE INDEX IF NOT EXISTS login_attempts_cleanup_idx
   ON login_attempts (last_attempt_at);
 
+CREATE TABLE IF NOT EXISTS password_reset_tokens (
+  id BIGSERIAL PRIMARY KEY,
+  user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  token_hash BYTEA NOT NULL UNIQUE,
+  expires_at TIMESTAMPTZ NOT NULL,
+  used_at TIMESTAMPTZ,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE INDEX IF NOT EXISTS password_reset_tokens_user_idx
+  ON password_reset_tokens (user_id, created_at DESC);
+
+CREATE TABLE IF NOT EXISTS password_reset_attempts (
+  email_fingerprint BYTEA NOT NULL,
+  source_fingerprint BYTEA NOT NULL,
+  request_count INTEGER NOT NULL CHECK (request_count > 0),
+  window_started_at TIMESTAMPTZ NOT NULL,
+  last_request_at TIMESTAMPTZ NOT NULL,
+  PRIMARY KEY (email_fingerprint, source_fingerprint)
+);
+
+CREATE INDEX IF NOT EXISTS password_reset_attempts_source_idx
+  ON password_reset_attempts (source_fingerprint, window_started_at);
+
 CREATE EXTENSION IF NOT EXISTS pgcrypto;
 
 ALTER TABLE users
