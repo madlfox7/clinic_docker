@@ -161,7 +161,7 @@ def load_appointment_notice(cur, appointment_id: int):
     cur.execute(
         """
         SELECT patient_email, doctor_email, doctor_name, service_name,
-               starts_at, ends_at
+               starts_at, ends_at, patient_notifications, doctor_notifications
         FROM public.appointment_notice(%s)
         """,
         (appointment_id,),
@@ -176,6 +176,8 @@ def load_appointment_notice(cur, appointment_id: int):
         "service_name": row[3],
         "starts_at": row[4],
         "ends_at": row[5],
+        "patient_notifications": row[6],
+        "doctor_notifications": row[7],
     }
 
 

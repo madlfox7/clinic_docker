@@ -152,9 +152,9 @@ def deliver_appointment_emails(notice, event: str) -> None:
     if not notice.get("starts_at") or not notice.get("ends_at"):
         return
     recipients = []
-    if notice.get("patient_email"):
+    if notice.get("patient_email") and notice.get("patient_notifications", True):
         recipients.append((notice["patient_email"], "patient"))
-    if notice.get("doctor_email"):
+    if notice.get("doctor_email") and notice.get("doctor_notifications", True):
         recipients.append((notice["doctor_email"], "doctor"))
     for recipient, audience in recipients:
         try:

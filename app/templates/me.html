@@ -32,6 +32,18 @@
   <p><a href="/admin/users">Manage patients</a> | <a href="/admin/schedule">Manage schedule</a> | <a href="/admin/audit">Audit log</a></p>
 {% endif %}
 
+<h2>Email notifications</h2>
+{% if notifications_saved == "1" %}<p>Email notification setting saved.</p>{% endif %}
+{% if notifications_error == "1" %}<p>Could not save the email notification setting.</p>{% endif %}
+<form method="post" action="/me/notifications">
+  <label>
+    <input type="checkbox" name="email_notifications" value="1" {% if email_notifications %}checked{% endif %}>
+    Receive appointment emails
+  </label>
+  <button type="submit">Save</button>
+</form>
+<p>Password and email-change messages are always sent.</p>
+
 <h2>Change email</h2>
 {% if email_change == "sent" %}<p>Confirmation links were sent to the current and new addresses. Both must be confirmed.</p>{% endif %}
 {% if email_error == "invalid" %}<p>Enter a valid email address.</p>

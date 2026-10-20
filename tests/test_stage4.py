@@ -615,6 +615,66 @@ def test_appointment_emails_go_to_patient_and_doctor():
 				pat.post(f"/appointments/{appointment_id}/cancel")
 
 
+def test_appointment_emails_respect_notification_flag():
+	with client() as pat, client() as doc:
+		login(pat, PAT)
+		login(doc, DOC)
+		cabinet = pat.get("/me")
+		assert "Receive appointment emails" in cabinet.text
+		assert 'name="email_notifications" value="1" checked' in cabinet.text
+		doctors = pat.get("/doctors")
+		slot_id = None
+		doctor_email = None
+		for doc_id in re.findall(r'href="/doctors/(\d+)/slots"', doctors.text):
+			page = pat.get(f"/doctors/{doc_id}/slots")
+			ids = slot_ids(page.text)
+			if not ids:
+				continue
+			slot_id = ids[0]
+			doctor_email = DOC if "Anna Ohanyan" in page.text else DOC2
+			break
+		assert slot_id and doctor_email
+		doctor_client = doc if doctor_email == DOC else None
+		if doctor_client is None:
+			doctor_client = client()
+			login(doctor_client, doctor_email)
+		existing_ids = set(appointment_ids(pat.get("/my").text))
+		appointment_id = None
+		try:
+			disabled = pat.post("/me/notifications")
+			assert "Email notification setting saved." in disabled.text
+			assert 'name="email_notifications" value="1" checked' not in disabled.text
+			before_patient = len(mailpit_messages(PAT))
+			with client() as guest:
+				reset = guest.post("/forgot-password", data={"email": PAT})
+			assert "sent=1" in str(reset.url)
+			assert len(mailpit_messages(PAT)) == before_patient + 1
+			psql(
+				"UPDATE password_reset_tokens SET used_at = CURRENT_TIMESTAMP "
+				"WHERE used_at IS NULL"
+			)
+			before_doctor = len(mailpit_messages(doctor_email))
+			booked = pat.post(f"/slots/{slot_id}/book")
+			assert "Appointment booked successfully." in booked.text
+			created_ids = set(appointment_ids(pat.get("/my").text)) - existing_ids
+			assert created_ids
+			appointment_id = created_ids.pop()
+			assert len(mailpit_messages(PAT)) == before_patient + 1
+			assert len(mailpit_messages(doctor_email)) == before_doctor + 1
+			doctor_client.post("/me/notifications")
+			pat.post(f"/appointments/{appointment_id}/cancel")
+			assert len(mailpit_messages(PAT)) == before_patient + 1
+			assert len(mailpit_messages(doctor_email)) == before_doctor + 1
+			appointment_id = None
+		finally:
+			pat.post("/me/notifications", data={"email_notifications": "1"})
+			doctor_client.post("/me/notifications", data={"email_notifications": "1"})
+			if doctor_client is not doc:
+				doctor_client.close()
+			if appointment_id and appointment_id in appointment_ids(pat.get("/my").text):
+				pat.post(f"/appointments/{appointment_id}/cancel")
+
+
 def test_patient_cannot_cancel_another_or_past_appointment():
 	with client() as pat, client() as pat2, client() as registrar:
 		login(pat, PAT)

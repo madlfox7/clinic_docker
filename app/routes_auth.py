@@ -623,6 +623,15 @@ def me(request: Request):
                 ]
         finally:
             conn.close()
+    email_notifications = True
+    conn = db_as(user)
+    try:
+        with conn.cursor() as cur:
+            cur.execute("SELECT public.own_email_notifications()")
+            row = cur.fetchone()
+            email_notifications = bool(row and row[0])
+    finally:
+        conn.close()
     return templates.TemplateResponse(
         "me.html",
         {
@@ -630,12 +639,42 @@ def me(request: Request):
             "email": user["email"],
             "role": user["role"],
             "upcoming_visits": upcoming_visits,
+            "email_notifications": email_notifications,
+            "notifications_saved": request.query_params.get("notifications_saved"),
+            "notifications_error": request.query_params.get("notifications_error"),
             "password_changed": request.query_params.get("password_changed"),
             "password_error": request.query_params.get("password_error"),
             "email_change": request.query_params.get("email_change"),
             "email_error": request.query_params.get("email_error"),
         },
     )
+
+
+@router.post("/me/notifications")
+def update_email_notifications(
+    request: Request,
+    email_notifications: str = Form(None),
+):
+    user, denied = require_user(request)
+    if denied:
+        return denied
+    enabled = email_notifications == "1"
+    conn = db_as(user)
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT public.set_own_email_notifications(%s)",
+                (enabled,),
+            )
+            row = cur.fetchone()
+            if not row or row[0] is None:
+                conn.rollback()
+                return RedirectResponse("/me?notifications_error=1", status_code=303)
+            record_audit_event(cur, "user.email_notifications", "user", user["id"])
+        conn.commit()
+    finally:
+        conn.close()
+    return RedirectResponse("/me?notifications_saved=1", status_code=303)
 
 
 def _public_base_url() -> str:

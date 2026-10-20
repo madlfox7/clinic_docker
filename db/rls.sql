@@ -1,5 +1,8 @@
 BEGIN;
 
+ALTER TABLE public.users
+  ADD COLUMN IF NOT EXISTS email_notifications BOOLEAN NOT NULL DEFAULT TRUE;
+
 CREATE OR REPLACE FUNCTION public.is_own_patient(doc_id int, pat_id int)
 RETURNS boolean
 LANGUAGE sql
@@ -773,6 +776,7 @@ BEGIN
 END;
 $function$;
 
+DROP FUNCTION IF EXISTS public.appointment_notice(integer);
 CREATE OR REPLACE FUNCTION public.appointment_notice(target_appointment_id integer)
 RETURNS TABLE (
   patient_email text,
@@ -780,7 +784,9 @@ RETURNS TABLE (
   doctor_name text,
   service_name text,
   starts_at timestamp,
-  ends_at timestamp
+  ends_at timestamp,
+  patient_notifications boolean,
+  doctor_notifications boolean
 )
 LANGUAGE plpgsql
 STABLE
@@ -805,7 +811,9 @@ BEGIN
     d.full_name,
     svc.name,
     s.starts_at,
-    s.starts_at + make_interval(mins => s.duration_minutes)
+    s.starts_at + make_interval(mins => s.duration_minutes),
+    patient.email_notifications,
+    COALESCE(doctor_user.email_notifications, FALSE)
   FROM public.appointments AS a
   JOIN public.slots AS s ON s.id = a.slot_id
   JOIN public.users AS patient ON patient.id = a.patient_user_id
@@ -818,6 +826,53 @@ BEGIN
       actor_role IN ('app_registrar', 'app_admin')
       OR (actor_role = 'app_patient' AND a.patient_user_id = actor_id)
     );
+END;
+$function$;
+
+CREATE OR REPLACE FUNCTION public.own_email_notifications()
+RETURNS boolean
+LANGUAGE plpgsql
+STABLE
+SECURITY DEFINER
+SET search_path = pg_catalog, public, pg_temp
+AS $function$
+DECLARE
+  actor_id integer := NULLIF(current_setting('app.user_id', true), '')::integer;
+  actor_role text := current_setting('role', true);
+  enabled boolean;
+BEGIN
+  IF actor_id IS NULL
+     OR actor_role NOT IN ('app_patient', 'app_doctor', 'app_registrar', 'app_admin') THEN
+    RETURN NULL;
+  END IF;
+  SELECT u.email_notifications INTO enabled
+  FROM public.users AS u
+  WHERE u.id = actor_id;
+  RETURN enabled;
+END;
+$function$;
+
+CREATE OR REPLACE FUNCTION public.set_own_email_notifications(enabled boolean)
+RETURNS boolean
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = pg_catalog, public, pg_temp
+AS $function$
+DECLARE
+  actor_id integer := NULLIF(current_setting('app.user_id', true), '')::integer;
+  actor_role text := current_setting('role', true);
+  stored boolean;
+BEGIN
+  IF enabled IS NULL
+     OR actor_id IS NULL
+     OR actor_role NOT IN ('app_patient', 'app_doctor', 'app_registrar', 'app_admin') THEN
+    RETURN NULL;
+  END IF;
+  UPDATE public.users
+  SET email_notifications = enabled
+  WHERE id = actor_id
+  RETURNING email_notifications INTO stored;
+  RETURN stored;
 END;
 $function$;
 
@@ -1002,6 +1057,8 @@ REVOKE ALL ON FUNCTION public.bootstrap_seed_admin(text, text) FROM PUBLIC;
 REVOKE ALL ON FUNCTION public.bootstrap_seed_user(text, text, text) FROM PUBLIC;
 REVOKE ALL ON FUNCTION public.calendar_patient_email(integer, integer) FROM PUBLIC;
 REVOKE ALL ON FUNCTION public.appointment_notice(integer) FROM PUBLIC;
+REVOKE ALL ON FUNCTION public.own_email_notifications() FROM PUBLIC;
+REVOKE ALL ON FUNCTION public.set_own_email_notifications(boolean) FROM PUBLIC;
 REVOKE ALL ON FUNCTION public.change_own_patient_password(text, text, text) FROM PUBLIC;
 GRANT EXECUTE ON FUNCTION public.current_patient_is_active() TO app_patient;
 GRANT EXECUTE ON FUNCTION public.scheduled_slot_is_taken(integer)
@@ -1501,6 +1558,10 @@ GRANT EXECUTE ON FUNCTION public.calendar_patient_email(integer, integer)
   TO app_doctor, app_registrar;
 GRANT EXECUTE ON FUNCTION public.appointment_notice(integer)
   TO app_patient, app_registrar, app_admin;
+GRANT EXECUTE ON FUNCTION public.own_email_notifications()
+  TO app_patient, app_doctor, app_registrar, app_admin;
+GRANT EXECUTE ON FUNCTION public.set_own_email_notifications(boolean)
+  TO app_patient, app_doctor, app_registrar, app_admin;
 GRANT EXECUTE ON FUNCTION public.change_own_patient_password(text, text, text)
   TO app_patient, app_doctor, app_registrar, app_admin;
 

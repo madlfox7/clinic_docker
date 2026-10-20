@@ -9,6 +9,7 @@ CREATE TABLE IF NOT EXISTS users (
   password_hash TEXT NOT NULL,
   role TEXT NOT NULL CHECK (role IN ('admin','doctor','patient','registrar')),
   blocked BOOLEAN NOT NULL DEFAULT FALSE,
+  email_notifications BOOLEAN NOT NULL DEFAULT TRUE,
   auth_version BIGINT NOT NULL DEFAULT 0 CHECK (auth_version >= 0)
 );
 
