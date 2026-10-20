@@ -98,6 +98,8 @@
 {% elif error == "invalid_work_hours" %}<p>Choose valid working hours.</p>
 {% elif error == "invalid_time_off" %}<p>End date must not be before start date.</p>
 {% elif error == "time_off_past" %}<p>Time off cannot start in the past.</p>
+{% elif error == "time_off_too_long" %}<p>Time off cannot cover more than a year or end more than two years from today.</p>
+{% elif error == "holiday_too_far" %}<p>A holiday cannot be more than two years ahead.</p>
 {% elif error == "holiday_name_required" %}<p>Enter a holiday name.</p>
 {% elif error == "holiday_name_invalid" %}<p>Holiday name cannot contain a NUL character.</p>
 {% elif error == "doctor_not_found" %}<p>Doctor not found.</p>
@@ -155,7 +157,7 @@
   {% endfor %}
   <label>Start <input name="start_time" type="time" value="09:00" required></label>
   <label>End <input name="end_time" type="time" value="18:00" required></label>
-  <label>Minimum start interval (minutes) <input name="slot_minutes" type="number" min="1" value="30" required></label>
+  <label>Minimum start interval (minutes) <input name="slot_minutes" type="number" min="5" max="240" value="30" required></label>
   <button type="submit">Save hours for selected days</button>
 </form>
 <script>

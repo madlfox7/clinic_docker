@@ -79,7 +79,7 @@ CREATE TABLE IF NOT EXISTS email_change_requests (
 
 CREATE TABLE IF NOT EXISTS clinic_settings (
   id INTEGER PRIMARY KEY CHECK (id = 1),
-  address TEXT NOT NULL CHECK (length(btrim(address)) BETWEEN 1 AND 300),
+  address TEXT NOT NULL CHECK (length(btrim(address)) BETWEEN 0 AND 300),
   phone TEXT NOT NULL CHECK (length(btrim(phone)) BETWEEN 1 AND 50)
 );
 

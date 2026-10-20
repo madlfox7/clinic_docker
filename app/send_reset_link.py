@@ -60,7 +60,7 @@ def _user_id_for(email: str):
     try:
         with conn.cursor() as cur:
             cur.execute(
-                "SELECT id FROM users WHERE lower(email) = lower(%s)",
+                "SELECT id FROM users WHERE lower(email) = lower(btrim(%s))",
                 (email,),
             )
             row = cur.fetchone()

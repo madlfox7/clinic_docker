@@ -462,6 +462,12 @@ BEGIN
     RETURN;
   END IF;
 
+  IF candidate_password IS NULL
+     OR candidate_password <> btrim(candidate_password) THEN
+    RETURN QUERY SELECT 'edge_space'::text, NULL::bigint;
+    RETURN;
+  END IF;
+
   IF candidate_password IS NOT NULL
      AND (
        lower(candidate_password) = (
@@ -585,7 +591,7 @@ BEGIN
        matched_auth_version, stored_hash
   FROM public.users AS u
   WHERE candidate_email IS NOT NULL
-    AND lower(u.email) = lower(candidate_email);
+    AND lower(u.email) = lower(btrim(candidate_email));
   user_found := FOUND;
 
   password_to_check := candidate_password;
@@ -767,6 +773,54 @@ BEGIN
 END;
 $function$;
 
+CREATE OR REPLACE FUNCTION public.appointment_notice(target_appointment_id integer)
+RETURNS TABLE (
+  patient_email text,
+  doctor_email text,
+  doctor_name text,
+  service_name text,
+  starts_at timestamp,
+  ends_at timestamp
+)
+LANGUAGE plpgsql
+STABLE
+SECURITY DEFINER
+SET search_path = pg_catalog, public, pg_temp
+AS $function$
+DECLARE
+  actor_id integer := NULLIF(current_setting('app.user_id', true), '')::integer;
+  actor_role text := current_setting('role', true);
+BEGIN
+  IF target_appointment_id IS NULL OR actor_id IS NULL THEN
+    RETURN;
+  END IF;
+  IF actor_role NOT IN ('app_patient', 'app_registrar', 'app_admin') THEN
+    RETURN;
+  END IF;
+
+  RETURN QUERY
+  SELECT
+    patient.email,
+    doctor_user.email,
+    d.full_name,
+    svc.name,
+    s.starts_at,
+    s.starts_at + make_interval(mins => s.duration_minutes)
+  FROM public.appointments AS a
+  JOIN public.slots AS s ON s.id = a.slot_id
+  JOIN public.users AS patient ON patient.id = a.patient_user_id
+  JOIN public.doctors AS d ON d.id = s.doctor_id
+  LEFT JOIN public.users AS doctor_user
+    ON doctor_user.id = d.user_id AND doctor_user.role = 'doctor'
+  JOIN public.services AS svc ON svc.id = s.service_id
+  WHERE a.id = target_appointment_id
+    AND (
+      actor_role IN ('app_registrar', 'app_admin')
+      OR (actor_role = 'app_patient' AND a.patient_user_id = actor_id)
+    );
+END;
+$function$;
+
 DROP FUNCTION IF EXISTS public.current_patient_password_hash();
 DROP FUNCTION IF EXISTS public.change_own_patient_password(text, text);
 
@@ -828,6 +882,11 @@ BEGIN
 
   IF public.crypt(current_password, crypt_hash) IS DISTINCT FROM crypt_hash THEN
     RETURN QUERY SELECT 'current'::text, NULL::bigint;
+    RETURN;
+  END IF;
+
+  IF new_password <> btrim(new_password) THEN
+    RETURN QUERY SELECT 'edge_space'::text, NULL::bigint;
     RETURN;
   END IF;
 
@@ -942,6 +1001,7 @@ REVOKE ALL ON FUNCTION public.authenticate_user(text, text, text) FROM PUBLIC;
 REVOKE ALL ON FUNCTION public.bootstrap_seed_admin(text, text) FROM PUBLIC;
 REVOKE ALL ON FUNCTION public.bootstrap_seed_user(text, text, text) FROM PUBLIC;
 REVOKE ALL ON FUNCTION public.calendar_patient_email(integer, integer) FROM PUBLIC;
+REVOKE ALL ON FUNCTION public.appointment_notice(integer) FROM PUBLIC;
 REVOKE ALL ON FUNCTION public.change_own_patient_password(text, text, text) FROM PUBLIC;
 GRANT EXECUTE ON FUNCTION public.current_patient_is_active() TO app_patient;
 GRANT EXECUTE ON FUNCTION public.scheduled_slot_is_taken(integer)
@@ -1158,10 +1218,12 @@ BEGIN
   END IF;
   IF length(normalized_email) NOT BETWEEN 3 AND 254
      OR position('@' IN normalized_email) = 0
-     OR length(clean_name) NOT BETWEEN 1 AND 120
-     OR length(clean_specialty) NOT BETWEEN 1 AND 120
+     OR length(clean_name) NOT BETWEEN 2 AND 100
+     OR length(clean_specialty) NOT BETWEEN 2 AND 100
+     OR clean_name ~ '[[:cntrl:]]'
+     OR clean_specialty ~ '[[:cntrl:]]'
      OR candidate_experience IS NULL
-     OR candidate_experience NOT BETWEEN 0 AND 80 THEN
+     OR candidate_experience NOT BETWEEN 0 AND 70 THEN
     RETURN QUERY SELECT 'invalid'::text, NULL::integer, NULL::integer, NULL::text, NULL::text;
     RETURN;
   END IF;
@@ -1437,6 +1499,8 @@ GRANT EXECUTE ON FUNCTION public.bootstrap_seed_admin(text, text) TO clinic_api;
 GRANT EXECUTE ON FUNCTION public.bootstrap_seed_user(text, text, text) TO clinic_api;
 GRANT EXECUTE ON FUNCTION public.calendar_patient_email(integer, integer)
   TO app_doctor, app_registrar;
+GRANT EXECUTE ON FUNCTION public.appointment_notice(integer)
+  TO app_patient, app_registrar, app_admin;
 GRANT EXECUTE ON FUNCTION public.change_own_patient_password(text, text, text)
   TO app_patient, app_doctor, app_registrar, app_admin;
 
@@ -1521,6 +1585,33 @@ GRANT INSERT (
   ON public.slots TO app_admin;
 GRANT USAGE, SELECT ON SEQUENCE public.slots_id_seq, public.work_hours_id_seq,
   public.time_off_id_seq TO app_admin;
+
+CREATE OR REPLACE FUNCTION public.enforce_normalized_user_email()
+RETURNS trigger
+LANGUAGE plpgsql
+SET search_path = pg_catalog, public, pg_temp
+AS $$
+BEGIN
+  NEW.email := lower(btrim(coalesce(NEW.email, '')));
+  IF NEW.email = ''
+     OR position(' ' in NEW.email) > 0
+     OR NEW.email !~ '^[^@[:space:]]+@[^@[:space:]]+\.[^@[:space:]]+$' THEN
+    RAISE EXCEPTION 'invalid email'
+      USING ERRCODE = '23514';
+  END IF;
+  RETURN NEW;
+END;
+$$;
+
+DROP TRIGGER IF EXISTS users_normalize_email ON public.users;
+CREATE TRIGGER users_normalize_email
+BEFORE INSERT OR UPDATE OF email ON public.users
+FOR EACH ROW
+EXECUTE FUNCTION public.enforce_normalized_user_email();
+
+UPDATE public.users
+SET email = lower(btrim(email))
+WHERE email IS DISTINCT FROM lower(btrim(email));
 
 DROP POLICY IF EXISTS patient_appointments ON public.appointments;
 DROP POLICY IF EXISTS doctor_appointments ON public.appointments;
@@ -1957,6 +2048,10 @@ CREATE POLICY time_off_requests_admin_update ON public.time_off_requests
 ALTER TABLE public.slots ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.users ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.clinic_settings ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.clinic_settings DROP CONSTRAINT IF EXISTS clinic_settings_address_check;
+ALTER TABLE public.clinic_settings
+  ADD CONSTRAINT clinic_settings_address_check
+  CHECK (length(btrim(address)) BETWEEN 0 AND 300);
 ALTER TABLE public.services ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.work_hours ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.time_off ENABLE ROW LEVEL SECURITY;

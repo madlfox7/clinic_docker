@@ -84,6 +84,85 @@ def send_password_changed(recipient: str) -> None:
     )
 
 
+_MONTHS = (
+    "Jan",
+    "Feb",
+    "Mar",
+    "Apr",
+    "May",
+    "Jun",
+    "Jul",
+    "Aug",
+    "Sep",
+    "Oct",
+    "Nov",
+    "Dec",
+)
+
+
+def _mail_line(value) -> str:
+    text = "".join(
+        char if char.isprintable() and char not in "\r\n" else " "
+        for char in str(value or "")
+    )
+    return " ".join(text.split())
+
+
+def format_visit_when(starts_at, ends_at) -> str:
+    return (
+        f"{starts_at.day} {_MONTHS[starts_at.month - 1]} {starts_at.year}, "
+        f"{starts_at:%H:%M}\u2013{ends_at:%H:%M}"
+    )
+
+
+def send_appointment_notice(recipient: str, event: str, notice: dict, audience: str) -> None:
+    if event == "confirmed":
+        subject = "Appointment confirmed"
+        intro = (
+            "You have an appointment:"
+            if audience == "patient"
+            else "A patient booked an appointment:"
+        )
+        closing = "If you did not expect this, contact the clinic.\n"
+    elif event == "cancelled":
+        subject = "Appointment cancelled"
+        intro = (
+            "This appointment was cancelled:"
+            if audience == "patient"
+            else "An appointment was cancelled:"
+        )
+        closing = "If you did not expect this, contact the clinic.\n"
+    else:
+        raise ValueError("invalid appointment notice")
+    when = format_visit_when(notice["starts_at"], notice["ends_at"])
+    send_account_message(
+        recipient,
+        subject,
+        f"{intro}\n"
+        f"Doctor: {_mail_line(notice['doctor_name'])}\n"
+        f"Service: {_mail_line(notice['service_name'])}\n"
+        f"Date: {when}\n\n"
+        f"{closing}",
+    )
+
+
+def deliver_appointment_emails(notice, event: str) -> None:
+    if not notice or not os.environ.get("SMTP_HOST", "").strip():
+        return
+    if not notice.get("starts_at") or not notice.get("ends_at"):
+        return
+    recipients = []
+    if notice.get("patient_email"):
+        recipients.append((notice["patient_email"], "patient"))
+    if notice.get("doctor_email"):
+        recipients.append((notice["doctor_email"], "doctor"))
+    for recipient, audience in recipients:
+        try:
+            send_appointment_notice(recipient, event, notice, audience)
+        except Exception:
+            log.exception("could not send appointment email")
+
+
 def send_password_reset(recipient: str, token: str) -> None:
     if any(char in token for char in "\r\n"):
         raise ValueError("invalid reset message")

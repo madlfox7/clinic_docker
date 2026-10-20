@@ -9,13 +9,15 @@ from db import (
     MAX_EMAIL_LENGTH,
     contains_nul,
     db_as,
+    load_appointment_notice,
     log,
     parse_strict_int,
     record_audit_event,
     templates,
     within_length,
 )
-from routes_auth import require_user
+from mailer import deliver_appointment_emails
+from routes_auth import _normalize_registration_email, require_user
 
 
 
@@ -25,13 +27,10 @@ router = APIRouter()
 
 
 def _patient_email_query(email):
-    if (
-        not email
-        or contains_nul(email)
-        or not within_length(email.strip(), MAX_EMAIL_LENGTH)
-    ):
+    normalized = _normalize_registration_email(email or "")
+    if normalized is None:
         return ""
-    return f"&patient_email={quote(email.strip(), safe='')}"
+    return f"&patient_email={quote(normalized, safe='')}"
 
 
 def _overlap_redirect(doctor_id, service_id, patient_email_query=""):
@@ -95,19 +94,15 @@ def doctor_slots(request: Request, doctor_id: str):
     doctor_active = cur.fetchone()[0]
     selected_patient = None
     if role == "registrar":
-        requested_patient_email = request.query_params.get("patient_email", "").strip()
-        if (
-            requested_patient_email
-            and not contains_nul(requested_patient_email)
-            and within_length(
-            requested_patient_email, MAX_EMAIL_LENGTH
-            )
-        ):
+        requested_patient_email = _normalize_registration_email(
+            request.query_params.get("patient_email", "")
+        )
+        if requested_patient_email:
             cur.execute(
                 """
                 SELECT email, blocked
                 FROM users
-                WHERE email = %s AND role = 'patient'
+                WHERE lower(email) = %s AND role = 'patient'
                 """,
                 (requested_patient_email,),
             )
@@ -419,8 +414,9 @@ def book_slot(
     if role == "patient":
         target_email = email
     else:
-        target_email = (patient_email or "").strip()
-        if not target_email:
+        supplied_email = patient_email or ""
+        target_email = _normalize_registration_email(supplied_email) or ""
+        if not supplied_email.strip():
             cur.close()
             conn.close()
             return RedirectResponse(
@@ -428,9 +424,7 @@ def book_slot(
                 f"&service_id={service_id}{patient_email_query}",
                 status_code=303,
             )
-        if contains_nul(target_email) or not within_length(
-            target_email, MAX_EMAIL_LENGTH
-        ):
+        if not target_email:
             cur.close()
             conn.close()
             return RedirectResponse(
@@ -442,7 +436,7 @@ def book_slot(
         patient_id = user["id"]
     else:
         cur.execute(
-            "SELECT id, role, blocked FROM users WHERE email=%s",
+            "SELECT id, role, blocked FROM users WHERE lower(email)=%s",
             (target_email,),
         )
         target = cur.fetchone()
@@ -520,6 +514,11 @@ def book_slot(
                 status_code=303,
             )
         record_audit_event(cur, "appointment.book", "appointment", appointment_row[0])
+        notice = None
+        try:
+            notice = load_appointment_notice(cur, appointment_row[0])
+        except Exception:
+            log.exception("could not prepare appointment email")
         conn.commit()
     except psycopg2.errors.UniqueViolation:
         conn.rollback()
@@ -554,6 +553,7 @@ def book_slot(
         )
     cur.close()
     conn.close()
+    deliver_appointment_emails(notice, "confirmed")
     if role == "registrar":
         return RedirectResponse(
             f"/doctors/{doctor_id}/slots?booked=1&service_id={service_id}"
@@ -661,11 +661,18 @@ def cancel_appointment(request: Request, appointment_id: str):
             (appointment_id,),
         )
     updated = cur.rowcount
+    notice = None
     if updated:
         record_audit_event(cur, "appointment.cancel", "appointment", appointment_id)
+        try:
+            notice = load_appointment_notice(cur, appointment_id)
+        except Exception:
+            log.exception("could not prepare appointment email")
     conn.commit()
     cur.close()
     conn.close()
+    if updated:
+        deliver_appointment_emails(notice, "cancelled")
     if role == "patient":
         if updated:
             return RedirectResponse("/my?cancelled=1", status_code=303)

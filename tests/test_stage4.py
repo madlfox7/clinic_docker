@@ -253,7 +253,6 @@ def test_weak_passwords_are_rejected_without_creating_users():
 	cases = (
 		"11111111",
 		"aaaaaaaa",
-		"        ",
 		email,
 		f"xx{email.split('@')[0]}1",
 		"abcabcab",
@@ -264,6 +263,27 @@ def test_weak_passwords_are_rejected_without_creating_users():
 		"letmein1",
 	)
 	with client() as guest, client() as admin, client() as patient:
+		for password in ("        ", " Policy-Check-2026!", "Policy-Check-2026! "):
+			rejected = guest.post(
+				"/register",
+				data={
+					"email": email,
+					"password": password,
+					"confirm_password": password,
+				},
+			)
+			assert rejected.status_code == 400
+			assert "Password must not start or end with a space." in rejected.text
+		spaced_email = guest.post(
+			"/register",
+			data={
+				"email": f"bad {stamp}@example.com",
+				"password": "Policy-Check-2026!",
+				"confirm_password": "Policy-Check-2026!",
+			},
+		)
+		assert spaced_email.status_code == 400
+		assert "Enter a valid email address." in spaced_email.text
 		for password in cases:
 			rejected = guest.post(
 				"/register",
@@ -320,8 +340,8 @@ def test_weak_passwords_are_rejected_without_creating_users():
 				"confirm_password": "        ",
 			},
 		)
-		assert "password_error=invalid" in str(changed.url)
-		assert "Choose a non-default password." in changed.text
+		assert "password_error=edge_space" in str(changed.url)
+		assert "Password must not start or end with a space." in changed.text
 		policy_email = f"policy-{stamp}@example.com"
 		policy_password = "Policy-Check-2026!"
 		created = guest.post(
@@ -335,7 +355,7 @@ def test_weak_passwords_are_rejected_without_creating_users():
 		assert "registered=1" in str(created.url)
 		login_policy = guest.post(
 			"/login",
-			data={"email": policy_email, "password": policy_password},
+			data={"email": f"  {policy_email.upper()}  ", "password": policy_password},
 		)
 		assert "Role: patient" in login_policy.text
 		same = guest.post(
@@ -348,14 +368,64 @@ def test_weak_passwords_are_rejected_without_creating_users():
 		)
 		assert "password_error=same" in str(same.url)
 		assert "different from your current one" in same.text
+		guest.get("/logout")
+		spaced_password = "Policy Check 2026"
+		spaced = guest.post(
+			"/register",
+			data={
+				"email": f"  Spaced-{stamp}@Example.COM  ",
+				"password": spaced_password,
+				"confirm_password": spaced_password,
+			},
+		)
+		assert "registered=1" in str(spaced.url)
+		stored_email = f"spaced-{stamp}@example.com"
+		assert psql(f"SELECT email FROM users WHERE email = '{stored_email}'") == stored_email
+		duplicate = guest.post(
+			"/register",
+			data={
+				"email": stored_email,
+				"password": spaced_password,
+				"confirm_password": spaced_password,
+			},
+		)
+		assert duplicate.status_code == 409
+		spaced_login = guest.post(
+			"/login",
+			data={"email": stored_email, "password": spaced_password},
+		)
+		assert "Role: patient" in spaced_login.text
+		guest.get("/logout")
+		stripped_login = guest.post(
+			"/login",
+			data={"email": stored_email, "password": "PolicyCheck2026"},
+		)
+		assert "Invalid email or password" in stripped_login.text
 		psql(
 			f"""
 			DELETE FROM audit_events
 			WHERE target_id = (SELECT id FROM users WHERE email = '{policy_email}')
 			   OR actor_user_id = (SELECT id FROM users WHERE email = '{policy_email}');
 			DELETE FROM users WHERE email = '{policy_email}';
+			DELETE FROM audit_events
+			WHERE target_id = (SELECT id FROM users WHERE email = '{stored_email}')
+			   OR actor_user_id = (SELECT id FROM users WHERE email = '{stored_email}');
+			DELETE FROM users WHERE email = '{stored_email}';
 			"""
 		)
+		with client() as registrar:
+			login(registrar, REG)
+			found = registrar.get(
+				"/registrar/patients/search",
+				params={"q": "  PAT@CLINIC.LOCAL  "},
+			)
+			assert found.status_code == 200
+			assert "pat@clinic.local" in found.text
+			rejected_query = registrar.get(
+				"/registrar/patients/search",
+				params={"q": "pat @clinic.local"},
+			)
+			assert rejected_query.status_code == 400
 	with client() as patient:
 		assert login(patient, PAT).status_code == 200
 
@@ -470,6 +540,79 @@ def test_book_cancel_frees_slot_for_other_patient():
 		created_pat2_ids = set(appointment_ids(mine2.text)) - existing_pat2_ids
 		for appointment_id in created_pat2_ids:
 			pat2.post(f"/appointments/{appointment_id}/cancel")
+
+
+def latest_mail(address: str) -> dict:
+	messages = mailpit_messages(address)
+	assert messages, f"no mail for {address}"
+	message_id = messages[0].get("ID") or messages[0].get("Id")
+	message = httpx.get(f"{MAILPIT}/api/v1/message/{message_id}", timeout=5)
+	message.raise_for_status()
+	return message.json()
+
+
+def test_appointment_emails_go_to_patient_and_doctor():
+	with client() as pat:
+		login(pat, PAT)
+		doctors = pat.get("/doctors")
+		page_text = ""
+		slot_id = None
+		for doc_id in re.findall(r'href="/doctors/(\d+)/slots"', doctors.text):
+			page = pat.get(f"/doctors/{doc_id}/slots")
+			ids = slot_ids(page.text)
+			if ids:
+				page_text = page.text
+				slot_id = ids[0]
+				break
+		assert slot_id, "no free slots left"
+		if "Anna Ohanyan" in page_text:
+			doctor_name, doctor_email = "Anna Ohanyan", DOC
+		else:
+			assert "Levon Petrosyan" in page_text
+			doctor_name, doctor_email = "Levon Petrosyan", DOC2
+		before_patient = len(mailpit_messages(PAT))
+		before_doctor = len(mailpit_messages(doctor_email))
+		existing_ids = set(appointment_ids(pat.get("/my").text))
+		booked = pat.post(f"/slots/{slot_id}/book")
+		assert "Appointment booked successfully." in booked.text
+		created_ids = set(appointment_ids(pat.get("/my").text)) - existing_ids
+		assert created_ids
+		appointment_id = created_ids.pop()
+		try:
+			assert len(mailpit_messages(PAT)) == before_patient + 1
+			assert len(mailpit_messages(doctor_email)) == before_doctor + 1
+			patient_mail = latest_mail(PAT)
+			doctor_mail = latest_mail(doctor_email)
+			patient_body = patient_mail.get("Text") or ""
+			doctor_body = doctor_mail.get("Text") or ""
+			when = re.compile(
+				r"Date: \d{1,2} [A-Z][a-z]{2} \d{4}, \d{2}:\d{2}–\d{2}:\d{2}"
+			)
+			assert patient_mail.get("Subject") == "Appointment confirmed"
+			assert doctor_mail.get("Subject") == "Appointment confirmed"
+			assert "You have an appointment:" in patient_body
+			assert "A patient booked an appointment:" in doctor_body
+			assert f"Doctor: {doctor_name}" in patient_body
+			assert f"Doctor: {doctor_name}" in doctor_body
+			assert "Service: " in patient_body
+			assert when.search(patient_body)
+			assert when.search(doctor_body)
+			assert "appointment id" not in patient_body.lower()
+			assert "appointment id" not in doctor_body.lower()
+			assert "token=" not in patient_body
+			pat.post(f"/appointments/{appointment_id}/cancel")
+			assert len(mailpit_messages(PAT)) == before_patient + 2
+			assert len(mailpit_messages(doctor_email)) == before_doctor + 2
+			cancelled_patient = latest_mail(PAT)
+			cancelled_doctor = latest_mail(doctor_email)
+			assert cancelled_patient.get("Subject") == "Appointment cancelled"
+			assert cancelled_doctor.get("Subject") == "Appointment cancelled"
+			assert "This appointment was cancelled:" in (cancelled_patient.get("Text") or "")
+			assert "An appointment was cancelled:" in (cancelled_doctor.get("Text") or "")
+			assert when.search(cancelled_patient.get("Text") or "")
+		finally:
+			if appointment_id in appointment_ids(pat.get("/my").text):
+				pat.post(f"/appointments/{appointment_id}/cancel")
 
 
 def test_patient_cannot_cancel_another_or_past_appointment():
@@ -2415,6 +2558,76 @@ def test_registrar_day_list_doctor_calendar_and_time_off_approval():
 		)
 
 
+def test_field_limits_reject_invalid_values_and_keep_trimmed_text():
+	service_name = f"  Limit {uuid.uuid4().hex[:8]}  "
+	stored_name = service_name.strip()
+	service_id = None
+	old_settings = psql(
+		"SELECT address || '|' || phone FROM clinic_settings WHERE id = 1"
+	)
+	old_address, old_phone = old_settings.split("|", 1)
+	try:
+		with client() as admin:
+			login(admin, ADMIN)
+			doctor_id = int(psql("SELECT id FROM doctors LIMIT 1"))
+			for payload in (
+				{"name": "A", "duration_minutes": "30", "buffer_minutes": "0"},
+				{"name": stored_name, "duration_minutes": "4", "buffer_minutes": "0"},
+				{"name": stored_name, "duration_minutes": "481", "buffer_minutes": "0"},
+				{"name": stored_name, "duration_minutes": "30", "buffer_minutes": "121"},
+				{"name": "Bad\nName", "duration_minutes": "30", "buffer_minutes": "0"},
+			):
+				rejected = admin.post("/admin/services", data=payload)
+				assert "error=invalid_service" in str(rejected.url)
+			created = admin.post(
+				"/admin/services",
+				data={
+					"name": service_name,
+					"duration_minutes": "30",
+					"buffer_minutes": "10",
+				},
+			)
+			assert "created=1" in str(created.url)
+			service_id = int(
+				psql(f"SELECT id FROM services WHERE name = '{stored_name}'")
+			)
+			experience = admin.post(
+				f"/admin/doctors/{doctor_id}",
+				data={
+					"full_name": "A",
+					"specialty": "Therapy",
+					"experience_years": "71",
+				},
+			)
+			assert "error=invalid_details" in str(experience.url)
+			phone = admin.post(
+				"/admin/settings",
+				data={"address": "  12 Clinic Street  ", "phone": "call-me"},
+			)
+			assert "error=invalid_phone" in str(phone.url)
+			empty_address = admin.post(
+				"/admin/settings",
+				data={"address": "   ", "phone": "+374 10 123456"},
+			)
+			assert "saved=1" in str(empty_address.url)
+			assert psql("SELECT address FROM clinic_settings WHERE id = 1") == ""
+			assert psql("SELECT phone FROM clinic_settings WHERE id = 1") == "+374 10 123456"
+	finally:
+		if service_id is not None:
+			psql(
+				f"""
+				DELETE FROM doctor_services WHERE service_id = {service_id};
+				DELETE FROM services WHERE id = {service_id};
+				"""
+			)
+		psql(
+			"UPDATE clinic_settings "
+			f"SET address = '{old_address.replace(chr(39), chr(39)+chr(39))}', "
+			f"phone = '{old_phone.replace(chr(39), chr(39)+chr(39))}' "
+			"WHERE id = 1"
+		)
+
+
 def test_admin_service_duration_buffer_and_booking_overlap():
 	service_name = f"Service test {uuid.uuid4().hex}"
 	service_id = None
@@ -2427,7 +2640,7 @@ def test_admin_service_duration_buffer_and_booking_overlap():
 			"/admin/services",
 			data={
 				"name": service_name,
-				"duration_minutes": "1000",
+				"duration_minutes": "200",
 				"buffer_minutes": "0",
 				"doctor_ids": str(doctor_id),
 			},
@@ -3122,6 +3335,8 @@ def test_admin_can_create_staff_and_reset_password():
 				data={"email": admin_email, "role": "admin"},
 			)
 			assert "password_required" in str(missing_password.url)
+			assert "No account was created and no email was sent." in missing_password.text
+			assert "Staff account created." not in missing_password.text
 			wrong_password = admin.post(
 				"/admin/users",
 				data={
@@ -3131,6 +3346,9 @@ def test_admin_can_create_staff_and_reset_password():
 				},
 			)
 			assert "password_denied" in str(wrong_password.url)
+			assert "Current password is incorrect." in wrong_password.text
+			assert "Nothing was created and no email was sent." in wrong_password.text
+			assert "Staff account created." not in wrong_password.text
 			assert psql(
 				f"SELECT count(*) FROM users WHERE email = '{admin_email}'"
 			) == "0"

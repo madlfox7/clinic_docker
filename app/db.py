@@ -29,6 +29,18 @@ MAX_EMAIL_LENGTH = 254
 MAX_PASSWORD_LENGTH = 72  # hashes <=72 bytes, other bytes ignored
 MAX_TEXT_LENGTH = 200
 MAX_RECORD_BODY_LENGTH = 4000
+NAME_MIN_LENGTH = 2
+NAME_MAX_LENGTH = 100
+ADDRESS_MAX_LENGTH = 300
+PHONE_MAX_LENGTH = 40
+EXPERIENCE_MAX_YEARS = 70
+SERVICE_DURATION_MIN = 5
+SERVICE_DURATION_MAX = 480
+SERVICE_BUFFER_MAX = 120
+SLOT_MINUTES_MIN = 5
+SLOT_MINUTES_MAX = 240
+MAX_CLOSURE_DAYS = 366
+MAX_FUTURE_DAYS = 366 * 2
 
 
 def within_length(raw, max_length: int) -> bool:
@@ -39,6 +51,48 @@ def within_length(raw, max_length: int) -> bool:
 
 def contains_nul(*values) -> bool:
     return any(isinstance(value, str) and "\x00" in value for value in values)
+
+
+def has_control_char(value: str) -> bool:
+    return any(ord(char) < 32 or ord(char) == 127 for char in value)
+
+
+def clean_label(value, min_length=NAME_MIN_LENGTH, max_length=NAME_MAX_LENGTH):
+    """Strip a required label. Reject empty, short, long, and control characters."""
+    if not isinstance(value, str) or contains_nul(value) or has_control_char(value):
+        return None
+    cleaned = value.strip()
+    if len(cleaned) < min_length or len(cleaned) > max_length:
+        return None
+    if not within_length(cleaned, max_length * 4):
+        return None
+    return cleaned
+
+
+def clean_optional_text(value, max_length):
+    """Strip optional text. An empty result is allowed; control characters are not."""
+    if not isinstance(value, str) or contains_nul(value) or has_control_char(value):
+        return None
+    cleaned = value.strip()
+    if len(cleaned) > max_length or not within_length(cleaned, max_length * 4):
+        return None
+    return cleaned
+
+
+def clean_phone(value):
+    """Strip a phone number and allow only digits, spaces, and +()-."""
+    if not isinstance(value, str) or contains_nul(value) or has_control_char(value):
+        return None
+    cleaned = value.strip()
+    digits = sum(char.isdigit() for char in cleaned)
+    if (
+        not cleaned
+        or len(cleaned) > PHONE_MAX_LENGTH
+        or digits < 5
+        or any(char not in "0123456789+()- " for char in cleaned)
+    ):
+        return None
+    return cleaned
 
 
 
@@ -101,6 +155,28 @@ def _set_db_context(conn, role, user_id):
 def set_db_context(conn, user):
     role = ROLE_BY_APP[user["role"]]
     _set_db_context(conn, role, user["id"])
+
+
+def load_appointment_notice(cur, appointment_id: int):
+    cur.execute(
+        """
+        SELECT patient_email, doctor_email, doctor_name, service_name,
+               starts_at, ends_at
+        FROM public.appointment_notice(%s)
+        """,
+        (appointment_id,),
+    )
+    row = cur.fetchone()
+    if not row or not row[0]:
+        return None
+    return {
+        "patient_email": row[0],
+        "doctor_email": row[1],
+        "doctor_name": row[2],
+        "service_name": row[3],
+        "starts_at": row[4],
+        "ends_at": row[5],
+    }
 
 
 def record_audit_event(cur, action: str, target_type: str, target_id: int | None = None):

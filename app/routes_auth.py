@@ -54,21 +54,24 @@ DEFAULT_REGISTRATION_PASSWORDS = {
     "aaaaaaaa",
 }
 SAME_PASSWORD_ERROR = "Choose a password different from your current one."
+EDGE_SPACE_ERROR = "Password must not start or end with a space."
+
+
+def has_edge_space(password: str) -> bool:
+    """Reject accidental edge whitespace without changing the password."""
+    return isinstance(password, str) and password != password.strip()
 
 
 def is_weak_password(password: str, email: str | None = None) -> bool:
     """Reject blank, repeated, listed, and email-derived passwords before hashing."""
-    if not isinstance(password, str) or contains_nul(password):
+    if not isinstance(password, str) or contains_nul(password) or has_edge_space(password):
         return True
-    if not within_length(password, MAX_PASSWORD_LENGTH):
+    if not within_length(password, MAX_PASSWORD_LENGTH) or len(password) < 8:
         return True
-    stripped = password.strip()
-    if len(stripped) < 8:
-        return True
-    folded = stripped.casefold()
+    folded = password.casefold()
     if folded in DEFAULT_REGISTRATION_PASSWORDS or len(set(folded)) < 4:
         return True
-    if not any(char.isalpha() for char in stripped) or not any(char.isdigit() for char in stripped):
+    if not any(char.isalpha() for char in password) or not any(char.isdigit() for char in password):
         return True
     if email:
         normalized = email.strip().casefold()
@@ -121,11 +124,26 @@ def _register_page(
     )
 
 
+def normalize_email_query(value: str) -> str | None:
+    """Strip and lowercase a search fragment. Internal spaces are rejected."""
+    if not isinstance(value, str) or contains_nul(value):
+        return None
+    normalized = value.strip().lower()
+    if " " in normalized or not within_length(normalized, MAX_EMAIL_LENGTH):
+        return None
+    return normalized
+
+
 def _normalize_registration_email(email: str) -> str | None:
-    if contains_nul(email) or not within_length(email, MAX_EMAIL_LENGTH):
+    if not isinstance(email, str) or contains_nul(email):
         return None
     normalized = email.strip().lower()
-    if not EMAIL_PATTERN.fullmatch(normalized):
+    if (
+        not normalized
+        or " " in normalized
+        or not within_length(normalized, MAX_EMAIL_LENGTH)
+        or not EMAIL_PATTERN.fullmatch(normalized)
+    ):
         return None
     local, domain = normalized.rsplit("@", 1)
     if (
@@ -225,6 +243,8 @@ def register(
     normalized_email = _normalize_registration_email(email)
     if normalized_email is None:
         return _register_page(request, "Enter a valid email address.", 400, email)
+    if has_edge_space(password) or has_edge_space(confirm_password):
+        return _register_page(request, EDGE_SPACE_ERROR, 400, normalized_email)
     if not within_length(password, MAX_PASSWORD_LENGTH) or len(password) < 8:
         return _register_page(
             request,
@@ -280,7 +300,11 @@ def login(request: Request, email: str = Form(...), password: str = Form(...)):
         return _login_page(request, None, role=user["role"], email=user["email"])
     if contains_nul(email, password):
         return _login_page(request, "NUL characters are not allowed.", 400)
-    if not within_length(email, MAX_EMAIL_LENGTH) or not within_length(password, MAX_PASSWORD_LENGTH):
+    normalized_email = _normalize_registration_email(email)
+    if (
+        normalized_email is None
+        or not within_length(password, MAX_PASSWORD_LENGTH)
+    ):
         return _login_page(request, "Invalid email or password", 401)
     client_source = request.headers.get("x-real-ip")
     if (
@@ -297,7 +321,7 @@ def login(request: Request, email: str = Form(...), password: str = Form(...)):
                 SELECT id, email, role, blocked, auth_version, rate_limited
                 FROM public.authenticate_user(%s, %s, %s)
                 """,
-                (email, password, client_source),
+                (normalized_email, password, client_source),
             )
             row = cur.fetchone()
         conn.commit()
@@ -420,7 +444,8 @@ def forgot_password(request: Request, email: str = Form(...)):
         return _login_page(request, "Account is blocked", 403)
     if contains_nul(email) or any(char in email for char in "\r\n"):
         return _forgot_password_page(request, "NUL characters are not allowed.", 400)
-    if not within_length(email, MAX_EMAIL_LENGTH):
+    normalized_email = _normalize_registration_email(email)
+    if normalized_email is None:
         return _forgot_password_page(request, "Enter a valid email address.", 400)
     if not smtp_ready():
         return _forgot_password_page(
@@ -436,7 +461,7 @@ def forgot_password(request: Request, email: str = Form(...)):
                 SELECT reset_token, rate_limited, outcome
                 FROM public.request_password_reset(%s, %s, FALSE)
                 """,
-                (email, _client_source(request)),
+                (normalized_email, _client_source(request)),
             )
             row = cur.fetchone()
         conn.commit()
@@ -451,7 +476,7 @@ def forgot_password(request: Request, email: str = Form(...)):
         response.headers["Retry-After"] = "900"
         return response
     token = row[0] if row else None
-    if token and not deliver_password_reset(email.strip().lower(), token):
+    if token and not deliver_password_reset(normalized_email, token):
         return _forgot_password_page(
             request,
             "The reset email could not be sent. Try again later.",
@@ -518,6 +543,8 @@ def reset_password(
         )
     if new_password != confirm_password:
         return _reset_password_page(request, token, "Passwords do not match.", 400)
+    if has_edge_space(new_password):
+        return _reset_password_page(request, token, EDGE_SPACE_ERROR, 400)
     account_email = _reset_account_email(token)
     if (
         not within_length(new_password, MAX_PASSWORD_LENGTH)
@@ -545,6 +572,8 @@ def reset_password(
         return _reset_password_page(
             request, token, "Choose a non-default password.", 400
         )
+    if row and row[0] == "edge_space":
+        return _reset_password_page(request, token, EDGE_SPACE_ERROR, 400)
     if row and row[0] == "same":
         return _reset_password_page(request, token, SAME_PASSWORD_ERROR, 400)
     if row is None or row[0] != "changed":
@@ -739,6 +768,8 @@ def change_own_password(
         return denied
     if contains_nul(current_password, new_password, confirm_password):
         return RedirectResponse("/me?password_error=invalid", status_code=303)
+    if has_edge_space(new_password) or has_edge_space(confirm_password):
+        return RedirectResponse("/me?password_error=edge_space", status_code=303)
     if (
         not within_length(new_password, MAX_PASSWORD_LENGTH)
         or len(new_password) < 8

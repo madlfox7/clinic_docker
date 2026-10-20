@@ -143,6 +143,7 @@
   {% if request_submitted == "1" %}<p>Time-off request submitted for admin review.</p>{% endif %}
   {% if error == "request_date_past" %}<p>Start date cannot be in the past.</p>
   {% elif error == "invalid_request_range" %}<p>End date must not be before start date.</p>
+  {% elif error == "request_range_too_long" %}<p>Time off cannot cover more than a year or end more than two years from today.</p>
   {% elif error == "request_comment_required" %}<p>Enter a comment for the request.</p>
   {% elif error == "request_comment_invalid" %}<p>Comment cannot contain a NUL character.</p>
   {% elif error == "request_comment_too_long" %}<p>Comment must be no longer than 200 characters.</p>{% endif %}

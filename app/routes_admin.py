@@ -6,19 +6,36 @@ import psycopg2
 from fastapi import APIRouter, Form, Request
 from fastapi.responses import RedirectResponse
 
+from urllib.parse import urlencode
+
 from db import (
+    ADDRESS_MAX_LENGTH,
+    EXPERIENCE_MAX_YEARS,
+    MAX_CLOSURE_DAYS,
+    MAX_FUTURE_DAYS,
     MAX_PASSWORD_LENGTH,
     MAX_SLOT_MINUTES,
-    MAX_TEXT_LENGTH,
+    NAME_MAX_LENGTH,
+    SERVICE_BUFFER_MAX,
+    SERVICE_DURATION_MAX,
+    SERVICE_DURATION_MIN,
+    SLOT_MINUTES_MAX,
+    SLOT_MINUTES_MIN,
+    clean_label,
+    clean_optional_text,
+    clean_phone,
     contains_nul,
+    has_control_char,
     db,
     db_as,
+    load_appointment_notice,
+    log,
     parse_strict_int,
     record_audit_event,
     templates,
     within_length,
 )
-from mailer import smtp_ready
+from mailer import deliver_appointment_emails, smtp_ready
 from routes_auth import (
     _normalize_registration_email,
     deliver_password_reset,
@@ -135,6 +152,8 @@ def admin_users(request: Request):
             "current_admin_id": admin_user["id"],
             "future_cancelled": request.query_params.get("future_cancelled"),
             "error": request.query_params.get("error"),
+            "staff_email": request.query_params.get("email", ""),
+            "staff_role": request.query_params.get("role", ""),
             "created": request.query_params.get("created"),
             "password_reset": request.query_params.get("password_reset"),
             "password_link": request.query_params.get("password_link"),
@@ -154,8 +173,16 @@ def create_staff_user(
         return denied
     normalized_email = _normalize_registration_email(email)
     role = role.strip().lower()
+    def staff_error(code):
+        params = {"error": code, "role": role}
+        if normalized_email:
+            params["email"] = normalized_email
+        return RedirectResponse(
+            "/admin/users?" + urlencode(params), status_code=303
+        )
+
     if contains_nul(email, role, current_password):
-        return RedirectResponse("/admin/users?error=invalid_email", status_code=303)
+        return staff_error("invalid_email")
     if normalized_email is None:
         return RedirectResponse("/admin/users?error=invalid_email", status_code=303)
     if role not in ("registrar", "admin"):
@@ -164,9 +191,9 @@ def create_staff_user(
         current_password == ""
         or not within_length(current_password, MAX_PASSWORD_LENGTH)
     ):
-        return RedirectResponse("/admin/users?error=password_required", status_code=303)
+        return staff_error("password_required")
     if not smtp_ready():
-        return RedirectResponse("/admin/users?error=password_link_failed", status_code=303)
+        return staff_error("password_link_failed")
 
     conn = db_as(admin_user)
     try:
@@ -185,7 +212,7 @@ def create_staff_user(
                 )
                 row = cur.fetchone()
     except psycopg2.errors.UniqueViolation:
-        return RedirectResponse("/admin/users?error=email_exists", status_code=303)
+        return staff_error("email_exists")
     finally:
         conn.close()
     status, _user_id, recipient, token = row if row else ("invalid", None, None, None)
@@ -195,10 +222,10 @@ def create_staff_user(
             "password_required": "password_required",
             "password_denied": "password_denied",
         }.get(status, "invalid_email")
-        return RedirectResponse(f"/admin/users?error={error}", status_code=303)
+        return staff_error(error)
     if not deliver_password_reset(recipient, token):
         _discard_invite(token)
-        return RedirectResponse("/admin/users?error=password_link_failed", status_code=303)
+        return staff_error("password_link_failed")
     return RedirectResponse("/admin/users?created=1", status_code=303)
 
 
@@ -340,24 +367,21 @@ def admin_services(request: Request):
 
 
 def _validate_service_details(name: str, duration: str, buffer: str):
-    if contains_nul(name):
-        return None
-    name = name.strip()
+    cleaned_name = clean_label(name, max_length=NAME_MAX_LENGTH)
     duration_minutes = parse_strict_int(
-        duration, min_value=1, max_value=MAX_SLOT_MINUTES
+        duration, min_value=SERVICE_DURATION_MIN, max_value=SERVICE_DURATION_MAX
     )
     buffer_minutes = parse_strict_int(
-        buffer, min_value=0, max_value=MAX_SLOT_MINUTES
+        buffer, min_value=0, max_value=SERVICE_BUFFER_MAX
     )
     if (
-        not within_length(name, 120)
-        or not name
+        cleaned_name is None
         or duration_minutes is None
         or buffer_minutes is None
         or duration_minutes + buffer_minutes > MAX_SLOT_MINUTES
     ):
         return None
-    return name, duration_minutes, buffer_minutes
+    return cleaned_name, duration_minutes, buffer_minutes
 
 
 def _parse_doctor_ids(raw_ids: List[str]):
@@ -450,6 +474,8 @@ def create_service(
                 record_audit_event(cur, "service.create", "service", service_id)
     except psycopg2.errors.UniqueViolation:
         return RedirectResponse("/admin/services?error=name_exists", status_code=303)
+    except psycopg2.errors.CheckViolation:
+        return RedirectResponse("/admin/services?error=invalid_service", status_code=303)
     finally:
         conn.close()
     return RedirectResponse("/admin/services?created=1", status_code=303)
@@ -517,6 +543,8 @@ def update_service(
                 )
     except psycopg2.errors.UniqueViolation:
         return RedirectResponse("/admin/services?error=name_exists", status_code=303)
+    except psycopg2.errors.CheckViolation:
+        return RedirectResponse("/admin/services?error=invalid_service", status_code=303)
     finally:
         conn.close()
     return RedirectResponse("/admin/services?updated=1", status_code=303)
@@ -682,21 +710,16 @@ def create_doctor(
     if denied:
         return denied
     normalized_email = _normalize_registration_email(email)
-    full_name = full_name.strip()
-    specialty = specialty.strip()
-    parsed_experience = parse_strict_int(experience_years, min_value=0, max_value=80)
+    full_name = clean_label(full_name)
+    specialty = clean_label(specialty)
+    parsed_experience = parse_strict_int(
+        experience_years, min_value=0, max_value=EXPERIENCE_MAX_YEARS
+    )
     if normalized_email is None:
         return RedirectResponse(
             "/admin/doctors/new?error=invalid_email", status_code=303
         )
-    if (
-        contains_nul(full_name, specialty)
-        or not within_length(full_name, 120)
-        or not full_name
-        or not within_length(specialty, 120)
-        or not specialty
-        or parsed_experience is None
-    ):
+    if full_name is None or specialty is None or parsed_experience is None:
         return RedirectResponse(
             "/admin/doctors/new?error=invalid_details", status_code=303
         )
@@ -745,19 +768,14 @@ def update_doctor(
     if denied:
         return denied
     parsed_doctor_id = parse_strict_int(doctor_id, min_value=1)
-    full_name = full_name.strip()
-    specialty = specialty.strip()
-    parsed_experience = parse_strict_int(experience_years, min_value=0, max_value=80)
+    full_name = clean_label(full_name)
+    specialty = clean_label(specialty)
+    parsed_experience = parse_strict_int(
+        experience_years, min_value=0, max_value=EXPERIENCE_MAX_YEARS
+    )
     if parsed_doctor_id is None:
         return RedirectResponse("/admin/doctors?error=doctor_not_found", status_code=303)
-    if (
-        contains_nul(full_name, specialty)
-        or not within_length(full_name, 120)
-        or not full_name
-        or not within_length(specialty, 120)
-        or not specialty
-        or parsed_experience is None
-    ):
+    if full_name is None or specialty is None or parsed_experience is None:
         return RedirectResponse("/admin/doctors?error=invalid_details", status_code=303)
 
     conn = db_as(admin_user)
@@ -882,14 +900,12 @@ def update_admin_settings(
     if denied:
         return denied
     if contains_nul(address, phone):
-        return RedirectResponse(
-            "/admin/settings?error=invalid_text", status_code=303
-        )
-    address = address.strip()
-    phone = phone.strip()
-    if not within_length(address, 300) or not address:
+        return RedirectResponse("/admin/settings?error=invalid_text", status_code=303)
+    address = clean_optional_text(address, ADDRESS_MAX_LENGTH)
+    phone = clean_phone(phone)
+    if address is None:
         return RedirectResponse("/admin/settings?error=invalid_address", status_code=303)
-    if not within_length(phone, 50) or not phone:
+    if phone is None:
         return RedirectResponse("/admin/settings?error=invalid_phone", status_code=303)
 
     conn = db_as(admin_user)
@@ -907,6 +923,8 @@ def update_admin_settings(
                 if cur.rowcount != 1:
                     raise RuntimeError("Clinic settings row is missing")
                 record_audit_event(cur, "clinic.settings.update", "clinic", 1)
+    except psycopg2.errors.CheckViolation:
+        return RedirectResponse("/admin/settings?error=invalid_address", status_code=303)
     finally:
         conn.close()
     return RedirectResponse("/admin/settings?saved=1", status_code=303)
@@ -1187,7 +1205,9 @@ def admin_save_work_hours_bulk(
     if denied:
         return denied
     parsed_doctor_id = parse_strict_int(doctor_id, min_value=1)
-    parsed_slot_minutes = parse_strict_int(slot_minutes, min_value=1, max_value=MAX_SLOT_MINUTES)
+    parsed_slot_minutes = parse_strict_int(
+        slot_minutes, min_value=SLOT_MINUTES_MIN, max_value=SLOT_MINUTES_MAX
+    )
     if parsed_doctor_id is None or parsed_slot_minutes is None:
         return RedirectResponse("/admin/schedule?error=invalid_id", status_code=303)
     doctor_id = parsed_doctor_id
@@ -1286,6 +1306,11 @@ def admin_add_time_off(
         return RedirectResponse("/admin/schedule?error=invalid_time_off", status_code=303)
     if starts_on < date.today():
         return RedirectResponse("/admin/schedule?error=time_off_past", status_code=303)
+    if (
+        (ends_on - starts_on).days > MAX_CLOSURE_DAYS
+        or ends_on > date.today() + timedelta(days=MAX_FUTURE_DAYS)
+    ):
+        return RedirectResponse("/admin/schedule?error=time_off_too_long", status_code=303)
     conn = db_as(admin_user)
     cur = conn.cursor()
     cur.execute(
@@ -1362,12 +1387,21 @@ def admin_decide_time_off_request(
             status_code=303,
         )
 
-    if decision == "approve" and time_off_request[1] < date.today():
+    if decision == "approve" and (
+        time_off_request[1] < date.today()
+        or (time_off_request[2] - time_off_request[1]).days > MAX_CLOSURE_DAYS
+        or time_off_request[2] > date.today() + timedelta(days=MAX_FUTURE_DAYS)
+    ):
         conn.rollback()
         cur.close()
         conn.close()
+        error = (
+            "time_off_past"
+            if time_off_request[1] < date.today()
+            else "time_off_too_long"
+        )
         return RedirectResponse(
-            "/admin/schedule?error=time_off_past",
+            f"/admin/schedule?error={error}",
             status_code=303,
         )
 
@@ -1435,15 +1469,21 @@ def admin_save_holiday(
     admin_user, denied = require_user(request, "admin")
     if denied:
         return denied
-    if contains_nul(name):
+    if contains_nul(name) or has_control_char(name):
         return RedirectResponse(
             "/admin/schedule?error=holiday_name_invalid", status_code=303
         )
-    holiday_name = name.strip()
-    if not holiday_name:
-        return RedirectResponse("/admin/schedule?error=holiday_name_required", status_code=303)
-    if not within_length(holiday_name, MAX_TEXT_LENGTH):
-        return RedirectResponse("/admin/schedule?error=text_too_long", status_code=303)
+    if not isinstance(name, str) or not name.strip():
+        return RedirectResponse(
+            "/admin/schedule?error=holiday_name_required", status_code=303
+        )
+    holiday_name = clean_label(name)
+    if holiday_name is None:
+        return RedirectResponse(
+            "/admin/schedule?error=holiday_name_invalid", status_code=303
+        )
+    if holiday_day > date.today() + timedelta(days=MAX_FUTURE_DAYS):
+        return RedirectResponse("/admin/schedule?error=holiday_too_far", status_code=303)
     conn = db_as(admin_user)
     cur = conn.cursor()
     cur.execute(
@@ -1748,15 +1788,25 @@ def cancel_future_appointments(request: Request, user_id: str):
           AND u.role='patient'
           AND a.status='scheduled'
           AND s.starts_at > CURRENT_TIMESTAMP
+        RETURNING a.id
         """,
         (user_id,),
     )
-    cancelled_count = cur.rowcount
+    cancelled_ids = [row[0] for row in cur.fetchall()]
+    cancelled_count = len(cancelled_ids)
+    notices = []
     if cancelled_count:
         record_audit_event(cur, "appointment.cancel_future", "patient", user_id)
+        for appointment_id in cancelled_ids:
+            try:
+                notices.append(load_appointment_notice(cur, appointment_id))
+            except Exception:
+                log.exception("could not prepare appointment email")
     conn.commit()
     cur.close()
     conn.close()
+    for notice in notices:
+        deliver_appointment_emails(notice, "cancelled")
     return RedirectResponse(
         f"/admin/users?future_cancelled={cancelled_count}", status_code=303
     )

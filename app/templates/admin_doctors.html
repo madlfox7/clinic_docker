@@ -17,7 +17,7 @@
 {% if error == "doctor_not_found" %}<p>Doctor not found.</p>
 {% elif error == "email_exists" %}<p>An account with this email already exists.</p>
 {% elif error == "invalid_email" %}<p>Enter a valid email address.</p>
-{% elif error == "invalid_details" %}<p>Enter a name and specialty, and experience from 0 to 80 years.</p>{% endif %}
+{% elif error == "invalid_details" %}<p>Enter a name and specialty of 2–100 characters, and experience from 0 to 70 years.</p>{% endif %}
 <p><a href="/admin/doctors/new">Create doctor</a> | <a href="/admin/users">Manage user accounts</a></p>
 {% for doctor in doctors %}
   <section>
@@ -25,10 +25,10 @@
     <p>{{ doctor.email }}</p>
     <p>{{ doctor.future_appointments }} future scheduled appointment(s)</p>
     <form method="post" action="/admin/doctors/{{ doctor.id }}">
-      <label>Name <input name="full_name" value="{{ doctor.full_name }}" maxlength="120" required></label>
-      <label>Specialty <input name="specialty" value="{{ doctor.specialty }}" maxlength="120" required></label>
+      <label>Name <input name="full_name" value="{{ doctor.full_name }}" minlength="2" maxlength="100" required></label>
+      <label>Specialty <input name="specialty" value="{{ doctor.specialty }}" minlength="2" maxlength="100" required></label>
       <label>Experience (years)
-        <input name="experience_years" type="number" min="0" max="80" value="{{ doctor.experience_years }}" required>
+        <input name="experience_years" type="number" min="0" max="70" value="{{ doctor.experience_years }}" required>
       </label>
       <button type="submit">Save details</button>
     </form>

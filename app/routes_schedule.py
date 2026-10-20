@@ -14,7 +14,7 @@ from db import (
     templates,
     within_length,
 )
-from routes_auth import require_user
+from routes_auth import normalize_email_query, require_user
 
 
 router = APIRouter()
@@ -25,8 +25,9 @@ def registrar_patients(request: Request):
     user, denied = require_user(request, "registrar")
     if denied:
         return denied
-    query = request.query_params.get("q", "").strip()
-    if contains_nul(query) or len(query) > MAX_EMAIL_LENGTH:
+    raw_query = request.query_params.get("q", "")
+    query = normalize_email_query(raw_query)
+    if query is None:
         return templates.TemplateResponse(
             "registrar_patients.html",
             {
@@ -88,8 +89,8 @@ def registrar_patient_search(request: Request):
     user, denied = require_user(request, "registrar")
     if denied:
         return denied
-    query = request.query_params.get("q", "").strip()
-    if contains_nul(query) or len(query) > MAX_EMAIL_LENGTH:
+    query = normalize_email_query(request.query_params.get("q", ""))
+    if query is None:
         raise HTTPException(status_code=400, detail="Invalid search query.")
     if len(query) < 2:
         return []
@@ -526,6 +527,13 @@ def submit_time_off_request(
     if starts_on > ends_on:
         return RedirectResponse(
             f"{redirect_url}&error=invalid_request_range", status_code=303
+        )
+    if (
+        (ends_on - starts_on).days > 366
+        or ends_on > date.today() + timedelta(days=366 * 2)
+    ):
+        return RedirectResponse(
+            f"{redirect_url}&error=request_range_too_long", status_code=303
         )
     if not note:
         return RedirectResponse(

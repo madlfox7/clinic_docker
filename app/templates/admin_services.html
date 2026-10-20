@@ -6,7 +6,7 @@
 {% if deleted == "1" %}<p>Unused service deleted.</p>{% endif %}
 {% if activation == "activated" %}<p>Service activated. Generate slots to make it bookable.</p>
 {% elif activation == "deactivated" %}<p>Service deactivated; its existing appointments and history are preserved.</p>{% endif %}
-{% if error == "invalid_service" %}<p>Enter a name, a positive duration, and a non-negative buffer. Their total must not exceed 1440 minutes.</p>
+{% if error == "invalid_service" %}<p>Enter a name of 2–100 characters, a duration of 5–480 minutes, and a buffer of 0–120 minutes.</p>
 {% elif error == "name_exists" %}<p>A service with this name already exists.</p>
 {% elif error == "service_not_found" %}<p>Service not found.</p>
 {% elif error == "invalid_doctor" %}<p>One or more selected doctors are unavailable.</p>
@@ -16,9 +16,9 @@
 <section>
   <h2>Add service</h2>
   <form method="post" action="/admin/services">
-    <label>Name <input name="name" maxlength="120" required></label>
-    <label>Duration (minutes) <input name="duration_minutes" type="number" min="1" max="1440" required></label>
-    <label>Buffer after service (minutes) <input name="buffer_minutes" type="number" min="0" max="1440" value="0" required></label>
+    <label>Name <input name="name" maxlength="100" required></label>
+    <label>Duration (minutes) <input name="duration_minutes" type="number" min="5" max="480" required></label>
+    <label>Buffer after service (minutes) <input name="buffer_minutes" type="number" min="0" max="120" value="0" required></label>
     <fieldset>
       <legend>Doctors offering this service</legend>
       {% for doctor in doctors %}
@@ -37,12 +37,12 @@
     <h2>{{ service.name }} — {{ "Active" if service.active else "Inactive" }}</h2>
     <p>{{ service.slot_count }} generated slot(s)</p>
     <form method="post" action="/admin/services/{{ service.id }}">
-      <label>Name <input name="name" value="{{ service.name }}" maxlength="120" required></label>
+      <label>Name <input name="name" value="{{ service.name }}" maxlength="100" required></label>
       <label>Duration (minutes)
-        <input name="duration_minutes" type="number" min="1" max="1440" value="{{ service.duration_minutes }}" required>
+        <input name="duration_minutes" type="number" min="5" max="480" value="{{ service.duration_minutes }}" required>
       </label>
       <label>Buffer after service (minutes)
-        <input name="buffer_minutes" type="number" min="0" max="1440" value="{{ service.buffer_minutes }}" required>
+        <input name="buffer_minutes" type="number" min="0" max="120" value="{{ service.buffer_minutes }}" required>
       </label>
       <fieldset>
         <legend>Doctors offering this service</legend>

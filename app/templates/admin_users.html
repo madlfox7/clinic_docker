@@ -9,8 +9,8 @@
 {% if error == "invalid_email" %}<p>Enter a valid email address.</p>
 {% elif error == "email_exists" %}<p>An account with this email already exists.</p>
 {% elif error == "invalid_role" %}<p>Choose registrar or admin.</p>
-{% elif error == "password_required" %}<p>Confirm with your password to create an administrator.</p>
-{% elif error == "password_denied" %}<p>Current password is incorrect. No administrator was created.</p>
+{% elif error == "password_required" %}<p><strong>Confirm with your password to create an administrator. No account was created and no email was sent.</strong></p>
+{% elif error == "password_denied" %}<p><strong>Current password is incorrect. No administrator was created and no email was sent.</strong></p>
 {% elif error == "invalid_password" %}<p>Choose a non-default password.</p>
 {% elif error == "password_mismatch" %}<p>Passwords do not match.</p>
 {% elif error == "user_not_found" %}<p>User not found.</p>
@@ -28,20 +28,23 @@
 <section>
   <h2>Create registrar or administrator</h2>
   <form method="post" action="/admin/users">
-    <label>Email <input name="email" type="email" maxlength="254" required></label>
+    <label>Email <input name="email" type="email" maxlength="254" value="{{ staff_email }}" required></label>
     <label>Role
       <select name="role" id="staff-role" required>
-        <option value="registrar">Registrar</option>
-        <option value="admin">Administrator</option>
+        <option value="registrar" {% if staff_role != "admin" %}selected{% endif %}>Registrar</option>
+        <option value="admin" {% if staff_role == "admin" %}selected{% endif %}>Administrator</option>
       </select>
     </label>
-    <div id="admin-confirm" hidden>
+    <div id="admin-confirm" {% if staff_role != "admin" %}hidden{% endif %}>
       <p><strong>Warning:</strong> this creates another administrator who can manage the clinic. Confirm with your own password. Their password is not set here.</p>
+      {% if error == "password_required" or error == "password_denied" %}
+        <p><strong>The password was not accepted. Nothing was created and no email was sent.</strong></p>
+      {% endif %}
       <label>Confirm with your password
         <input name="current_password" type="password" maxlength="72" autocomplete="current-password">
       </label>
     </div>
-    <p>The new account receives a setup link. This page cannot set a password or change an email.</p>
+    <p>A setup link is sent only after the account is created. A wrong password does not send that email.</p>
     <script>
       const staffRole = document.getElementById("staff-role");
       const adminConfirm = document.getElementById("admin-confirm");
