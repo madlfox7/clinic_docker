@@ -500,6 +500,8 @@ def doctor_calendar(request: Request):
             "requests": requests,
             "request_submitted": request.query_params.get("request_submitted"),
             "error": request.query_params.get("error"),
+            "min_request_date": date.today().isoformat(),
+            "max_request_date": (date.today() + timedelta(days=366 * 2)).isoformat(),
         },
     )
 

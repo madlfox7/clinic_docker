@@ -101,7 +101,7 @@
 {% elif error == "time_off_too_long" %}<p>Time off cannot cover more than a year or end more than two years from today.</p>
 {% elif error == "holiday_too_far" %}<p>A holiday cannot be more than two years ahead.</p>
 {% elif error == "holiday_name_required" %}<p>Enter a holiday name.</p>
-{% elif error == "holiday_name_invalid" %}<p>Holiday name cannot contain a NUL character.</p>
+{% elif error == "holiday_name_invalid" %}<p>Enter a holiday name of 2–100 characters without control characters.</p>
 {% elif error == "doctor_not_found" %}<p>Doctor not found.</p>
 {% elif error == "no_doctors_selected" %}<p>Select at least one doctor.</p>
 {% elif error == "no_weekdays" %}<p>Select at least one weekday.</p>
@@ -224,8 +224,8 @@
       {% for doctor in doctors %}<option value="{{ doctor.id }}">{{ doctor.full_name }}</option>{% endfor %}
     </select>
   </label>
-  <label>From <input name="starts_on" type="date" required></label>
-  <label>Through <input name="ends_on" type="date" required></label>
+  <label>From <input name="starts_on" type="date" min="{{ min_schedule_date }}" max="{{ max_schedule_date }}" required></label>
+  <label>Through <input name="ends_on" type="date" min="{{ min_schedule_date }}" max="{{ max_schedule_date }}" required></label>
   <button type="submit">Add time off</button>
 </form>
 
@@ -235,8 +235,8 @@
   {% else %}<li>No holidays configured.</li>{% endfor %}
 </ul>
 <form method="post" action="/admin/holidays">
-  <label>Date <input name="holiday_day" type="date" required></label>
-  <label>Name <input name="name" type="text" required></label>
+  <label>Date <input name="holiday_day" type="date" max="{{ max_schedule_date }}" required></label>
+  <label>Name <input name="name" type="text" minlength="2" maxlength="100" required></label>
   <button type="submit">Save holiday</button>
 </form>
 
@@ -273,8 +273,8 @@
       <p>No active doctors.</p>
     {% endfor %}
   </fieldset>
-  <label>From <input name="from_date" type="date" value="{{ default_from_date }}" required></label>
-  <label>To <input name="to_date" type="date" value="{{ default_to_date }}" required></label>
+  <label>From <input name="from_date" type="date" min="{{ min_schedule_date }}" max="{{ max_generation_date }}" value="{{ default_from_date }}" required></label>
+  <label>To <input name="to_date" type="date" min="{{ min_schedule_date }}" max="{{ max_generation_date }}" value="{{ default_to_date }}" required></label>
   <button type="submit">Generate for selected doctors</button>
 </form>
 <script>

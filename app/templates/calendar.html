@@ -148,9 +148,9 @@
   {% elif error == "request_comment_invalid" %}<p>Comment cannot contain a NUL character.</p>
   {% elif error == "request_comment_too_long" %}<p>Comment must be no longer than 200 characters.</p>{% endif %}
   <form method="post" action="/doctor/time-off-requests">
-    <label>From <input type="date" name="starts_on" value="{{ selected_day.isoformat() }}" required></label>
-    <label>Through <input type="date" name="ends_on" value="{{ selected_day.isoformat() }}" required></label>
-    <label>Comment <textarea name="comment" maxlength="200" required></textarea></label>
+    <label>From <input type="date" name="starts_on" min="{{ min_request_date }}" max="{{ max_request_date }}" value="{{ selected_day.isoformat() }}" required></label>
+    <label>Through <input type="date" name="ends_on" min="{{ min_request_date }}" max="{{ max_request_date }}" value="{{ selected_day.isoformat() }}" required></label>
+    <label>Comment <textarea name="comment" minlength="1" maxlength="200" required></textarea></label>
     <button type="submit">Submit for admin approval</button>
   </form>
 

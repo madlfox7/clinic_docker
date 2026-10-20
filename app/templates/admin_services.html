@@ -16,7 +16,7 @@
 <section>
   <h2>Add service</h2>
   <form method="post" action="/admin/services">
-    <label>Name <input name="name" maxlength="100" required></label>
+    <label>Name <input name="name" minlength="2" maxlength="100" required></label>
     <label>Duration (minutes) <input name="duration_minutes" type="number" min="5" max="480" required></label>
     <label>Buffer after service (minutes) <input name="buffer_minutes" type="number" min="0" max="120" value="0" required></label>
     <fieldset>
@@ -37,7 +37,7 @@
     <h2>{{ service.name }} — {{ "Active" if service.active else "Inactive" }}</h2>
     <p>{{ service.slot_count }} generated slot(s)</p>
     <form method="post" action="/admin/services/{{ service.id }}">
-      <label>Name <input name="name" value="{{ service.name }}" maxlength="100" required></label>
+      <label>Name <input name="name" value="{{ service.name }}" minlength="2" maxlength="100" required></label>
       <label>Duration (minutes)
         <input name="duration_minutes" type="number" min="5" max="480" value="{{ service.duration_minutes }}" required>
       </label>
