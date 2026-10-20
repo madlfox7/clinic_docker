@@ -27,6 +27,8 @@
         <p>No doctors configured.</p>
       {% endfor %}
     </fieldset>
+    <button type="button" data-check-group="doctor_ids" data-check-action="all">Select all</button>
+    <button type="button" data-check-group="doctor_ids" data-check-action="none">Clear selection</button>
     <button type="submit">Create service</button>
   </form>
 </section>
@@ -56,6 +58,8 @@
           <p>No doctors configured.</p>
         {% endfor %}
       </fieldset>
+      <button type="button" data-check-group="doctor_ids" data-check-action="all">Select all</button>
+      <button type="button" data-check-group="doctor_ids" data-check-action="none">Clear selection</button>
       <button type="submit">Save service</button>
     </form>
     {% if service.active %}

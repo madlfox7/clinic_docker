@@ -40,5 +40,29 @@
   </p>
   <hr>
   {% block content %}{% endblock %}
+  <script>
+    document.querySelectorAll("[data-check-group]").forEach((button) => {
+      button.addEventListener("click", () => {
+        const form = button.closest("form");
+        if (!form) return;
+        const checked = button.dataset.checkAction === "all";
+        form.querySelectorAll(`input[type="checkbox"][name="${button.dataset.checkGroup}"]`).forEach((box) => {
+          box.checked = checked;
+        });
+      });
+    });
+    document.querySelectorAll("form[data-confirm-selected]").forEach((form) => {
+      form.addEventListener("submit", (event) => {
+        const name = form.dataset.confirmSelected;
+        const count = form.querySelectorAll(`input[type="checkbox"][name="${name}"]:checked`).length;
+        if (!count) {
+          event.preventDefault();
+          return;
+        }
+        const message = (form.dataset.confirmMessage || "Continue for {n} selected?").split("{n}").join(String(count));
+        if (!window.confirm(message)) event.preventDefault();
+      });
+    });
+  </script>
 </body>
 </html>

@@ -1681,16 +1681,22 @@ def test_admin_schedule_configuration_is_admin_only_and_repeatable():
 		page = admin.get("/admin/schedule")
 		assert page.status_code == 200
 		assert 'action="/admin/schedule/generate"' in page.text
+		assert 'action="/admin/schedule/apply-hours"' in page.text
 		assert 'name="doctor_ids"' in page.text
-		assert "Select all doctors" in page.text
+		assert "Select all" in page.text
+		assert "Clear selection" in page.text
+		assert "Remove free slots outside working hours for selected doctors" in page.text
 		assert "Current hours are not preloaded" in page.text
 		assert 'data-weekday-preset="0,1,2,3,4"' in page.text
 		assert 'data-weekday-preset="5,6"' in page.text
 		assert 'data-weekday-preset="0,1,2,3,4,5,6"' in page.text
 		assert "Thanksgiving" in page.text
 		assert "Monday" in page.text
-		assert '<input name="name" type="text" required>' in page.text
-		doctor_match = re.search(r'<option value="(\d+)">Anna Ohanyan</option>', page.text)
+		assert 'name="name" type="text" minlength="2" maxlength="100" required' in page.text
+		doctor_match = re.search(
+			r'name="doctor_ids" value="(\d+)"[^>]*> Anna Ohanyan',
+			page.text,
+		)
 		assert doctor_match, "Anna missing from admin schedule controls"
 		doctor_id = doctor_match.group(1)
 		future_start = psql("SELECT CURRENT_DATE + 7")
@@ -1981,14 +1987,25 @@ def test_apply_hours_removes_free_slots_outside_window_only():
 			login(registrar, REG)
 			page = admin.get("/admin/schedule")
 			match = re.search(
-				r'action="/admin/doctors/(\d+)/apply-hours"',
+				r'action="/admin/schedule/apply-hours"',
 				page.text,
 			)
-			assert match, "apply-hours button missing"
-			doctor_id = match.group(1)
-			denied = registrar.post(f"/admin/doctors/{doctor_id}/apply-hours")
+			assert match, "apply-hours form missing"
+			doctor_id = re.search(
+				r'name="doctor_ids" value="(\d+)"[^>]*> Anna Ohanyan',
+				page.text,
+			)
+			assert doctor_id, "Anna missing from apply-hours form"
+			doctor_id = doctor_id.group(1)
+			denied = registrar.post(
+				"/admin/schedule/apply-hours",
+				data={"doctor_ids": doctor_id},
+			)
 			assert "/login" in str(denied.url)
-			applied = admin.post(f"/admin/doctors/{doctor_id}/apply-hours")
+			applied = admin.post(
+				"/admin/schedule/apply-hours",
+				data={"doctor_ids": doctor_id},
+			)
 			assert "saved=apply-hours" in str(applied.url)
 			assert "Scheduled visits were not cancelled" in applied.text
 			assert "Outside work hours" in applied.text

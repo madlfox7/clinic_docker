@@ -18,7 +18,8 @@
 {% if time_off_request_decision == "rejected" %}
 <p>Time-off request rejected.</p>{% endif %}
 {% if saved == "apply-hours" %}
-<p>Applied schedule. Removed {{ hours_report.removed_slots if hours_report else 0 }} free slots outside work hours.
+<p>Applied schedule. Removed {{ hours_report.removed_slots if hours_report else 0 }} free slots outside work hours
+   for {{ hours_report.doctor_count if hours_report else 0 }} doctor(s).
    Scheduled visits were not cancelled.</p>{% endif %}
 {% if visit_cancelled == "1" %}
 <p>Appointment cancelled. The closed date remains unavailable.</p>{% endif %}
@@ -131,15 +132,20 @@
   {% endfor %}
   </tbody>
 </table>
-<form id="bulk-work-hours-form" method="post" action="/admin/work-hours-bulk">
+<form id="bulk-work-hours-form" method="post" action="/admin/work-hours-bulk"
+  data-confirm-selected="doctor_ids"
+  data-confirm-message="Save these hours for {n} doctors?">
   <p><strong>Warning:</strong> Current hours are not preloaded. Saving replaces the existing hours for each selected weekday with the same values below. Review the schedule above before saving.</p>
-  <label>Doctor
-    <select name="doctor_id" required>
-      {% for doctor in doctors %}
-        <option value="{{ doctor.id }}">{{ doctor.full_name }}</option>
-      {% endfor %}
-    </select>
-  </label>
+  <fieldset>
+    <legend>Doctors</legend>
+    {% for doctor in doctors %}
+      <label><input type="checkbox" name="doctor_ids" value="{{ doctor.id }}"> {{ doctor.full_name }}</label>
+    {% else %}
+      <p>No active doctors.</p>
+    {% endfor %}
+  </fieldset>
+  <button type="button" data-check-group="doctor_ids" data-check-action="all">Select all</button>
+  <button type="button" data-check-group="doctor_ids" data-check-action="none">Clear selection</button>
   <p>Quick day selection</p>
   <div>
     <button type="button" data-weekday-preset="0,1,2,3,4">Weekdays (Mon–Fri)</button>
@@ -175,11 +181,21 @@
   }
 </script>
 
-{% for doctor in doctors %}
-  <form method="post" action="/admin/doctors/{{ doctor.id }}/apply-hours">
-    <button type="submit">Apply schedule: remove free slots outside hours ({{ doctor.full_name }})</button>
-  </form>
-{% endfor %}
+<form method="post" action="/admin/schedule/apply-hours"
+  data-confirm-selected="doctor_ids"
+  data-confirm-message="Remove free slots outside working hours for {n} doctors?">
+  <fieldset>
+    <legend>Doctors</legend>
+    {% for doctor in doctors %}
+      <label><input type="checkbox" name="doctor_ids" value="{{ doctor.id }}"> {{ doctor.full_name }}</label>
+    {% else %}
+      <p>No active doctors.</p>
+    {% endfor %}
+  </fieldset>
+  <button type="button" data-check-group="doctor_ids" data-check-action="all">Select all</button>
+  <button type="button" data-check-group="doctor_ids" data-check-action="none">Clear selection</button>
+  <button type="submit">Remove free slots outside working hours for selected doctors</button>
+</form>
 
 <h2>Time off</h2>
 <h3>Doctor requests</h3>
@@ -218,12 +234,19 @@
     <li>No time off configured.</li>
   {% endfor %}
 </ul>
-<form method="post" action="/admin/time-off">
-  <label>Doctor
-    <select name="doctor_id" required>
-      {% for doctor in doctors %}<option value="{{ doctor.id }}">{{ doctor.full_name }}</option>{% endfor %}
-    </select>
-  </label>
+<form method="post" action="/admin/time-off"
+  data-confirm-selected="doctor_ids"
+  data-confirm-message="Add this time off for {n} doctors?">
+  <fieldset>
+    <legend>Doctors</legend>
+    {% for doctor in doctors %}
+      <label><input type="checkbox" name="doctor_ids" value="{{ doctor.id }}"> {{ doctor.full_name }}</label>
+    {% else %}
+      <p>No active doctors.</p>
+    {% endfor %}
+  </fieldset>
+  <button type="button" data-check-group="doctor_ids" data-check-action="all">Select all</button>
+  <button type="button" data-check-group="doctor_ids" data-check-action="none">Clear selection</button>
   <label>From <input name="starts_on" type="date" min="{{ min_schedule_date }}" max="{{ max_schedule_date }}" required></label>
   <label>Through <input name="ends_on" type="date" min="{{ min_schedule_date }}" max="{{ max_schedule_date }}" required></label>
   <button type="submit">Add time off</button>
@@ -261,7 +284,9 @@
     {% endfor %}
   </ul>
 {% endif %}
-<form id="generate-slots-form" method="post" action="/admin/schedule/generate">
+<form id="generate-slots-form" method="post" action="/admin/schedule/generate"
+  data-confirm-selected="doctor_ids"
+  data-confirm-message="Generate slots for {n} doctors?">
   <fieldset>
     <legend>Doctors</legend>
     {% for doctor in doctors %}
@@ -273,23 +298,10 @@
       <p>No active doctors.</p>
     {% endfor %}
   </fieldset>
+  <button type="button" data-check-group="doctor_ids" data-check-action="all">Select all</button>
+  <button type="button" data-check-group="doctor_ids" data-check-action="none">Clear selection</button>
   <label>From <input name="from_date" type="date" min="{{ min_schedule_date }}" max="{{ max_generation_date }}" value="{{ default_from_date }}" required></label>
   <label>To <input name="to_date" type="date" min="{{ min_schedule_date }}" max="{{ max_generation_date }}" value="{{ default_to_date }}" required></label>
   <button type="submit">Generate for selected doctors</button>
 </form>
-<script>
-  const generateSlotsForm = document.getElementById("generate-slots-form");
-  if (generateSlotsForm) {
-    const doctorCheckboxes = generateSlotsForm.querySelectorAll('input[name="doctor_ids"]');
-    const toggleDoctorsButton = document.createElement("button");
-    toggleDoctorsButton.type = "button";
-    toggleDoctorsButton.textContent = "Select all doctors";
-    toggleDoctorsButton.addEventListener("click", () => {
-      const shouldSelectAll = Array.from(doctorCheckboxes).some((checkbox) => !checkbox.checked);
-      doctorCheckboxes.forEach((checkbox) => { checkbox.checked = shouldSelectAll; });
-      toggleDoctorsButton.textContent = shouldSelectAll ? "Clear selection" : "Select all doctors";
-    });
-    generateSlotsForm.querySelector("fieldset").append(toggleDoctorsButton);
-  }
-</script>
 {% endblock %}

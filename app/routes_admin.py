@@ -384,6 +384,37 @@ def _validate_service_details(name: str, duration: str, buffer: str):
     return cleaned_name, duration_minutes, buffer_minutes
 
 
+def _selected_doctor_ids(raw_ids: List[str], single_id: str = None):
+    raw = list(raw_ids or [])
+    if single_id:
+        raw.append(single_id)
+    if not raw:
+        return []
+    doctor_ids = []
+    for raw_id in raw:
+        doctor_id = parse_strict_int(raw_id, min_value=1)
+        if doctor_id is None:
+            return None
+        if doctor_id not in doctor_ids:
+            doctor_ids.append(doctor_id)
+    return doctor_ids
+
+
+def _active_doctor_ids(cur, doctor_ids):
+    cur.execute(
+        """
+        SELECT d.id
+        FROM doctors d
+        JOIN users u ON u.id = d.user_id
+        WHERE d.id = ANY(%s::int[])
+          AND u.role = 'doctor'
+          AND NOT u.blocked
+        """,
+        (doctor_ids,),
+    )
+    return {row[0] for row in cur.fetchall()}
+
+
 def _parse_doctor_ids(raw_ids: List[str]):
     doctor_ids = []
     for raw_id in raw_ids:
@@ -1198,7 +1229,8 @@ def admin_schedule(request: Request):
 @router.post("/admin/work-hours-bulk")
 def admin_save_work_hours_bulk(
     request: Request,
-    doctor_id: str = Form(...),
+    doctor_ids: List[str] = Form(default=[]),
+    doctor_id: str = Form(None),
     weekdays: List[str] = Form(default=[]),
     start_time: datetime_time = Form(...),
     end_time: datetime_time = Form(...),
@@ -1207,13 +1239,14 @@ def admin_save_work_hours_bulk(
     admin_user, denied = require_user(request, "admin")
     if denied:
         return denied
-    parsed_doctor_id = parse_strict_int(doctor_id, min_value=1)
+    selected_doctors = _selected_doctor_ids(doctor_ids, doctor_id)
     parsed_slot_minutes = parse_strict_int(
         slot_minutes, min_value=SLOT_MINUTES_MIN, max_value=SLOT_MINUTES_MAX
     )
-    if parsed_doctor_id is None or parsed_slot_minutes is None:
+    if selected_doctors is None or parsed_slot_minutes is None:
         return RedirectResponse("/admin/schedule?error=invalid_id", status_code=303)
-    doctor_id = parsed_doctor_id
+    if not selected_doctors:
+        return RedirectResponse("/admin/schedule?error=no_doctors_selected", status_code=303)
     slot_minutes = parsed_slot_minutes
     if start_time >= end_time:
         return RedirectResponse("/admin/schedule?error=invalid_work_hours", status_code=303)
@@ -1223,33 +1256,25 @@ def admin_save_work_hours_bulk(
 
     conn = db_as(admin_user)
     cur = conn.cursor()
-    cur.execute(
-        """
-        SELECT 1
-        FROM doctors d
-        JOIN users u ON u.id = d.user_id
-        WHERE d.id = %s AND u.role = 'doctor' AND NOT u.blocked
-        """,
-        (doctor_id,),
-    )
-    if cur.fetchone() is None:
+    if _active_doctor_ids(cur, selected_doctors) != set(selected_doctors):
         cur.close()
         conn.close()
         return RedirectResponse("/admin/schedule?error=doctor_not_found", status_code=303)
 
-    for weekday in selected:
-        cur.execute(
-            """
-            INSERT INTO work_hours (doctor_id, weekday, start_time, end_time, slot_minutes)
-            VALUES (%s, %s, %s, %s, %s)
-            ON CONFLICT (doctor_id, weekday) DO UPDATE
-            SET start_time=EXCLUDED.start_time,
-                end_time=EXCLUDED.end_time,
-                slot_minutes=EXCLUDED.slot_minutes
-            """,
-            (doctor_id, weekday, start_time, end_time, slot_minutes),
-        )
-    record_audit_event(cur, "schedule.work_hours.save", "doctor", doctor_id)
+    for selected_doctor_id in selected_doctors:
+        for weekday in selected:
+            cur.execute(
+                """
+                INSERT INTO work_hours (doctor_id, weekday, start_time, end_time, slot_minutes)
+                VALUES (%s, %s, %s, %s, %s)
+                ON CONFLICT (doctor_id, weekday) DO UPDATE
+                SET start_time=EXCLUDED.start_time,
+                    end_time=EXCLUDED.end_time,
+                    slot_minutes=EXCLUDED.slot_minutes
+                """,
+                (selected_doctor_id, weekday, start_time, end_time, slot_minutes),
+            )
+        record_audit_event(cur, "schedule.work_hours.save", "doctor", selected_doctor_id)
     conn.commit()
     cur.close()
     conn.close()
@@ -1287,6 +1312,41 @@ def admin_apply_hours(request: Request, doctor_id: str):
     conn.close()
     request.session["hours_report"] = {
         "doctor_id": doctor_id,
+        "doctor_count": 1,
+        "removed_slots": removed,
+    }
+    return RedirectResponse("/admin/schedule?saved=apply-hours", status_code=303)
+
+
+@router.post("/admin/schedule/apply-hours")
+def admin_apply_hours_bulk(
+    request: Request,
+    doctor_ids: List[str] = Form(default=[]),
+):
+    admin_user, denied = require_user(request, "admin")
+    if denied:
+        return denied
+    selected_doctors = _selected_doctor_ids(doctor_ids)
+    if selected_doctors is None:
+        return RedirectResponse("/admin/schedule?error=invalid_id", status_code=303)
+    if not selected_doctors:
+        return RedirectResponse("/admin/schedule?error=no_doctors_selected", status_code=303)
+    conn = db_as(admin_user)
+    cur = conn.cursor()
+    if _active_doctor_ids(cur, selected_doctors) != set(selected_doctors):
+        cur.close()
+        conn.close()
+        return RedirectResponse("/admin/schedule?error=doctor_not_found", status_code=303)
+    removed = 0
+    for doctor_id in selected_doctors:
+        where_sql = f"s.doctor_id=%s AND {_outside_hours_sql('s')}"
+        removed += _purge_slots_without_scheduled(cur, where_sql, (doctor_id,))
+        record_audit_event(cur, "schedule.work_hours.apply", "doctor", doctor_id)
+    conn.commit()
+    cur.close()
+    conn.close()
+    request.session["hours_report"] = {
+        "doctor_count": len(selected_doctors),
         "removed_slots": removed,
     }
     return RedirectResponse("/admin/schedule?saved=apply-hours", status_code=303)
@@ -1295,16 +1355,18 @@ def admin_apply_hours(request: Request, doctor_id: str):
 @router.post("/admin/time-off")
 def admin_add_time_off(
     request: Request,
-    doctor_id: str = Form(...),
+    doctor_ids: List[str] = Form(default=[]),
+    doctor_id: str = Form(None),
     starts_on: date = Form(...),
     ends_on: date = Form(...),
 ):
     admin_user, denied = require_user(request, "admin")
     if denied:
         return denied
-    doctor_id = parse_strict_int(doctor_id, min_value=1)
-    if doctor_id is None:
+    selected_doctors = _selected_doctor_ids(doctor_ids, doctor_id)
+    if selected_doctors is None or not selected_doctors:
         return RedirectResponse("/admin/schedule?error=doctor_not_found", status_code=303)
+    doctor_id = selected_doctors[0]
     if starts_on > ends_on:
         return RedirectResponse("/admin/schedule?error=invalid_time_off", status_code=303)
     if starts_on < date.today():
@@ -1316,29 +1378,25 @@ def admin_add_time_off(
         return RedirectResponse("/admin/schedule?error=time_off_too_long", status_code=303)
     conn = db_as(admin_user)
     cur = conn.cursor()
-    cur.execute(
-        """
-        SELECT 1
-        FROM doctors d
-        JOIN users u ON u.id = d.user_id
-        WHERE d.id = %s AND u.role = 'doctor' AND NOT u.blocked
-        """,
-        (doctor_id,),
-    )
-    if cur.fetchone() is None:
+    if _active_doctor_ids(cur, selected_doctors) != set(selected_doctors):
         cur.close()
         conn.close()
         return RedirectResponse("/admin/schedule?error=doctor_not_found", status_code=303)
-    cur.execute(
-        """
-        INSERT INTO time_off (doctor_id, starts_on, ends_on)
-        VALUES (%s, %s, %s)
-        ON CONFLICT (doctor_id, starts_on, ends_on) DO NOTHING
-        """,
-        (doctor_id, starts_on, ends_on),
-    )
-    removed_slots, _ = _close_slots_for_period(cur, starts_on, ends_on, doctor_id)
-    record_audit_event(cur, "schedule.time_off.add", "doctor", doctor_id)
+    removed_slots = 0
+    for selected_doctor_id in selected_doctors:
+        cur.execute(
+            """
+            INSERT INTO time_off (doctor_id, starts_on, ends_on)
+            VALUES (%s, %s, %s)
+            ON CONFLICT (doctor_id, starts_on, ends_on) DO NOTHING
+            """,
+            (selected_doctor_id, starts_on, ends_on),
+        )
+        removed, _ = _close_slots_for_period(
+            cur, starts_on, ends_on, selected_doctor_id
+        )
+        removed_slots += removed
+        record_audit_event(cur, "schedule.time_off.add", "doctor", selected_doctor_id)
     conn.commit()
     cur.close()
     conn.close()
@@ -1347,6 +1405,7 @@ def admin_add_time_off(
         "starts_on": starts_on.isoformat(),
         "ends_on": ends_on.isoformat(),
         "doctor_id": doctor_id,
+        "doctor_count": len(selected_doctors),
         "removed_slots": removed_slots,
     }
     return RedirectResponse("/admin/schedule?saved=time-off", status_code=303)
