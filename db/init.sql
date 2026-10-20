@@ -65,6 +65,18 @@ CHECK (auth_version >= 0);
 CREATE UNIQUE INDEX IF NOT EXISTS users_email_lower_unique
 ON users (lower(email));
 
+CREATE TABLE IF NOT EXISTS email_change_requests (
+  id BIGSERIAL PRIMARY KEY,
+  user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  new_email TEXT NOT NULL,
+  old_token_hash BYTEA NOT NULL UNIQUE,
+  new_token_hash BYTEA NOT NULL UNIQUE,
+  old_confirmed_at TIMESTAMPTZ,
+  new_confirmed_at TIMESTAMPTZ,
+  expires_at TIMESTAMPTZ NOT NULL,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
 CREATE TABLE IF NOT EXISTS clinic_settings (
   id INTEGER PRIMARY KEY CHECK (id = 1),
   address TEXT NOT NULL CHECK (length(btrim(address)) BETWEEN 1 AND 300),

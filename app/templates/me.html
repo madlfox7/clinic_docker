@@ -32,6 +32,18 @@
   <p><a href="/admin/users">Manage patients</a> | <a href="/admin/schedule">Manage schedule</a> | <a href="/admin/audit">Audit log</a></p>
 {% endif %}
 
+<h2>Change email</h2>
+{% if email_change == "sent" %}<p>Confirmation links were sent to the current and new addresses. Both must be confirmed.</p>{% endif %}
+{% if email_error == "invalid" %}<p>Enter a valid email address.</p>
+{% elif email_error == "same" %}<p>That is already this account's email.</p>
+{% elif email_error == "taken" %}<p>An account with this email already exists.</p>
+{% elif email_error == "failed" %}<p>The confirmation email could not be sent. Try again later.</p>
+{% elif email_error == "rate_limited" %}<p>Too many email change attempts. Try again later.</p>{% endif %}
+<form method="post" action="/me/email">
+  <label>New email <input name="new_email" type="email" maxlength="254" required></label>
+  <button type="submit">Send confirmation links</button>
+</form>
+
 <h2>Change password</h2>
 {% if password_changed == "1" %}<p>Password changed successfully.</p>{% endif %}
 {% if password_error == "current" %}<p>Current password is incorrect.</p>

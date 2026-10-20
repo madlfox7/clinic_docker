@@ -241,50 +241,19 @@ BEGIN
 END;
 $function$;
 
-CREATE OR REPLACE FUNCTION public.admin_reset_user_password(
-  target_user_id integer,
-  replacement_hash text
-)
-RETURNS text
-LANGUAGE plpgsql
-SECURITY DEFINER
-SET search_path = pg_catalog, public, pg_temp
-AS $function$
-DECLARE
-  actor_id integer := NULLIF(current_setting('app.user_id', true), '')::integer;
-  target_role text;
-BEGIN
-  IF current_setting('role', true) IS DISTINCT FROM 'app_admin'
-     OR replacement_hash IS NULL
-     OR replacement_hash !~ '^\$2[aby]\$[0-9]{2}\$[./A-Za-z0-9]{53}$'
-     OR NOT EXISTS (
-       SELECT 1
-       FROM public.users
-       WHERE id = actor_id AND role = 'admin' AND NOT blocked
-     ) THEN
-    RAISE EXCEPTION 'invalid admin password-reset context'
-      USING ERRCODE = '42501';
-  END IF;
+DROP FUNCTION IF EXISTS public.admin_reset_user_password(integer, text);
 
-  UPDATE public.users
-  SET password_hash = replacement_hash,
-      auth_version = auth_version + 1
-  WHERE id = target_user_id
-    AND id <> actor_id
-    AND role IN ('registrar', 'admin')
-  RETURNING role INTO target_role;
-
-  RETURN target_role;
-END;
-$function$;
-
-CREATE OR REPLACE FUNCTION public.request_patient_password_reset(
+DROP FUNCTION IF EXISTS public.request_patient_password_reset(text, text);
+DROP FUNCTION IF EXISTS public.request_password_reset(text, text, boolean);
+CREATE OR REPLACE FUNCTION public.request_password_reset(
   candidate_email text,
-  candidate_source text
+  candidate_source text,
+  allow_last_admin boolean DEFAULT false
 )
 RETURNS TABLE (
   reset_token text,
-  rate_limited boolean
+  rate_limited boolean,
+  outcome text
 )
 LANGUAGE plpgsql
 SECURITY DEFINER
@@ -299,6 +268,7 @@ DECLARE
   attempt_found boolean;
   source_count integer;
   target_id integer;
+  target_role text;
   raw_token text;
 BEGIN
   PERFORM pg_advisory_xact_lock(
@@ -321,7 +291,7 @@ BEGIN
   IF attempt_found
      AND attempt_window > CURRENT_TIMESTAMP - INTERVAL '15 minutes'
      AND attempt_count >= 5 THEN
-    RETURN QUERY SELECT NULL::text, TRUE;
+    RETURN QUERY SELECT NULL::text, TRUE, 'rate_limited'::text;
     RETURN;
   END IF;
 
@@ -332,7 +302,7 @@ BEGIN
     AND window_started_at > CURRENT_TIMESTAMP - INTERVAL '15 minutes';
 
   IF source_count >= 100 THEN
-    RETURN QUERY SELECT NULL::text, TRUE;
+    RETURN QUERY SELECT NULL::text, TRUE, 'rate_limited'::text;
     RETURN;
   END IF;
 
@@ -360,19 +330,33 @@ BEGIN
   IF candidate_email IS NULL
      OR length(normalized_email) NOT BETWEEN 3 AND 254
      OR position('@' IN normalized_email) = 0 THEN
-    RETURN QUERY SELECT NULL::text, FALSE;
+    RETURN QUERY SELECT NULL::text, FALSE, 'unknown'::text;
     RETURN;
   END IF;
 
-  SELECT u.id
-  INTO target_id
+  SELECT u.id, u.role
+  INTO target_id, target_role
   FROM public.users AS u
   WHERE lower(u.email) = normalized_email
-    AND u.role = 'patient'
     AND NOT u.blocked;
 
   IF target_id IS NULL THEN
-    RETURN QUERY SELECT NULL::text, FALSE;
+    RETURN QUERY SELECT NULL::text, FALSE, 'unknown'::text;
+    RETURN;
+  END IF;
+
+  IF target_role = 'admin'
+     AND (
+       SELECT count(*)
+       FROM public.users
+       WHERE role = 'admin'
+     ) <= 1 THEN
+    IF NOT allow_last_admin THEN
+      RETURN QUERY SELECT NULL::text, FALSE, 'last_admin'::text;
+      RETURN;
+    END IF;
+  ELSIF allow_last_admin THEN
+    RETURN QUERY SELECT NULL::text, FALSE, 'not_last_admin'::text;
     RETURN;
   END IF;
 
@@ -389,12 +373,13 @@ BEGIN
     CURRENT_TIMESTAMP + INTERVAL '15 minutes'
   );
 
-  RETURN QUERY SELECT raw_token, FALSE;
+  RETURN QUERY SELECT raw_token, FALSE, 'issued'::text;
 END;
 $function$;
 
 DROP FUNCTION IF EXISTS public.consume_patient_password_reset(text, text);
-CREATE OR REPLACE FUNCTION public.consume_patient_password_reset(
+DROP FUNCTION IF EXISTS public.consume_patient_password_reset(text, text, text);
+CREATE OR REPLACE FUNCTION public.consume_password_reset(
   raw_token text,
   candidate_password text,
   replacement_hash text
@@ -410,6 +395,7 @@ AS $function$
 DECLARE
   token_id bigint;
   target_id integer;
+  target_role text;
   changed_auth_version bigint;
 BEGIN
   IF raw_token IS NULL
@@ -420,14 +406,13 @@ BEGIN
     RETURN;
   END IF;
 
-  SELECT t.id, u.id
-  INTO token_id, target_id
+  SELECT t.id, u.id, u.role
+  INTO token_id, target_id, target_role
   FROM public.password_reset_tokens AS t
   JOIN public.users AS u ON u.id = t.user_id
   WHERE t.token_hash = public.digest(raw_token, 'sha256')
     AND t.used_at IS NULL
     AND t.expires_at > CURRENT_TIMESTAMP
-    AND u.role = 'patient'
     AND NOT u.blocked
   FOR UPDATE OF t, u;
 
@@ -466,7 +451,7 @@ BEGIN
     actor_user_id, actor_role, action, target_type, target_id
   )
   VALUES (
-    target_id, 'patient', 'user.password_recovery', 'user', target_id
+    target_id, target_role, 'user.password_recovery', 'user', target_id
   );
 
   RETURN QUERY SELECT 'changed'::text, changed_auth_version;
@@ -637,6 +622,55 @@ BEGIN
 END;
 $function$;
 
+CREATE OR REPLACE FUNCTION public.bootstrap_seed_user(
+  seed_email text,
+  replacement_hash text,
+  seed_role text
+)
+RETURNS integer
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = pg_catalog, public, pg_temp
+AS $function$
+DECLARE
+  existing_id integer;
+  created_id integer;
+  expected_role text;
+BEGIN
+  expected_role := CASE lower(seed_email)
+    WHEN 'doc@clinic.local' THEN 'doctor'
+    WHEN 'doc2@clinic.local' THEN 'doctor'
+    WHEN 'pat@clinic.local' THEN 'patient'
+    WHEN 'pat2@clinic.local' THEN 'patient'
+    WHEN 'reg@clinic.local' THEN 'registrar'
+    ELSE NULL
+  END;
+
+  IF session_user IS DISTINCT FROM 'clinic_api'
+     OR expected_role IS NULL
+     OR seed_role IS DISTINCT FROM expected_role
+     OR replacement_hash IS NULL
+     OR replacement_hash !~ '^\$2[aby]\$[0-9]{2}\$[./A-Za-z0-9]{53}$' THEN
+    RAISE EXCEPTION 'invalid seed-user context'
+      USING ERRCODE = '42501';
+  END IF;
+
+  SELECT id INTO existing_id
+  FROM public.users
+  WHERE lower(email) = lower(seed_email);
+
+  IF existing_id IS NOT NULL THEN
+    RETURN existing_id;
+  END IF;
+
+  INSERT INTO public.users (email, password_hash, role, blocked)
+  VALUES (lower(seed_email), replacement_hash, seed_role, FALSE)
+  RETURNING id INTO created_id;
+
+  RETURN created_id;
+END;
+$function$;
+
 CREATE OR REPLACE FUNCTION public.calendar_patient_email(
   target_patient_id integer,
   target_doctor_id integer
@@ -770,9 +804,88 @@ REVOKE ALL ON FUNCTION public.scheduled_slot_is_taken(integer) FROM PUBLIC;
 REVOKE ALL ON FUNCTION public.doctor_is_active(integer) FROM PUBLIC;
 REVOKE ALL ON FUNCTION public.is_valid_free_slot(integer, integer, timestamp, timestamp, timestamp) FROM PUBLIC;
 REVOKE ALL ON FUNCTION public.record_audit_event(text, text, integer) FROM PUBLIC;
-REVOKE ALL ON FUNCTION public.admin_reset_user_password(integer, text) FROM PUBLIC;
+DROP FUNCTION IF EXISTS public.admin_request_password_reset(integer);
+CREATE OR REPLACE FUNCTION public.admin_request_password_reset(
+  target_user_id integer
+)
+RETURNS TABLE (
+  status text,
+  recipient text,
+  reset_token text,
+  target_role text
+)
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = pg_catalog, public, pg_temp
+AS $function$
+DECLARE
+  actor_id integer := NULLIF(current_setting('app.user_id', true), '')::integer;
+  found_email text;
+  found_role text;
+  issued_token text;
+  limited boolean;
+  request_outcome text;
+BEGIN
+  IF current_setting('role', true) IS DISTINCT FROM 'app_admin'
+     OR NOT EXISTS (
+       SELECT 1
+       FROM public.users
+       WHERE id = actor_id AND role = 'admin' AND NOT blocked
+     ) THEN
+    RAISE EXCEPTION 'invalid admin password-link context'
+      USING ERRCODE = '42501';
+  END IF;
+
+  IF target_user_id = actor_id THEN
+    RETURN QUERY SELECT 'self'::text, NULL::text, NULL::text, NULL::text;
+    RETURN;
+  END IF;
+
+  SELECT email, role
+  INTO found_email, found_role
+  FROM public.users
+  WHERE id = target_user_id
+    AND NOT blocked;
+
+  IF NOT FOUND THEN
+    RETURN QUERY SELECT 'not_allowed'::text, NULL::text, NULL::text, NULL::text;
+    RETURN;
+  END IF;
+
+  IF found_role = 'admin'
+     AND (
+       SELECT count(*)
+       FROM public.users
+       WHERE role = 'admin'
+     ) <= 1 THEN
+    RETURN QUERY SELECT 'last_admin'::text, NULL::text, NULL::text, NULL::text;
+    RETURN;
+  END IF;
+
+  SELECT requested.reset_token, requested.rate_limited, requested.outcome
+  INTO issued_token, limited, request_outcome
+  FROM public.request_password_reset(
+    found_email,
+    'admin-link:' || actor_id::text,
+    FALSE
+  ) AS requested;
+
+  IF limited THEN
+    RETURN QUERY SELECT 'rate_limited'::text, NULL::text, NULL::text, NULL::text;
+    RETURN;
+  END IF;
+  IF issued_token IS NULL OR request_outcome IS DISTINCT FROM 'issued' THEN
+    RETURN QUERY SELECT 'not_allowed'::text, NULL::text, NULL::text, NULL::text;
+    RETURN;
+  END IF;
+
+  RETURN QUERY SELECT 'issued'::text, found_email, issued_token, found_role;
+END;
+$function$;
+
 REVOKE ALL ON FUNCTION public.authenticate_user(text, text, text) FROM PUBLIC;
 REVOKE ALL ON FUNCTION public.bootstrap_seed_admin(text, text) FROM PUBLIC;
+REVOKE ALL ON FUNCTION public.bootstrap_seed_user(text, text, text) FROM PUBLIC;
 REVOKE ALL ON FUNCTION public.calendar_patient_email(integer, integer) FROM PUBLIC;
 REVOKE ALL ON FUNCTION public.change_own_patient_password(text, text, text) FROM PUBLIC;
 GRANT EXECUTE ON FUNCTION public.current_patient_is_active() TO app_patient;
@@ -785,8 +898,8 @@ GRANT EXECUTE ON FUNCTION public.is_valid_free_slot(
 ) TO app_patient, app_registrar;
 GRANT EXECUTE ON FUNCTION public.record_audit_event(text, text, integer)
   TO app_patient, app_doctor, app_registrar, app_admin;
-GRANT EXECUTE ON FUNCTION public.admin_reset_user_password(integer, text)
-  TO app_admin;
+REVOKE ALL ON FUNCTION public.admin_request_password_reset(integer) FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION public.admin_request_password_reset(integer) TO app_admin;
 CREATE OR REPLACE FUNCTION public.revoke_patient_password_reset(raw_token text)
 RETURNS void
 LANGUAGE plpgsql
@@ -805,11 +918,414 @@ BEGIN
 END;
 $function$;
 
-REVOKE ALL ON FUNCTION public.request_patient_password_reset(text, text) FROM PUBLIC;
-REVOKE ALL ON FUNCTION public.consume_patient_password_reset(text, text, text) FROM PUBLIC;
+CREATE TABLE IF NOT EXISTS public.email_change_requests (
+  id BIGSERIAL PRIMARY KEY,
+  user_id INTEGER NOT NULL REFERENCES public.users(id) ON DELETE CASCADE,
+  new_email TEXT NOT NULL,
+  old_token_hash BYTEA NOT NULL UNIQUE,
+  new_token_hash BYTEA NOT NULL UNIQUE,
+  old_confirmed_at TIMESTAMPTZ,
+  new_confirmed_at TIMESTAMPTZ,
+  expires_at TIMESTAMPTZ NOT NULL,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE OR REPLACE FUNCTION public.reject_unconfirmed_email_change()
+RETURNS trigger
+LANGUAGE plpgsql
+SET search_path = pg_catalog, public, pg_temp
+AS $function$
+BEGIN
+  IF NEW.email IS DISTINCT FROM OLD.email
+     AND current_setting('app.email_change', true) IS DISTINCT FROM 'allowed' THEN
+    RAISE EXCEPTION 'email can only be changed by the account owner'
+      USING ERRCODE = '42501';
+  END IF;
+  RETURN NEW;
+END;
+$function$;
+
+DROP TRIGGER IF EXISTS users_reject_email_change ON public.users;
+CREATE TRIGGER users_reject_email_change
+  BEFORE UPDATE OF email ON public.users
+  FOR EACH ROW
+  EXECUTE FUNCTION public.reject_unconfirmed_email_change();
+
+CREATE OR REPLACE FUNCTION public.admin_invite_staff(
+  candidate_email text,
+  candidate_role text
+)
+RETURNS TABLE (
+  status text,
+  invited_user_id integer,
+  recipient text,
+  reset_token text
+)
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = pg_catalog, public, pg_temp
+AS $function$
+DECLARE
+  actor_id integer := NULLIF(current_setting('app.user_id', true), '')::integer;
+  normalized_email text := lower(btrim(coalesce(candidate_email, '')));
+  new_id integer;
+  issued_token text;
+  limited boolean;
+  request_outcome text;
+BEGIN
+  IF current_setting('role', true) IS DISTINCT FROM 'app_admin'
+     OR NOT EXISTS (
+       SELECT 1 FROM public.users
+       WHERE id = actor_id AND role = 'admin' AND NOT blocked
+     ) THEN
+    RAISE EXCEPTION 'invalid admin invite context' USING ERRCODE = '42501';
+  END IF;
+  IF candidate_role NOT IN ('registrar', 'admin')
+     OR length(normalized_email) NOT BETWEEN 3 AND 254
+     OR position('@' IN normalized_email) = 0 THEN
+    RETURN QUERY SELECT 'invalid'::text, NULL::integer, NULL::text, NULL::text;
+    RETURN;
+  END IF;
+
+  INSERT INTO public.users (email, password_hash, role, blocked)
+  VALUES (
+    normalized_email,
+    public.crypt(
+      encode(public.gen_random_bytes(32), 'hex'),
+      public.gen_salt('bf', 12)
+    ),
+    candidate_role,
+    FALSE
+  )
+  RETURNING id INTO new_id;
+
+  SELECT requested.reset_token, requested.rate_limited, requested.outcome
+  INTO issued_token, limited, request_outcome
+  FROM public.request_password_reset(
+    normalized_email,
+    'admin-invite:' || actor_id::text,
+    FALSE
+  ) AS requested;
+
+  IF limited OR issued_token IS NULL OR request_outcome IS DISTINCT FROM 'issued' THEN
+    DELETE FROM public.users WHERE id = new_id;
+    RETURN QUERY SELECT
+      CASE WHEN limited THEN 'rate_limited' ELSE 'not_allowed' END,
+      NULL::integer, NULL::text, NULL::text;
+    RETURN;
+  END IF;
+
+  INSERT INTO public.audit_events (
+    actor_user_id, actor_role, action, target_type, target_id
+  )
+  VALUES (actor_id, 'admin', 'user.invite', candidate_role, new_id);
+
+  RETURN QUERY SELECT 'issued'::text, new_id, normalized_email, issued_token;
+END;
+$function$;
+
+CREATE OR REPLACE FUNCTION public.admin_invite_doctor(
+  candidate_email text,
+  candidate_name text,
+  candidate_specialty text,
+  candidate_experience integer
+)
+RETURNS TABLE (
+  status text,
+  invited_user_id integer,
+  invited_doctor_id integer,
+  recipient text,
+  reset_token text
+)
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = pg_catalog, public, pg_temp
+AS $function$
+DECLARE
+  actor_id integer := NULLIF(current_setting('app.user_id', true), '')::integer;
+  normalized_email text := lower(btrim(coalesce(candidate_email, '')));
+  clean_name text := btrim(coalesce(candidate_name, ''));
+  clean_specialty text := btrim(coalesce(candidate_specialty, ''));
+  new_id integer;
+  new_doctor_id integer;
+  issued_token text;
+  limited boolean;
+  request_outcome text;
+BEGIN
+  IF current_setting('role', true) IS DISTINCT FROM 'app_admin'
+     OR NOT EXISTS (
+       SELECT 1 FROM public.users
+       WHERE id = actor_id AND role = 'admin' AND NOT blocked
+     ) THEN
+    RAISE EXCEPTION 'invalid admin invite context' USING ERRCODE = '42501';
+  END IF;
+  IF length(normalized_email) NOT BETWEEN 3 AND 254
+     OR position('@' IN normalized_email) = 0
+     OR length(clean_name) NOT BETWEEN 1 AND 120
+     OR length(clean_specialty) NOT BETWEEN 1 AND 120
+     OR candidate_experience IS NULL
+     OR candidate_experience NOT BETWEEN 0 AND 80 THEN
+    RETURN QUERY SELECT 'invalid'::text, NULL::integer, NULL::integer, NULL::text, NULL::text;
+    RETURN;
+  END IF;
+
+  INSERT INTO public.users (email, password_hash, role, blocked)
+  VALUES (
+    normalized_email,
+    public.crypt(
+      encode(public.gen_random_bytes(32), 'hex'),
+      public.gen_salt('bf', 12)
+    ),
+    'doctor',
+    FALSE
+  )
+  RETURNING id INTO new_id;
+
+  INSERT INTO public.doctors (user_id, full_name, specialty, experience_years)
+  VALUES (new_id, clean_name, clean_specialty, candidate_experience)
+  RETURNING id INTO new_doctor_id;
+
+  INSERT INTO public.doctor_services (doctor_id, service_id)
+  SELECT new_doctor_id, id FROM public.services WHERE active
+  ON CONFLICT DO NOTHING;
+
+  SELECT requested.reset_token, requested.rate_limited, requested.outcome
+  INTO issued_token, limited, request_outcome
+  FROM public.request_password_reset(
+    normalized_email,
+    'admin-invite:' || actor_id::text,
+    FALSE
+  ) AS requested;
+
+  IF limited OR issued_token IS NULL OR request_outcome IS DISTINCT FROM 'issued' THEN
+    DELETE FROM public.doctor_services WHERE doctor_id = new_doctor_id;
+    DELETE FROM public.doctors WHERE id = new_doctor_id;
+    DELETE FROM public.users WHERE id = new_id;
+    RETURN QUERY SELECT
+      CASE WHEN limited THEN 'rate_limited' ELSE 'not_allowed' END,
+      NULL::integer, NULL::integer, NULL::text, NULL::text;
+    RETURN;
+  END IF;
+
+  INSERT INTO public.audit_events (
+    actor_user_id, actor_role, action, target_type, target_id
+  )
+  VALUES (actor_id, 'admin', 'doctor.invite', 'doctor', new_doctor_id);
+
+  RETURN QUERY SELECT 'issued'::text, new_id, new_doctor_id, normalized_email, issued_token;
+END;
+$function$;
+
+CREATE OR REPLACE FUNCTION public.discard_undelivered_invite(raw_token text)
+RETURNS boolean
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = pg_catalog, public, pg_temp
+AS $function$
+DECLARE
+  invited_id integer;
+  invited_doctor_id integer;
+BEGIN
+  IF raw_token IS NULL OR raw_token !~ '^[0-9a-f]{64}$' THEN
+    RETURN FALSE;
+  END IF;
+
+  SELECT user_id
+  INTO invited_id
+  FROM public.password_reset_tokens
+  WHERE token_hash = public.digest(raw_token, 'sha256')
+    AND used_at IS NULL
+    AND created_at > CURRENT_TIMESTAMP - INTERVAL '15 minutes';
+  IF NOT FOUND THEN
+    RETURN FALSE;
+  END IF;
+  IF EXISTS (
+    SELECT 1 FROM public.appointments
+    WHERE patient_user_id = invited_id
+       OR doctor_id IN (SELECT id FROM public.doctors WHERE user_id = invited_id)
+  ) THEN
+    RETURN FALSE;
+  END IF;
+
+  SELECT id INTO invited_doctor_id FROM public.doctors WHERE user_id = invited_id;
+  DELETE FROM public.doctor_services WHERE doctor_id = invited_doctor_id;
+  DELETE FROM public.doctors WHERE id = invited_doctor_id;
+  DELETE FROM public.audit_events
+  WHERE actor_user_id = invited_id
+     OR (
+       audit_events.target_id = invited_id
+       AND target_type IN ('user', 'registrar', 'admin', 'doctor', 'patient')
+     )
+     OR (target_type = 'doctor' AND audit_events.target_id = invited_doctor_id);
+  DELETE FROM public.users WHERE id = invited_id;
+  RETURN TRUE;
+END;
+$function$;
+
+CREATE OR REPLACE FUNCTION public.request_email_change(candidate_email text)
+RETURNS TABLE (
+  status text,
+  old_email text,
+  new_email text,
+  old_token text,
+  new_token text
+)
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = pg_catalog, public, pg_temp
+AS $function$
+DECLARE
+  actor_id integer := NULLIF(current_setting('app.user_id', true), '')::integer;
+  actor_email text;
+  normalized_email text := lower(btrim(coalesce(candidate_email, '')));
+  recent_count integer;
+  old_raw text;
+  new_raw text;
+BEGIN
+  IF current_setting('role', true) NOT IN (
+       'app_patient', 'app_doctor', 'app_registrar', 'app_admin'
+     )
+     OR NOT EXISTS (
+       SELECT 1 FROM public.users
+       WHERE id = actor_id AND NOT blocked
+     ) THEN
+    RAISE EXCEPTION 'invalid email-change context' USING ERRCODE = '42501';
+  END IF;
+
+  SELECT email INTO actor_email FROM public.users WHERE id = actor_id;
+  SELECT count(*)
+  INTO recent_count
+  FROM public.email_change_requests
+  WHERE user_id = actor_id
+    AND created_at > CURRENT_TIMESTAMP - INTERVAL '15 minutes';
+  IF recent_count >= 5 THEN
+    RETURN QUERY SELECT 'rate_limited'::text, NULL::text, NULL::text, NULL::text, NULL::text;
+    RETURN;
+  END IF;
+  IF length(normalized_email) NOT BETWEEN 3 AND 254
+     OR position('@' IN normalized_email) = 0 THEN
+    RETURN QUERY SELECT 'invalid'::text, NULL::text, NULL::text, NULL::text, NULL::text;
+    RETURN;
+  END IF;
+  IF normalized_email = lower(actor_email) THEN
+    RETURN QUERY SELECT 'same'::text, NULL::text, NULL::text, NULL::text, NULL::text;
+    RETURN;
+  END IF;
+  IF EXISTS (
+    SELECT 1 FROM public.users WHERE lower(email) = normalized_email
+  ) THEN
+    RETURN QUERY SELECT 'taken'::text, NULL::text, NULL::text, NULL::text, NULL::text;
+    RETURN;
+  END IF;
+
+  DELETE FROM public.email_change_requests
+  WHERE user_id = actor_id AND old_confirmed_at IS NULL AND new_confirmed_at IS NULL;
+  old_raw := encode(public.gen_random_bytes(32), 'hex');
+  new_raw := encode(public.gen_random_bytes(32), 'hex');
+  INSERT INTO public.email_change_requests (
+    user_id, new_email, old_token_hash, new_token_hash, expires_at
+  )
+  VALUES (
+    actor_id,
+    normalized_email,
+    public.digest(old_raw, 'sha256'),
+    public.digest(new_raw, 'sha256'),
+    CURRENT_TIMESTAMP + INTERVAL '15 minutes'
+  );
+  RETURN QUERY SELECT 'issued'::text, actor_email, normalized_email, old_raw, new_raw;
+END;
+$function$;
+
+CREATE OR REPLACE FUNCTION public.confirm_email_change(raw_token text)
+RETURNS text
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = pg_catalog, public, pg_temp
+AS $function$
+DECLARE
+  request_id bigint;
+  target_id integer;
+  replacement text;
+  matches_old boolean;
+  old_done timestamptz;
+  new_done timestamptz;
+  actor_role text;
+BEGIN
+  IF raw_token IS NULL OR raw_token !~ '^[0-9a-f]{64}$' THEN
+    RETURN 'invalid';
+  END IF;
+
+  SELECT id, user_id, new_email,
+         old_token_hash = public.digest(raw_token, 'sha256'),
+         old_confirmed_at, new_confirmed_at
+  INTO request_id, target_id, replacement, matches_old, old_done, new_done
+  FROM public.email_change_requests
+  WHERE expires_at > CURRENT_TIMESTAMP
+    AND (
+      (old_token_hash = public.digest(raw_token, 'sha256') AND old_confirmed_at IS NULL)
+      OR (new_token_hash = public.digest(raw_token, 'sha256') AND new_confirmed_at IS NULL)
+    )
+  FOR UPDATE;
+  IF NOT FOUND THEN
+    RETURN 'invalid';
+  END IF;
+
+  IF matches_old THEN
+    UPDATE public.email_change_requests
+    SET old_confirmed_at = CURRENT_TIMESTAMP
+    WHERE id = request_id
+    RETURNING old_confirmed_at, new_confirmed_at INTO old_done, new_done;
+  ELSE
+    UPDATE public.email_change_requests
+    SET new_confirmed_at = CURRENT_TIMESTAMP
+    WHERE id = request_id
+    RETURNING old_confirmed_at, new_confirmed_at INTO old_done, new_done;
+  END IF;
+
+  IF old_done IS NULL OR new_done IS NULL THEN
+    RETURN CASE WHEN matches_old THEN 'confirmed_old' ELSE 'confirmed_new' END;
+  END IF;
+  IF EXISTS (
+    SELECT 1 FROM public.users
+    WHERE lower(email) = lower(replacement) AND id <> target_id
+  ) THEN
+    DELETE FROM public.email_change_requests WHERE id = request_id;
+    RETURN 'taken';
+  END IF;
+
+  PERFORM set_config('app.email_change', 'allowed', true);
+  UPDATE public.users
+  SET email = replacement,
+      auth_version = auth_version + 1
+  WHERE id = target_id;
+  SELECT role INTO actor_role FROM public.users WHERE id = target_id;
+  INSERT INTO public.audit_events (
+    actor_user_id, actor_role, action, target_type, target_id
+  )
+  VALUES (target_id, actor_role, 'user.email_change', 'user', target_id);
+  DELETE FROM public.email_change_requests WHERE user_id = target_id;
+  RETURN 'changed';
+END;
+$function$;
+
+CREATE OR REPLACE FUNCTION public.revoke_email_change(raw_old_token text, raw_new_token text)
+RETURNS void
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = pg_catalog, public, pg_temp
+AS $function$
+BEGIN
+  DELETE FROM public.email_change_requests
+  WHERE old_token_hash = public.digest(coalesce(raw_old_token, ''), 'sha256')
+     OR new_token_hash = public.digest(coalesce(raw_new_token, ''), 'sha256');
+END;
+$function$;
+
+REVOKE ALL ON FUNCTION public.request_password_reset(text, text, boolean) FROM PUBLIC;
+REVOKE ALL ON FUNCTION public.consume_password_reset(text, text, text) FROM PUBLIC;
 REVOKE ALL ON FUNCTION public.revoke_patient_password_reset(text) FROM PUBLIC;
-GRANT EXECUTE ON FUNCTION public.request_patient_password_reset(text, text) TO clinic_api;
-GRANT EXECUTE ON FUNCTION public.consume_patient_password_reset(text, text, text) TO clinic_api;
+GRANT EXECUTE ON FUNCTION public.request_password_reset(text, text, boolean) TO clinic_api;
+GRANT EXECUTE ON FUNCTION public.consume_password_reset(text, text, text) TO clinic_api;
 GRANT EXECUTE ON FUNCTION public.revoke_patient_password_reset(text) TO clinic_api;
 REVOKE ALL ON TABLE public.password_reset_tokens, public.password_reset_attempts
   FROM PUBLIC, clinic_api, app_guest, app_patient, app_doctor, app_registrar, app_admin;
@@ -817,6 +1333,7 @@ REVOKE ALL ON SEQUENCE public.password_reset_tokens_id_seq
   FROM PUBLIC, clinic_api, app_guest, app_patient, app_doctor, app_registrar, app_admin;
 GRANT EXECUTE ON FUNCTION public.authenticate_user(text, text, text) TO clinic_api;
 GRANT EXECUTE ON FUNCTION public.bootstrap_seed_admin(text, text) TO clinic_api;
+GRANT EXECUTE ON FUNCTION public.bootstrap_seed_user(text, text, text) TO clinic_api;
 GRANT EXECUTE ON FUNCTION public.calendar_patient_email(integer, integer)
   TO app_doctor, app_registrar;
 GRANT EXECUTE ON FUNCTION public.change_own_patient_password(text, text, text)
@@ -865,8 +1382,27 @@ GRANT USAGE, SELECT ON SEQUENCE public.time_off_requests_id_seq TO app_doctor;
 
 GRANT SELECT (id, email, role, blocked) ON public.users TO app_registrar;
 GRANT SELECT (id, email, role, blocked) ON public.users TO app_admin;
-GRANT INSERT (email, password_hash, role, blocked) ON public.users TO app_admin;
+REVOKE INSERT ON public.users FROM app_admin;
+REVOKE UPDATE (email, password_hash, role) ON public.users
+  FROM PUBLIC, clinic_api, app_guest, app_patient, app_doctor, app_registrar, app_admin;
 GRANT UPDATE (blocked) ON public.users TO app_admin;
+REVOKE ALL ON TABLE public.visit_notes, public.prescriptions
+  FROM app_admin, app_registrar;
+REVOKE ALL ON FUNCTION public.admin_invite_staff(text, text) FROM PUBLIC;
+REVOKE ALL ON FUNCTION public.admin_invite_doctor(text, text, text, integer) FROM PUBLIC;
+REVOKE ALL ON FUNCTION public.discard_undelivered_invite(text) FROM PUBLIC;
+REVOKE ALL ON FUNCTION public.request_email_change(text) FROM PUBLIC;
+REVOKE ALL ON FUNCTION public.confirm_email_change(text) FROM PUBLIC;
+REVOKE ALL ON FUNCTION public.revoke_email_change(text, text) FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION public.admin_invite_staff(text, text) TO app_admin;
+GRANT EXECUTE ON FUNCTION public.admin_invite_doctor(text, text, text, integer) TO app_admin;
+GRANT EXECUTE ON FUNCTION public.discard_undelivered_invite(text) TO clinic_api;
+GRANT EXECUTE ON FUNCTION public.request_email_change(text)
+  TO app_patient, app_doctor, app_registrar, app_admin;
+GRANT EXECUTE ON FUNCTION public.confirm_email_change(text) TO clinic_api;
+GRANT EXECUTE ON FUNCTION public.revoke_email_change(text, text) TO clinic_api;
+REVOKE ALL ON TABLE public.email_change_requests
+  FROM PUBLIC, clinic_api, app_guest, app_patient, app_doctor, app_registrar, app_admin;
 GRANT USAGE, SELECT ON SEQUENCE public.users_id_seq TO app_admin;
 GRANT SELECT ON public.audit_events TO app_admin;
 GRANT SELECT ON public.time_off_requests TO app_admin;

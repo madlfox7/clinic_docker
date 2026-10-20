@@ -28,7 +28,8 @@ def _login(smtp) -> None:
         smtp.ehlo()
     username = os.environ.get("SMTP_USERNAME", "").strip()
     if username:
-        smtp.login(username, os.environ.get("SMTP_PASSWORD", ""))
+        password = _secret_file("smtp_password") or os.environ.get("SMTP_PASSWORD", "")
+        smtp.login(username, password)
 
 
 def smtp_ready() -> bool:
@@ -47,25 +48,44 @@ def smtp_ready() -> bool:
     return True
 
 
-def send_password_reset(recipient: str, token: str) -> None:
-    if any(char in recipient for char in "\r\n") or any(char in token for char in "\r\n"):
-        raise ValueError("invalid reset message")
-    base_url = os.environ.get("PUBLIC_BASE_URL", "http://localhost:8080").strip().rstrip("/")
-    if not base_url or any(char in base_url for char in "\r\n"):
-        raise ValueError("invalid public base URL")
+def _secret_file(name: str) -> str:
+    path = f"/run/secrets/{name}"
+    try:
+        with open(path, encoding="utf-8") as handle:
+            return handle.read().strip()
+    except OSError:
+        return ""
+
+
+def send_account_message(recipient: str, subject: str, body: str) -> None:
+    if any(char in recipient for char in "\r\n") or any(char in subject for char in "\r\n"):
+        raise ValueError("invalid mail header")
+    if "\r" in body:
+        raise ValueError("invalid mail body")
     message = EmailMessage()
-    message["Subject"] = "Reset your clinic password"
+    message["Subject"] = subject
     message["From"] = os.environ.get("SMTP_FROM", "noreply@clinic.local").strip()
     message["To"] = recipient
-    message.set_content(
-        "A password reset was requested for this patient account.\n"
-        "The link expires in 15 minutes and works once.\n\n"
-        f"{base_url}/reset-password?token={token}\n\n"
-        "If you did not request this, you can ignore this message.\n"
-    )
+    message.set_content(body)
     smtp = _connection()
     try:
         _login(smtp)
         smtp.send_message(message)
     finally:
         smtp.quit()
+
+
+def send_password_reset(recipient: str, token: str) -> None:
+    if any(char in token for char in "\r\n"):
+        raise ValueError("invalid reset message")
+    base_url = os.environ.get("PUBLIC_BASE_URL", "http://localhost:8080").strip().rstrip("/")
+    if not base_url or any(char in base_url for char in "\r\n"):
+        raise ValueError("invalid public base URL")
+    send_account_message(
+        recipient,
+        "Reset your clinic password",
+        "A password reset was requested for this account.\n"
+        "The link expires in 15 minutes and works once.\n\n"
+        f"{base_url}/reset-password?token={token}\n\n"
+        "If you did not request this, you can ignore this message.\n",
+    )

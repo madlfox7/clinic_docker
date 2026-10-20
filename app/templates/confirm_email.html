@@ -1,0 +1,20 @@
+{% extends "base.html" %}
+{% block content %}
+<h1>Confirm email change</h1>
+{% if error == "invalid" %}
+  <p>This confirmation link is invalid or has expired.</p>
+{% elif error == "confirmed_old" %}
+  <p>The current address is confirmed. The new address still needs to confirm its own link.</p>
+{% elif error == "confirmed_new" %}
+  <p>The new address is confirmed. The current address still needs to confirm its own link.</p>
+{% elif error == "taken" %}
+  <p>That email is no longer available.</p>
+{% else %}
+  <p>Confirm this step of the email change. Both addresses must confirm before the account changes.</p>
+  <form method="post" action="/confirm-email">
+    <input type="hidden" name="token" value="{{ token }}">
+    <button type="submit">Confirm</button>
+  </form>
+{% endif %}
+<p><a href="/login">Back to login</a></p>
+{% endblock %}

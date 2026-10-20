@@ -1,7 +1,12 @@
 {% extends "base.html" %}
 {% block content %}
 <h1>Manage doctors</h1>
-{% if created == "1" %}<p>Doctor account created.</p>{% endif %}
+{% if created == "1" %}<p>Doctor account created. A setup link was sent to their email.</p>{% endif %}
+{% if password_link == "1" %}<p>Reset link sent.</p>{% endif %}
+{% if error == "password_link_failed" %}<p>The reset email could not be sent. Try again later.</p>
+{% elif error == "password_link_not_allowed" %}<p>A reset link can be sent only to another active account.</p>
+{% elif error == "password_link_rate_limited" %}<p>Too many password reset attempts. Try again later.</p>
+{% elif error == "last_admin" %}<p>The last remaining administrator can only be reset from the server.</p>{% endif %}
 {% if updated == "1" %}<p>Doctor details updated.</p>{% endif %}
 {% if activation == "deactivated" %}
   <p>Doctor deactivated. Existing appointments were not cancelled.</p>
@@ -27,6 +32,12 @@
       </label>
       <button type="submit">Save details</button>
     </form>
+    {% if not doctor.blocked %}
+      <form method="post" action="/admin/users/{{ doctor.user_id }}/reset-link">
+        <input type="hidden" name="next_page" value="doctors">
+        <button type="submit">Send reset link</button>
+      </form>
+    {% endif %}
     {% if doctor.blocked %}
       <form method="post" action="/admin/doctors/{{ doctor.id }}/activate">
         <button type="submit">Reactivate doctor</button>

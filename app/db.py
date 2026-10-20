@@ -196,28 +196,15 @@ def seed_users():
                         "SELECT public.bootstrap_seed_admin(%s, %s)",
                         (admin_email, pwd.hash(raw_password)),
                     )
-                    admin_id = cur.fetchone()[0]
-                else:
-                    admin_id = row[0]
 
             for email, raw_password, role in SEED_USERS:
                 if role == "admin":
                     continue
-                _set_db_context(conn, ROLE_BY_APP["admin"], admin_id)
                 with conn.cursor() as cur:
-                    cur.execute("SELECT 1 FROM users WHERE email=%s", (email,))
-                    user_exists = cur.fetchone() is not None
-                if not user_exists:
-                    if role == "patient":
-                        _set_db_context(conn, ROLE_BY_APP["guest"], 0)
-                    with conn.cursor() as cur:
-                        cur.execute(
-                            """
-                            INSERT INTO users (email, password_hash, role)
-                            VALUES (%s, %s, %s)
-                            """,
-                            (email, pwd.hash(raw_password), role),
-                        )
+                    cur.execute(
+                        "SELECT public.bootstrap_seed_user(%s, %s, %s)",
+                        (email, pwd.hash(raw_password), role),
+                    )
     finally:
         conn.close()
 

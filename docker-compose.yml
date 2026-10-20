@@ -52,7 +52,7 @@ services:
     environment:
       TZ: Asia/Yerevan
       PGTZ: Asia/Yerevan
-      SESSION_SECRET: ${SESSION_SECRET:-dev-secret-change-me}
+      SESSION_SECRET: ${SESSION_SECRET:-}
       DATABASE_URL: postgresql://clinic_api:${CLINIC_API_PASSWORD:?Set CLINIC_API_PASSWORD in .env}@db:5432/${POSTGRES_DB:?Set POSTGRES_DB in .env}
       SMTP_HOST: ${SMTP_HOST:-mailpit}
       SMTP_PORT: ${SMTP_PORT:-1025}
@@ -63,6 +63,9 @@ services:
       SMTP_PASSWORD: ${SMTP_PASSWORD:-}
       SMTP_TIMEOUT: ${SMTP_TIMEOUT:-5}
       PUBLIC_BASE_URL: ${PUBLIC_BASE_URL:-http://localhost:8080}
+    secrets:
+      - session_secret
+      - smtp_password
     networks:
       - frontend
       - backend
@@ -118,6 +121,12 @@ services:
     security_opt:
       - no-new-privileges:true
     restart: unless-stopped
+
+secrets:
+  session_secret:
+    file: ./secrets/session_secret
+  smtp_password:
+    file: ./secrets/smtp_password
 
 volumes:
   db_data:

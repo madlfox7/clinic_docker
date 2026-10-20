@@ -49,6 +49,19 @@ def mailpit_messages(address: str) -> list[dict]:
 	return response.json().get("messages") or []
 
 
+def accept_setup_link(c: httpx.Client, email: str, password: str) -> httpx.Response:
+	response = c.post(
+		"/reset-password",
+		data={
+			"token": latest_reset_token(email),
+			"new_password": password,
+			"confirm_password": password,
+		},
+	)
+	assert "Password updated." in response.text
+	return response
+
+
 def latest_reset_token(address: str) -> str:
 	messages = mailpit_messages(address)
 	assert messages, "reset email was not delivered"
@@ -261,6 +274,9 @@ def test_weak_passwords_are_rejected_without_creating_users():
 				f"SELECT count(*) FROM users WHERE lower(email) = lower('{email}')"
 			) == "0"
 		login(admin, ADMIN)
+		staff_page = admin.get("/admin/users")
+		assert 'name="password"' not in staff_page.text
+		assert 'name="new_password"' not in staff_page.text
 		staff_email = f"weak-staff-{stamp}@example.com"
 		staff = admin.post(
 			"/admin/users",
@@ -271,11 +287,25 @@ def test_weak_passwords_are_rejected_without_creating_users():
 				"confirm_password": "aaaaaaaa",
 			},
 		)
-		assert "error=invalid_password" in str(staff.url)
-		assert "Choose a non-default password." in staff.text
+		assert "Staff account created." in staff.text
 		assert psql(
 			f"SELECT count(*) FROM users WHERE email = '{staff_email}'"
-		) == "0"
+		) == "1"
+		with client() as stranger:
+			denied_chosen = stranger.post(
+				"/login",
+				data={"email": staff_email, "password": "aaaaaaaa"},
+			)
+			assert "Invalid email or password" in denied_chosen.text
+		psql(
+			f"""
+			DELETE FROM audit_events
+			WHERE target_id = (SELECT id FROM users WHERE email = '{staff_email}');
+			DELETE FROM password_reset_tokens
+			WHERE user_id = (SELECT id FROM users WHERE email = '{staff_email}');
+			DELETE FROM users WHERE email = '{staff_email}';
+			"""
+		)
 		login(patient, PAT)
 		changed = patient.post(
 			"/me/password",
@@ -608,7 +638,8 @@ def test_patient_recovers_password_without_admin_reset():
 			login(admin, ADMIN)
 			users_page = admin.get("/admin/users")
 			assert "Forgot password?" not in users_page.text
-			assert f'action="/admin/users/{user_id}/password"' not in users_page.text
+			assert "new_password" not in users_page.text
+			assert f'action="/admin/users/{user_id}/reset-link"' in users_page.text
 			denied = admin.post(
 				f"/admin/users/{user_id}/password",
 				data={
@@ -631,7 +662,11 @@ def test_patient_recovers_password_without_admin_reset():
 			assert "sent=1" in str(doctor_reset.url)
 			assert "token=" not in str(doctor_reset.url)
 			assert "reset-password?token=" not in doctor_reset.text
-			assert len(mailpit_messages(DOC)) == doctor_messages
+			assert len(mailpit_messages(DOC)) == doctor_messages + 1
+			psql(
+				"UPDATE password_reset_tokens SET used_at = CURRENT_TIMESTAMP "
+				"WHERE used_at IS NULL"
+			)
 			sent = guest.post("/forgot-password", data={"email": email})
 			assert "sent=1" in str(sent.url)
 			assert "token=" not in str(sent.url)
@@ -682,6 +717,132 @@ def test_patient_recovers_password_without_admin_reset():
 				DELETE FROM users WHERE id = {user_id};
 				"""
 			)
+
+
+def test_last_admin_reset_link_is_server_only():
+	before = len(mailpit_messages(ADMIN))
+	with client() as guest, client() as admin:
+		sent = guest.post("/forgot-password", data={"email": ADMIN})
+		assert "sent=1" in str(sent.url)
+		assert len(mailpit_messages(ADMIN)) == before
+		login(admin, ADMIN)
+		own_admin_id = int(psql(f"SELECT id FROM users WHERE email = '{ADMIN}'"))
+		denied = admin.post(f"/admin/users/{own_admin_id}/reset-link")
+		assert "password_link_self" in str(denied.url)
+		assert len(mailpit_messages(ADMIN)) == before
+	refused = subprocess.run(
+		[
+			"docker", "compose", "exec", "-T", "api",
+			"python", "send_reset_link.py", REG,
+		],
+		cwd=ROOT,
+		capture_output=True,
+		text=True,
+	)
+	assert refused.returncode != 0, refused.stdout
+	assert "last remaining administrator" in refused.stderr
+	issued = subprocess.run(
+		[
+			"docker", "compose", "exec", "-T", "api",
+			"python", "send_reset_link.py", ADMIN,
+		],
+		cwd=ROOT,
+		capture_output=True,
+		text=True,
+	)
+	assert issued.returncode == 0, issued.stderr
+	assert "Reset link sent." in issued.stdout
+	assert "token=" not in issued.stdout
+	assert len(mailpit_messages(ADMIN)) == before + 1
+	psql(
+		"UPDATE password_reset_tokens SET used_at = CURRENT_TIMESTAMP "
+		"WHERE used_at IS NULL"
+	)
+
+
+def test_admin_cannot_set_email_or_open_medical_text():
+	with client() as admin:
+		login(admin, ADMIN)
+		records = admin.get("/my/records")
+		assert records.url.path == "/login"
+		doctor_page = admin.get("/doctor/patients")
+		assert doctor_page.url.path == "/login"
+		users = admin.get("/admin/users")
+		assert 'name="password"' not in users.text
+		assert 'name="new_email"' not in users.text
+	denied = subprocess.run(
+		[
+			"docker", "compose", "exec", "-T", "db",
+			"psql", "-U", "clinic", "-d", "clinic",
+			"-v", "ON_ERROR_STOP=1", "-c",
+			"BEGIN; SET LOCAL ROLE app_admin; "
+			"SELECT set_config('app.user_id', '1', true); "
+			"UPDATE users SET email = 'stolen@example.test' WHERE role = 'patient';",
+		],
+		cwd=ROOT,
+		capture_output=True,
+		text=True,
+	)
+	assert denied.returncode != 0, denied.stdout
+	assert (
+		"email can only be changed" in denied.stderr
+		or "permission denied for table users" in denied.stderr
+	)
+
+
+def test_owner_confirms_email_change_on_both_addresses():
+	email = f"email-change-{uuid.uuid4().hex}@example.test"
+	new_email = f"email-next-{uuid.uuid4().hex}@example.test"
+	password = "Clinic-Email-Change-2026!"
+	user_id = None
+	try:
+		with client() as owner, client() as other:
+			registered = owner.post(
+				"/register",
+				data={
+					"email": email,
+					"password": password,
+					"confirm_password": password,
+				},
+			)
+			assert "Account created." in registered.text
+			user_id = int(psql(f"SELECT id FROM users WHERE email = '{email}'"))
+			assert "Role: patient" in owner.post(
+				"/login", data={"email": email, "password": password}
+			).text
+			other.post("/login", data={"email": email, "password": password})
+			requested = owner.post("/me/email", data={"new_email": new_email})
+			assert "email_change=sent" in str(requested.url)
+			assert new_email not in psql(f"SELECT email FROM users WHERE id = {user_id}")
+			first = owner.post(
+				"/confirm-email",
+				data={"token": latest_reset_token(email)},
+			)
+			assert "still needs" in first.text
+			second = owner.post(
+				"/confirm-email",
+				data={"token": latest_reset_token(new_email)},
+			)
+			assert "email_changed=1" in str(second.url) or second.url.path == "/login"
+			assert other.get("/me").url.path == "/login"
+			assert "Invalid email or password" in owner.post(
+				"/login", data={"email": email, "password": password}
+			).text
+			assert "Role: patient" in owner.post(
+				"/login", data={"email": new_email, "password": password}
+			).text
+	finally:
+		psql(
+			f"""
+			DELETE FROM audit_events
+			WHERE actor_user_id IN (
+			  SELECT id FROM users WHERE email IN ('{email}', '{new_email}')
+			) OR target_id IN (
+			  SELECT id FROM users WHERE email IN ('{email}', '{new_email}')
+			);
+			DELETE FROM users WHERE email IN ('{email}', '{new_email}');
+			"""
+		)
 
 
 def test_patient_cannot_open_doctor_appointments():
@@ -2697,11 +2858,11 @@ def test_admin_can_create_update_deactivate_and_reactivate_doctor():
 					"full_name": "Dr. Initial Name",
 					"specialty": "General Medicine",
 					"experience_years": "7",
-					"password": initial_password,
-					"confirm_password": initial_password,
 				},
 			)
 			assert created.url.path == "/admin/doctors"
+			assert "setup link" in created.text
+			accept_setup_link(doctor, email, initial_password)
 			user_id = int(psql(f"SELECT id FROM users WHERE email = '{email}'"))
 			doctor_id = int(psql(f"SELECT id FROM doctors WHERE user_id = {user_id}"))
 			assert psql(f"SELECT role FROM users WHERE id = {user_id}") == "doctor"
@@ -2733,7 +2894,18 @@ def test_admin_can_create_update_deactivate_and_reactivate_doctor():
 				},
 			)
 			assert "password_reset_not_allowed" in str(reset.url)
-			assert "only for registrars and other administrators" in reset.text
+			assert "cannot be set from this page" in reset.text
+			linked = admin.post(
+				f"/admin/users/{user_id}/reset-link",
+				data={"next_page": "doctors"},
+			)
+			assert "Reset link sent." in linked.text
+			assert "new_password" not in linked.text
+			assert latest_reset_token(email)
+			psql(
+				"UPDATE password_reset_tokens SET used_at = CURRENT_TIMESTAMP "
+				"WHERE used_at IS NULL"
+			)
 			denied_doctor_login = doctor.post(
 				"/login", data={"email": email, "password": reset_password}
 			)
@@ -2854,7 +3026,8 @@ def test_admin_can_create_update_deactivate_and_reactivate_doctor():
 			psql(
 				f"""
 				DELETE FROM audit_events
-				WHERE target_id = {user_id} AND target_type = 'doctor';
+				WHERE actor_user_id = {user_id}
+				   OR (target_id = {user_id} AND target_type IN ('doctor', 'user'));
 				DELETE FROM users WHERE id = {user_id};
 				"""
 			)
@@ -2896,13 +3069,17 @@ def test_admin_can_create_staff_and_reset_password():
 				},
 			)
 			assert "Staff account created." in created_admin.text
+			accept_setup_link(managed_admin, admin_email, initial_password)
 			other_admin_id = int(
 				psql(f"SELECT id FROM users WHERE email = '{admin_email}'")
 			)
+			staff_page = admin.get("/admin/users")
+			assert "new_password" not in staff_page.text
 			assert (
-				f'action="/admin/users/{other_admin_id}/password"'
-				in admin.get("/admin/users").text
+				f'action="/admin/users/{other_admin_id}/reset-link"'
+				in staff_page.text
 			)
+			assert f'action="/admin/users/{other_admin_id}/password"' not in staff_page.text
 			managed_admin_login = managed_admin.post(
 				"/login",
 				data={"email": admin_email, "password": initial_password},
@@ -2969,14 +3146,29 @@ def test_admin_can_create_staff_and_reset_password():
 				},
 			)
 			assert "password_reset_not_allowed" in str(denied_self_reset.url)
-			admin_reset = admin.post(
+			denied_self_link = admin.post(f"/admin/users/{own_admin_id}/reset-link")
+			assert "password_link_self" in str(denied_self_link.url)
+			direct_reset = admin.post(
 				f"/admin/users/{other_admin_id}/password",
 				data={
 					"new_password": reset_password,
 					"confirm_password": reset_password,
 				},
 			)
-			assert "Password reset." in admin_reset.text
+			assert "password_reset_not_allowed" in str(direct_reset.url)
+			admin_reset = admin.post(f"/admin/users/{other_admin_id}/reset-link")
+			assert "Reset link sent." in admin_reset.text
+			assert "new_password" not in admin_reset.text
+			logout(registrar)
+			consumed_admin_link = registrar.post(
+				"/reset-password",
+				data={
+					"token": latest_reset_token(admin_email),
+					"new_password": reset_password,
+					"confirm_password": reset_password,
+				},
+			)
+			assert "Password updated." in consumed_admin_link.text
 			assert managed_admin.get("/me").url.path == "/login"
 			assert "Invalid email or password" in managed_admin.post(
 				"/login",
@@ -2997,6 +3189,7 @@ def test_admin_can_create_staff_and_reset_password():
 				},
 			)
 			assert "Staff account created." in created.text
+			accept_setup_link(other_registrar, email, initial_password)
 			user_id = int(psql(f"SELECT id FROM users WHERE email = '{email}'"))
 			assert psql(f"SELECT role FROM users WHERE id = {user_id}") == "registrar"
 			for registrar_client in (registrar, other_registrar):
@@ -3005,14 +3198,18 @@ def test_admin_can_create_staff_and_reset_password():
 					data={"email": email, "password": initial_password},
 				)
 				assert "Role: registrar" in initial_login.text
-			reset = admin.post(
-				f"/admin/users/{user_id}/password",
+			reset = admin.post(f"/admin/users/{user_id}/reset-link")
+			assert "Reset link sent." in reset.text
+			logout(other_registrar)
+			consumed_registrar_link = other_registrar.post(
+				"/reset-password",
 				data={
+					"token": latest_reset_token(email),
 					"new_password": reset_password,
 					"confirm_password": reset_password,
 				},
 			)
-			assert "Password reset." in reset.text
+			assert "Password updated." in consumed_registrar_link.text
 			for registrar_client in (registrar, other_registrar):
 				stale_session = registrar_client.get("/me")
 				assert stale_session.url.path == "/login"

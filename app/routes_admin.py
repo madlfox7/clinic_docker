@@ -11,16 +11,17 @@ from db import (
     MAX_SLOT_MINUTES,
     MAX_TEXT_LENGTH,
     contains_nul,
+    db,
     db_as,
     parse_strict_int,
-    pwd,
     record_audit_event,
     templates,
     within_length,
 )
+from mailer import smtp_ready
 from routes_auth import (
     _normalize_registration_email,
-    is_weak_password,
+    deliver_password_reset,
     require_user,
 )
 
@@ -30,8 +31,17 @@ from routes_auth import (
 
 router = APIRouter()
 
-def _valid_admin_password(password: str, email: str | None = None) -> bool:
-    return not is_weak_password(password, email)
+def _discard_invite(token: str) -> None:
+    conn = db()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT public.discard_undelivered_invite(%s)",
+                (token,),
+            )
+        conn.commit()
+    finally:
+        conn.close()
 
 @router.get("/admin/audit")
 def admin_audit(request: Request):
@@ -127,6 +137,7 @@ def admin_users(request: Request):
             "error": request.query_params.get("error"),
             "created": request.query_params.get("created"),
             "password_reset": request.query_params.get("password_reset"),
+            "password_link": request.query_params.get("password_link"),
         },
     )
 
@@ -136,8 +147,6 @@ def create_staff_user(
     request: Request,
     email: str = Form(...),
     role: str = Form(...),
-    password: str = Form(...),
-    confirm_password: str = Form(...),
 ):
     admin_user, denied = require_user(request, "admin")
     if denied:
@@ -148,10 +157,8 @@ def create_staff_user(
         return RedirectResponse("/admin/users?error=invalid_email", status_code=303)
     if role not in ("registrar", "admin"):
         return RedirectResponse("/admin/users?error=invalid_role", status_code=303)
-    if not _valid_admin_password(password, normalized_email):
-        return RedirectResponse("/admin/users?error=invalid_password", status_code=303)
-    if password != confirm_password:
-        return RedirectResponse("/admin/users?error=password_mismatch", status_code=303)
+    if not smtp_ready():
+        return RedirectResponse("/admin/users?error=password_link_failed", status_code=303)
 
     conn = db_as(admin_user)
     try:
@@ -159,70 +166,101 @@ def create_staff_user(
             with conn.cursor() as cur:
                 cur.execute(
                     """
-                    INSERT INTO users (email, password_hash, role, blocked)
-                    VALUES (%s, %s, %s, FALSE)
-                    RETURNING id
+                    SELECT status, invited_user_id, recipient, reset_token
+                    FROM public.admin_invite_staff(%s, %s)
                     """,
-                    (normalized_email, pwd.hash(password), role),
+                    (normalized_email, role),
                 )
-                user_id = cur.fetchone()[0]
-                record_audit_event(cur, "user.create", role, user_id)
+                row = cur.fetchone()
     except psycopg2.errors.UniqueViolation:
         return RedirectResponse("/admin/users?error=email_exists", status_code=303)
     finally:
         conn.close()
+    status, _user_id, recipient, token = row if row else ("invalid", None, None, None)
+    if status != "issued" or not recipient or not token:
+        error = "password_link_rate_limited" if status == "rate_limited" else "invalid_email"
+        return RedirectResponse(f"/admin/users?error={error}", status_code=303)
+    if not deliver_password_reset(recipient, token):
+        _discard_invite(token)
+        return RedirectResponse("/admin/users?error=password_link_failed", status_code=303)
     return RedirectResponse("/admin/users?created=1", status_code=303)
 
 
+def _admin_page(next_page: str) -> str:
+    return "/admin/doctors" if next_page == "doctors" else "/admin/users"
+
+
 @router.post("/admin/users/{user_id}/password")
-def reset_user_password(
+def reset_user_password(request: Request, user_id: str):
+    admin_user, denied = require_user(request, "admin")
+    if denied:
+        return denied
+    return RedirectResponse(
+        "/admin/users?error=password_reset_not_allowed", status_code=303
+    )
+
+
+@router.post("/admin/users/{user_id}/reset-link")
+def send_user_password_reset_link(
     request: Request,
     user_id: str,
-    new_password: str = Form(...),
-    confirm_password: str = Form(...),
+    next_page: str = Form("users"),
 ):
     admin_user, denied = require_user(request, "admin")
     if denied:
         return denied
+    page = _admin_page(next_page)
     parsed_user_id = parse_strict_int(user_id, min_value=1)
     if parsed_user_id is None:
-        return RedirectResponse("/admin/users?error=user_not_found", status_code=303)
-    if not _valid_admin_password(new_password):
-        return RedirectResponse("/admin/users?error=invalid_password", status_code=303)
-    if new_password != confirm_password:
-        return RedirectResponse("/admin/users?error=password_mismatch", status_code=303)
+        return RedirectResponse(f"{page}?error=user_not_found", status_code=303)
+    if not smtp_ready():
+        return RedirectResponse(f"{page}?error=password_link_failed", status_code=303)
 
     conn = db_as(admin_user)
     try:
         with conn:
             with conn.cursor() as cur:
                 cur.execute(
-                    "SELECT email FROM users WHERE id = %s",
+                    """
+                    SELECT status, recipient, reset_token, target_role
+                    FROM public.admin_request_password_reset(%s)
+                    """,
                     (parsed_user_id,),
                 )
-                target = cur.fetchone()
-                if target and not _valid_admin_password(new_password, target[0]):
-                    return RedirectResponse(
-                        "/admin/users?error=invalid_password", status_code=303
-                    )
-                cur.execute(
-                    """
-                    SELECT public.admin_reset_user_password(%s, %s)
-                    """,
-                    (parsed_user_id, pwd.hash(new_password)),
-                )
                 row = cur.fetchone()
-                if row is None or row[0] is None:
-                    return RedirectResponse(
-                        "/admin/users?error=password_reset_not_allowed",
-                        status_code=303,
-                    )
+    finally:
+        conn.close()
+    status, recipient, token, target_role = row if row else (
+        "not_allowed",
+        None,
+        None,
+        None,
+    )
+    if status == "self":
+        return RedirectResponse(f"{page}?error=password_link_self", status_code=303)
+    if status == "last_admin":
+        return RedirectResponse(f"{page}?error=last_admin", status_code=303)
+    if status == "rate_limited":
+        return RedirectResponse(
+            f"{page}?error=password_link_rate_limited", status_code=303
+        )
+    if status != "issued" or not recipient or not token:
+        return RedirectResponse(
+            f"{page}?error=password_link_not_allowed", status_code=303
+        )
+    if not deliver_password_reset(recipient, token):
+        return RedirectResponse(f"{page}?error=password_link_failed", status_code=303)
+
+    conn = db_as(admin_user)
+    try:
+        with conn:
+            with conn.cursor() as cur:
                 record_audit_event(
-                    cur, "user.password_reset", row[0], parsed_user_id
+                    cur, "user.password_link", target_role or "user", parsed_user_id
                 )
     finally:
         conn.close()
-    return RedirectResponse("/admin/users?password_reset=1", status_code=303)
+    return RedirectResponse(f"{page}?password_link=1", status_code=303)
 
 
 @router.get("/admin/services")
@@ -596,6 +634,7 @@ def admin_doctors(request: Request):
                 request.query_params.get("future_appointments"), min_value=0
             ),
             "error": request.query_params.get("error"),
+            "password_link": request.query_params.get("password_link"),
         },
     )
 
@@ -622,8 +661,6 @@ def create_doctor(
     full_name: str = Form(...),
     specialty: str = Form(...),
     experience_years: str = Form(...),
-    password: str = Form(...),
-    confirm_password: str = Form(...),
 ):
     admin_user, denied = require_user(request, "admin")
     if denied:
@@ -647,14 +684,8 @@ def create_doctor(
         return RedirectResponse(
             "/admin/doctors/new?error=invalid_details", status_code=303
         )
-    if not _valid_admin_password(password, normalized_email):
-        return RedirectResponse(
-            "/admin/doctors/new?error=invalid_password", status_code=303
-        )
-    if password != confirm_password:
-        return RedirectResponse(
-            "/admin/doctors/new?error=password_mismatch", status_code=303
-        )
+    if not smtp_ready():
+        return RedirectResponse("/admin/doctors/new?error=password_link_failed", status_code=303)
 
     conn = db_as(admin_user)
     try:
@@ -662,38 +693,27 @@ def create_doctor(
             with conn.cursor() as cur:
                 cur.execute(
                     """
-                    INSERT INTO users (email, password_hash, role, blocked)
-                    VALUES (%s, %s, 'doctor', FALSE)
-                    RETURNING id
+                    SELECT status, invited_user_id, invited_doctor_id, recipient, reset_token
+                    FROM public.admin_invite_doctor(%s, %s, %s, %s)
                     """,
-                    (normalized_email, pwd.hash(password)),
+                    (normalized_email, full_name, specialty, parsed_experience),
                 )
-                user_id = cur.fetchone()[0]
-                cur.execute(
-                    """
-                    INSERT INTO doctors
-                        (user_id, full_name, specialty, experience_years)
-                    VALUES (%s, %s, %s, %s)
-                    RETURNING id
-                    """,
-                    (user_id, full_name, specialty, parsed_experience),
-                )
-                doctor_id = cur.fetchone()[0]
-                cur.execute(
-                    """
-                    INSERT INTO doctor_services (doctor_id, service_id)
-                    SELECT %s, id FROM services WHERE active
-                    ON CONFLICT DO NOTHING
-                    """,
-                    (doctor_id,),
-                )
-                record_audit_event(cur, "doctor.create", "doctor", doctor_id)
+                row = cur.fetchone()
     except psycopg2.errors.UniqueViolation:
         return RedirectResponse(
             "/admin/doctors/new?error=email_exists", status_code=303
         )
     finally:
         conn.close()
+    status, _user_id, _doctor_id, recipient, token = row if row else (
+        "invalid", None, None, None, None
+    )
+    if status != "issued" or not recipient or not token:
+        error = "password_link_failed" if status == "rate_limited" else "invalid_details"
+        return RedirectResponse(f"/admin/doctors/new?error={error}", status_code=303)
+    if not deliver_password_reset(recipient, token):
+        _discard_invite(token)
+        return RedirectResponse("/admin/doctors/new?error=password_link_failed", status_code=303)
     return RedirectResponse("/admin/doctors?created=1", status_code=303)
 
 

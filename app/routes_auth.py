@@ -1,3 +1,4 @@
+import os
 import re
 from urllib.parse import urlencode
 
@@ -23,7 +24,7 @@ from db import (
     templates,
     within_length,
 )
-from mailer import send_password_reset, smtp_ready
+from mailer import send_account_message, send_password_reset, smtp_ready
 
 router = APIRouter()
 
@@ -342,6 +343,19 @@ def _forgot_password_page(
     )
 
 
+def deliver_password_reset(email: str, token: str) -> bool:
+    try:
+        send_password_reset(email, token)
+        return True
+    except Exception:
+        log.exception("could not send password reset email")
+        try:
+            _revoke_reset_token(token)
+        except Exception:
+            log.exception("could not revoke undelivered password reset token")
+        return False
+
+
 def _revoke_reset_token(token: str) -> None:
     conn = db()
     try:
@@ -408,8 +422,8 @@ def forgot_password(request: Request, email: str = Form(...)):
         with conn.cursor() as cur:
             cur.execute(
                 """
-                SELECT reset_token, rate_limited
-                FROM public.request_patient_password_reset(%s, %s)
+                SELECT reset_token, rate_limited, outcome
+                FROM public.request_password_reset(%s, %s, FALSE)
                 """,
                 (email, _client_source(request)),
             )
@@ -426,28 +440,17 @@ def forgot_password(request: Request, email: str = Form(...)):
         response.headers["Retry-After"] = "900"
         return response
     token = row[0] if row else None
-    if token:
-        try:
-            send_password_reset(email.strip().lower(), token)
-        except Exception:
-            log.exception("could not send password reset email")
-            try:
-                _revoke_reset_token(token)
-            except Exception:
-                log.exception("could not revoke undelivered password reset token")
-            return _forgot_password_page(
-                request,
-                "The reset email could not be sent. Try again later.",
-                503,
-            )
+    if token and not deliver_password_reset(email.strip().lower(), token):
+        return _forgot_password_page(
+            request,
+            "The reset email could not be sent. Try again later.",
+            503,
+        )
     return RedirectResponse("/forgot-password?sent=1", status_code=303)
 
 
 @router.get("/reset-password")
 def reset_password_form(request: Request, token: str = ""):
-    user, status = load_session_user(request)
-    if status == "ok":
-        return RedirectResponse("/me", status_code=303)
     if not RESET_TOKEN_PATTERN.fullmatch(token):
         return _reset_password_page(
             request, "", "This reset link is invalid or has expired.", 400
@@ -462,9 +465,6 @@ def reset_password(
     new_password: str = Form(...),
     confirm_password: str = Form(...),
 ):
-    user, status = load_session_user(request)
-    if status == "ok":
-        return RedirectResponse("/me", status_code=303)
     if contains_nul(token, new_password, confirm_password):
         return _reset_password_page(request, "", "NUL characters are not allowed.", 400)
     if not RESET_TOKEN_PATTERN.fullmatch(token):
@@ -487,7 +487,7 @@ def reset_password(
             cur.execute(
                 """
                 SELECT result, resulting_auth_version
-                FROM public.consume_patient_password_reset(%s, %s, %s)
+                FROM public.consume_password_reset(%s, %s, %s)
                 """,
                 (token, new_password, pwd.hash(new_password)),
             )
@@ -553,7 +553,127 @@ def me(request: Request):
             "upcoming_visits": upcoming_visits,
             "password_changed": request.query_params.get("password_changed"),
             "password_error": request.query_params.get("password_error"),
+            "email_change": request.query_params.get("email_change"),
+            "email_error": request.query_params.get("email_error"),
         },
+    )
+
+
+def _public_base_url() -> str:
+    return os.environ.get("PUBLIC_BASE_URL", "http://localhost:8080").strip().rstrip("/")
+
+
+def _send_email_change(old_email: str, new_email: str, old_token: str, new_token: str) -> None:
+    base_url = _public_base_url()
+    send_account_message(
+        old_email,
+        "Confirm your clinic email change",
+        "Confirm that you want to change this account's email.\n"
+        "The link expires in 15 minutes and works once.\n\n"
+        f"{base_url}/confirm-email?token={old_token}\n\n"
+        "If you did not request this, you can ignore this message.\n",
+    )
+    send_account_message(
+        new_email,
+        "Confirm your new clinic email",
+        "Confirm this address for an existing clinic account.\n"
+        "The link expires in 15 minutes and works once.\n\n"
+        f"{base_url}/confirm-email?token={new_token}\n\n"
+        "If you did not request this, you can ignore this message.\n",
+    )
+
+
+@router.post("/me/email")
+def change_own_email(request: Request, new_email: str = Form(...)):
+    user, denied = require_user(request)
+    if denied:
+        return denied
+    if contains_nul(new_email) or any(char in new_email for char in "\r\n"):
+        return RedirectResponse("/me?email_error=invalid", status_code=303)
+    normalized = _normalize_registration_email(new_email)
+    if normalized is None:
+        return RedirectResponse("/me?email_error=invalid", status_code=303)
+    if not smtp_ready():
+        return RedirectResponse("/me?email_error=failed", status_code=303)
+    conn = db_as(user)
+    try:
+        with conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT status, old_email, new_email, old_token, new_token
+                    FROM public.request_email_change(%s)
+                    """,
+                    (normalized,),
+                )
+                row = cur.fetchone()
+    finally:
+        conn.close()
+    status = row[0] if row else "invalid"
+    if status == "rate_limited":
+        return RedirectResponse("/me?email_error=rate_limited", status_code=303)
+    if status != "issued":
+        return RedirectResponse(f"/me?email_error={status}", status_code=303)
+    try:
+        _send_email_change(row[1], row[2], row[3], row[4])
+    except Exception:
+        log.exception("could not send email-change confirmation")
+        revoke = db()
+        try:
+            with revoke.cursor() as cur:
+                cur.execute(
+                    "SELECT public.revoke_email_change(%s, %s)",
+                    (row[3], row[4]),
+                )
+            revoke.commit()
+        finally:
+            revoke.close()
+        return RedirectResponse("/me?email_error=failed", status_code=303)
+    return RedirectResponse("/me?email_change=sent", status_code=303)
+
+
+@router.get("/confirm-email")
+def confirm_email_form(request: Request, token: str = ""):
+    if not RESET_TOKEN_PATTERN.fullmatch(token):
+        return templates.TemplateResponse(
+            "confirm_email.html",
+            {"request": request, "role": "guest", "token": "", "error": "invalid"},
+            status_code=400,
+        )
+    return templates.TemplateResponse(
+        "confirm_email.html",
+        {"request": request, "role": "guest", "token": token, "error": None},
+    )
+
+
+@router.post("/confirm-email")
+def confirm_email(request: Request, token: str = Form(...)):
+    if contains_nul(token) or not RESET_TOKEN_PATTERN.fullmatch(token):
+        return templates.TemplateResponse(
+            "confirm_email.html",
+            {"request": request, "role": "guest", "token": "", "error": "invalid"},
+            status_code=400,
+        )
+    conn = db()
+    try:
+        with conn.cursor() as cur:
+            cur.execute("SELECT public.confirm_email_change(%s)", (token,))
+            status = cur.fetchone()[0]
+        conn.commit()
+    finally:
+        conn.close()
+    if status == "changed":
+        request.session.clear()
+        return RedirectResponse("/login?email_changed=1", status_code=303)
+    if status in ("confirmed_old", "confirmed_new"):
+        return templates.TemplateResponse(
+            "confirm_email.html",
+            {"request": request, "role": "guest", "token": "", "error": status},
+        )
+    return templates.TemplateResponse(
+        "confirm_email.html",
+        {"request": request, "role": "guest", "token": "", "error": "invalid"},
+        status_code=400,
     )
 
 

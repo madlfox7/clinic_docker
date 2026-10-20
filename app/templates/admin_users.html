@@ -4,8 +4,8 @@
 
 
 <h1>Manage patients</h1>
-{% if created == "1" %}<p>Staff account created.</p>{% endif %}
-{% if password_reset == "1" %}<p>Password reset.</p>{% endif %}
+{% if created == "1" %}<p>Staff account created. A setup link was sent to their email.</p>{% endif %}
+{% if password_link == "1" %}<p>Reset link sent.</p>{% endif %}
 {% if error == "invalid_email" %}<p>Enter a valid email address.</p>
 {% elif error == "email_exists" %}<p>An account with this email already exists.</p>
 {% elif error == "invalid_role" %}<p>Choose registrar or admin.</p>
@@ -13,7 +13,12 @@
 {% elif error == "password_mismatch" %}<p>Passwords do not match.</p>
 {% elif error == "user_not_found" %}<p>User not found.</p>
 {% elif error == "self_block" %}<p>You cannot block or unblock your own administrator account.</p>
-{% elif error == "password_reset_not_allowed" %}<p>Password resets are available only for registrars and other administrators.</p>{% endif %}
+{% elif error == "password_reset_not_allowed" %}<p>Passwords cannot be set from this page. Send a reset link instead.</p>
+{% elif error == "password_link_self" %}<p>You cannot send a reset link to your own administrator account.</p>
+{% elif error == "last_admin" %}<p>The last remaining administrator can only be reset from the server.</p>
+{% elif error == "password_link_not_allowed" %}<p>A reset link can be sent only to another active account.</p>
+{% elif error == "password_link_failed" %}<p>The reset email could not be sent. Try again later.</p>
+{% elif error == "password_link_rate_limited" %}<p>Too many password reset attempts. Try again later.</p>{% endif %}
 {% if future_cancelled is not none %}
   <p>Cancelled {{ future_cancelled }} future appointment(s).</p>
 {% endif %}
@@ -28,8 +33,7 @@
         <option value="admin">Administrator</option>
       </select>
     </label>
-    <label>Password <input name="password" type="password" minlength="8" maxlength="72" required></label>
-    <label>Confirm password <input name="confirm_password" type="password" minlength="8" maxlength="72" required></label>
+    <p>The new account receives a setup link. This page cannot set a password or change an email.</p>
     <button type="submit">Create staff account</button>
   </form>
 </section>
@@ -40,11 +44,11 @@
       <li>
         {{ user.email }} — {{ user.role }} — {{ "Blocked" if user.blocked else "Active" }}
         {% if user.role == "registrar" or (user.role == "admin" and user.id != current_admin_id) %}
-          <form method="post" action="/admin/users/{{ user.id }}/password">
-            <label>New password <input name="new_password" type="password" minlength="8" maxlength="72" required></label>
-            <label>Confirm <input name="confirm_password" type="password" minlength="8" maxlength="72" required></label>
-            <button type="submit">Reset password</button>
+          <form method="post" action="/admin/users/{{ user.id }}/reset-link">
+            <button type="submit">Send reset link</button>
           </form>
+        {% elif user.role == "admin" %}
+          <strong>Your own administrator account cannot be reset from this page.</strong>
         {% endif %}
         {% if user.role == "admin" %}
           {% if user.id == current_admin_id %}
@@ -83,6 +87,11 @@
         <strong>Active</strong>
         <form method="post" action="/admin/users/{{ user.id }}/block" style="display:inline">
           <button type="submit">Block</button>
+        </form>
+      {% endif %}
+      {% if not user.blocked %}
+        <form method="post" action="/admin/users/{{ user.id }}/reset-link" style="display:inline">
+          <button type="submit">Send reset link</button>
         </form>
       {% endif %}
       {% if user.future_scheduled > 0 %}
