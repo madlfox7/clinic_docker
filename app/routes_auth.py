@@ -24,7 +24,7 @@ from db import (
     templates,
     within_length,
 )
-from mailer import send_account_message, send_password_reset, smtp_ready
+from mailer import send_account_message, send_password_changed, send_password_reset, smtp_ready
 
 router = APIRouter()
 
@@ -35,18 +35,25 @@ EMAIL_PATTERN = re.compile(
 )
 DEFAULT_REGISTRATION_PASSWORDS = {
     "password",
+    "password1",
     "password123",
     "12345678",
     "123456789",
+    "qwerty",
+    "qwertyui",
     "qwerty123",
+    "admin",
     "admin123",
+    "adminadmin",
     "letmein",
+    "letmein1",
     "welcome1",
     "changeme",
     "passw0rd",
     "11111111",
     "aaaaaaaa",
 }
+SAME_PASSWORD_ERROR = "Choose a password different from your current one."
 
 
 def is_weak_password(password: str, email: str | None = None) -> bool:
@@ -59,12 +66,16 @@ def is_weak_password(password: str, email: str | None = None) -> bool:
     if len(stripped) < 8:
         return True
     folded = stripped.casefold()
-    if folded in DEFAULT_REGISTRATION_PASSWORDS or len(set(folded)) == 1:
+    if folded in DEFAULT_REGISTRATION_PASSWORDS or len(set(folded)) < 4:
+        return True
+    if not any(char.isalpha() for char in stripped) or not any(char.isdigit() for char in stripped):
         return True
     if email:
         normalized = email.strip().casefold()
         local_part = normalized.split("@", 1)[0]
         if folded == normalized or (local_part and folded == local_part):
+            return True
+        if len(local_part) >= 3 and local_part in folded:
             return True
     return False
 
@@ -449,9 +460,43 @@ def forgot_password(request: Request, email: str = Form(...)):
     return RedirectResponse("/forgot-password?sent=1", status_code=303)
 
 
+def _notify_password_changed(email: str) -> None:
+    try:
+        send_password_changed(email)
+    except Exception:
+        log.exception("could not send password-changed notice")
+
+
+def _reset_account_email(token: str) -> str | None:
+    conn = db()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT public.password_reset_account_email(%s)",
+                (token,),
+            )
+            return cur.fetchone()[0]
+    finally:
+        conn.close()
+
+
+def _reset_token_is_open(token: str) -> bool:
+    conn = db()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT public.password_reset_token_status(%s)",
+                (token,),
+            )
+            status = cur.fetchone()[0]
+        return status == "valid"
+    finally:
+        conn.close()
+
+
 @router.get("/reset-password")
 def reset_password_form(request: Request, token: str = ""):
-    if not RESET_TOKEN_PATTERN.fullmatch(token):
+    if not RESET_TOKEN_PATTERN.fullmatch(token) or not _reset_token_is_open(token):
         return _reset_password_page(
             request, "", "This reset link is invalid or has expired.", 400
         )
@@ -473,10 +518,11 @@ def reset_password(
         )
     if new_password != confirm_password:
         return _reset_password_page(request, token, "Passwords do not match.", 400)
+    account_email = _reset_account_email(token)
     if (
         not within_length(new_password, MAX_PASSWORD_LENGTH)
         or len(new_password) < 8
-        or is_weak_password(new_password)
+        or is_weak_password(new_password, account_email)
     ):
         return _reset_password_page(
             request, token, "Choose a non-default password.", 400
@@ -499,11 +545,15 @@ def reset_password(
         return _reset_password_page(
             request, token, "Choose a non-default password.", 400
         )
+    if row and row[0] == "same":
+        return _reset_password_page(request, token, SAME_PASSWORD_ERROR, 400)
     if row is None or row[0] != "changed":
         return _reset_password_page(
             request, "", "This reset link is invalid or has expired.", 400
         )
     request.session.clear()
+    if account_email:
+        _notify_password_changed(account_email)
     return RedirectResponse("/login?reset=1", status_code=303)
 
 
@@ -728,6 +778,7 @@ def change_own_password(
     finally:
         conn.close()
     request.session["auth_version"] = new_auth_version
+    _notify_password_changed(user["email"])
     return RedirectResponse("/me?password_changed=1", status_code=303)
 
 

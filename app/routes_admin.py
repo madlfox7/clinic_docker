@@ -147,16 +147,24 @@ def create_staff_user(
     request: Request,
     email: str = Form(...),
     role: str = Form(...),
+    current_password: str = Form(""),
 ):
     admin_user, denied = require_user(request, "admin")
     if denied:
         return denied
     normalized_email = _normalize_registration_email(email)
     role = role.strip().lower()
+    if contains_nul(email, role, current_password):
+        return RedirectResponse("/admin/users?error=invalid_email", status_code=303)
     if normalized_email is None:
         return RedirectResponse("/admin/users?error=invalid_email", status_code=303)
     if role not in ("registrar", "admin"):
         return RedirectResponse("/admin/users?error=invalid_role", status_code=303)
+    if role == "admin" and (
+        current_password == ""
+        or not within_length(current_password, MAX_PASSWORD_LENGTH)
+    ):
+        return RedirectResponse("/admin/users?error=password_required", status_code=303)
     if not smtp_ready():
         return RedirectResponse("/admin/users?error=password_link_failed", status_code=303)
 
@@ -167,9 +175,13 @@ def create_staff_user(
                 cur.execute(
                     """
                     SELECT status, invited_user_id, recipient, reset_token
-                    FROM public.admin_invite_staff(%s, %s)
+                    FROM public.admin_invite_staff(%s, %s, %s)
                     """,
-                    (normalized_email, role),
+                    (
+                        normalized_email,
+                        role,
+                        current_password if role == "admin" else None,
+                    ),
                 )
                 row = cur.fetchone()
     except psycopg2.errors.UniqueViolation:
@@ -178,7 +190,11 @@ def create_staff_user(
         conn.close()
     status, _user_id, recipient, token = row if row else ("invalid", None, None, None)
     if status != "issued" or not recipient or not token:
-        error = "password_link_rate_limited" if status == "rate_limited" else "invalid_email"
+        error = {
+            "rate_limited": "password_link_rate_limited",
+            "password_required": "password_required",
+            "password_denied": "password_denied",
+        }.get(status, "invalid_email")
         return RedirectResponse(f"/admin/users?error={error}", status_code=303)
     if not deliver_password_reset(recipient, token):
         _discard_invite(token)

@@ -255,8 +255,13 @@ def test_weak_passwords_are_rejected_without_creating_users():
 		"aaaaaaaa",
 		"        ",
 		email,
+		f"xx{email.split('@')[0]}1",
+		"abcabcab",
+		"abcdabcd",
 		"password",
 		"12345678",
+		"qwertyui",
+		"letmein1",
 	)
 	with client() as guest, client() as admin, client() as patient:
 		for password in cases:
@@ -317,6 +322,40 @@ def test_weak_passwords_are_rejected_without_creating_users():
 		)
 		assert "password_error=invalid" in str(changed.url)
 		assert "Choose a non-default password." in changed.text
+		policy_email = f"policy-{stamp}@example.com"
+		policy_password = "Policy-Check-2026!"
+		created = guest.post(
+			"/register",
+			data={
+				"email": policy_email,
+				"password": policy_password,
+				"confirm_password": policy_password,
+			},
+		)
+		assert "registered=1" in str(created.url)
+		login_policy = guest.post(
+			"/login",
+			data={"email": policy_email, "password": policy_password},
+		)
+		assert "Role: patient" in login_policy.text
+		same = guest.post(
+			"/me/password",
+			data={
+				"current_password": policy_password,
+				"new_password": policy_password,
+				"confirm_password": policy_password,
+			},
+		)
+		assert "password_error=same" in str(same.url)
+		assert "different from your current one" in same.text
+		psql(
+			f"""
+			DELETE FROM audit_events
+			WHERE target_id = (SELECT id FROM users WHERE email = '{policy_email}')
+			   OR actor_user_id = (SELECT id FROM users WHERE email = '{policy_email}');
+			DELETE FROM users WHERE email = '{policy_email}';
+			"""
+		)
 	with client() as patient:
 		assert login(patient, PAT).status_code == 200
 
@@ -708,6 +747,24 @@ def test_patient_recovers_password_without_admin_reset():
 				},
 			)
 			assert "invalid or has expired" in reused.text
+			opened_again = guest.get(f"/reset-password?token={token}")
+			assert opened_again.status_code == 400
+			assert "invalid or has expired" in opened_again.text
+			assert 'name="new_password"' not in opened_again.text
+			logout(guest)
+			guest.post("/forgot-password", data={"email": email})
+			same_reset = guest.post(
+				"/reset-password",
+				data={
+					"token": latest_reset_token(email),
+					"new_password": replacement,
+					"confirm_password": replacement,
+				},
+			)
+			assert "different from your current one" in same_reset.text
+			assert "Role: patient" in guest.post(
+				"/login", data={"email": email, "password": replacement}
+			).text
 	finally:
 		if user_id:
 			psql(
@@ -3060,16 +3117,44 @@ def test_admin_can_create_staff_and_reset_password():
 				},
 			)
 			assert "Choose registrar or admin." in invalid_role.text
+			missing_password = admin.post(
+				"/admin/users",
+				data={"email": admin_email, "role": "admin"},
+			)
+			assert "password_required" in str(missing_password.url)
+			wrong_password = admin.post(
+				"/admin/users",
+				data={
+					"email": admin_email,
+					"role": "admin",
+					"current_password": "not-the-admin-password",
+				},
+			)
+			assert "password_denied" in str(wrong_password.url)
+			assert psql(
+				f"SELECT count(*) FROM users WHERE email = '{admin_email}'"
+			) == "0"
+			assert psql(
+				"SELECT count(*) FROM audit_events "
+				"WHERE action = 'admin.create_denied' AND actor_role = 'admin'"
+			) != "0"
 			created_admin = admin.post(
 				"/admin/users",
 				data={
 					"email": admin_email,
 					"role": "admin",
-					"password": initial_password,
-					"confirm_password": initial_password,
+					"current_password": PASSWORD,
 				},
 			)
 			assert "Staff account created." in created_admin.text
+			assert psql(
+				"SELECT actor_user_id::text || ' ' || action "
+				"FROM audit_events "
+				f"WHERE action = 'admin.create' AND target_id = ("
+				f"SELECT id FROM users WHERE email = '{admin_email}')"
+			) == psql(
+				f"SELECT id::text FROM users WHERE email = '{ADMIN}'"
+			) + " admin.create"
 			accept_setup_link(managed_admin, admin_email, initial_password)
 			other_admin_id = int(
 				psql(f"SELECT id FROM users WHERE email = '{admin_email}'")

@@ -75,6 +75,15 @@ def send_account_message(recipient: str, subject: str, body: str) -> None:
         smtp.quit()
 
 
+def send_password_changed(recipient: str) -> None:
+    send_account_message(
+        recipient,
+        "Your clinic password was changed",
+        "The password for this clinic account was just changed.\n"
+        "If you did not do this, use Forgot password on the login page immediately.\n",
+    )
+
+
 def send_password_reset(recipient: str, token: str) -> None:
     if any(char in token for char in "\r\n"):
         raise ValueError("invalid reset message")

@@ -9,6 +9,8 @@
 {% if error == "invalid_email" %}<p>Enter a valid email address.</p>
 {% elif error == "email_exists" %}<p>An account with this email already exists.</p>
 {% elif error == "invalid_role" %}<p>Choose registrar or admin.</p>
+{% elif error == "password_required" %}<p>Confirm with your password to create an administrator.</p>
+{% elif error == "password_denied" %}<p>Current password is incorrect. No administrator was created.</p>
 {% elif error == "invalid_password" %}<p>Choose a non-default password.</p>
 {% elif error == "password_mismatch" %}<p>Passwords do not match.</p>
 {% elif error == "user_not_found" %}<p>User not found.</p>
@@ -28,12 +30,31 @@
   <form method="post" action="/admin/users">
     <label>Email <input name="email" type="email" maxlength="254" required></label>
     <label>Role
-      <select name="role" required>
+      <select name="role" id="staff-role" required>
         <option value="registrar">Registrar</option>
         <option value="admin">Administrator</option>
       </select>
     </label>
+    <div id="admin-confirm" hidden>
+      <p><strong>Warning:</strong> this creates another administrator who can manage the clinic. Confirm with your own password. Their password is not set here.</p>
+      <label>Confirm with your password
+        <input name="current_password" type="password" maxlength="72" autocomplete="current-password">
+      </label>
+    </div>
     <p>The new account receives a setup link. This page cannot set a password or change an email.</p>
+    <script>
+      const staffRole = document.getElementById("staff-role");
+      const adminConfirm = document.getElementById("admin-confirm");
+      const adminPassword = adminConfirm.querySelector("input");
+      function syncAdminConfirm() {
+        const creatingAdmin = staffRole.value === "admin";
+        adminConfirm.hidden = !creatingAdmin;
+        adminPassword.required = creatingAdmin;
+        if (!creatingAdmin) adminPassword.value = "";
+      }
+      staffRole.addEventListener("change", syncAdminConfirm);
+      syncAdminConfirm();
+    </script>
     <button type="submit">Create staff account</button>
   </form>
 </section>

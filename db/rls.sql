@@ -377,6 +377,45 @@ BEGIN
 END;
 $function$;
 
+CREATE OR REPLACE FUNCTION public.password_reset_token_status(raw_token text)
+RETURNS text
+LANGUAGE sql
+STABLE
+SECURITY DEFINER
+SET search_path = pg_catalog, public, pg_temp
+AS $function$
+  SELECT CASE
+    WHEN EXISTS (
+      SELECT 1
+      FROM public.password_reset_tokens AS t
+      JOIN public.users AS u ON u.id = t.user_id
+      WHERE raw_token ~ '^[0-9a-f]{64}$'
+        AND t.token_hash = public.digest(raw_token, 'sha256')
+        AND t.used_at IS NULL
+        AND t.expires_at > CURRENT_TIMESTAMP
+        AND NOT u.blocked
+    ) THEN 'valid'
+    ELSE 'invalid'
+  END;
+$function$;
+
+CREATE OR REPLACE FUNCTION public.password_reset_account_email(raw_token text)
+RETURNS text
+LANGUAGE sql
+STABLE
+SECURITY DEFINER
+SET search_path = pg_catalog, public, pg_temp
+AS $function$
+  SELECT u.email
+  FROM public.password_reset_tokens AS t
+  JOIN public.users AS u ON u.id = t.user_id
+  WHERE raw_token ~ '^[0-9a-f]{64}$'
+    AND t.token_hash = public.digest(raw_token, 'sha256')
+    AND t.used_at IS NULL
+    AND t.expires_at > CURRENT_TIMESTAMP
+    AND NOT u.blocked;
+$function$;
+
 DROP FUNCTION IF EXISTS public.consume_patient_password_reset(text, text);
 DROP FUNCTION IF EXISTS public.consume_patient_password_reset(text, text, text);
 CREATE OR REPLACE FUNCTION public.consume_password_reset(
@@ -396,6 +435,8 @@ DECLARE
   token_id bigint;
   target_id integer;
   target_role text;
+  stored_hash text;
+  crypt_hash text;
   changed_auth_version bigint;
 BEGIN
   IF raw_token IS NULL
@@ -433,6 +474,20 @@ BEGIN
        )
      ) THEN
     RETURN QUERY SELECT 'weak'::text, NULL::bigint;
+    RETURN;
+  END IF;
+
+  SELECT u.password_hash INTO stored_hash
+  FROM public.users AS u
+  WHERE u.id = target_id;
+  crypt_hash := CASE
+    WHEN left(stored_hash, 4) = '$2b$'
+      THEN '$2a$' || substring(stored_hash FROM 5)
+    ELSE stored_hash
+  END;
+  IF candidate_password IS NOT NULL
+     AND public.crypt(candidate_password, crypt_hash) = crypt_hash THEN
+    RETURN QUERY SELECT 'same'::text, NULL::bigint;
     RETURN;
   END IF;
 
@@ -951,9 +1006,13 @@ CREATE TRIGGER users_reject_email_change
   FOR EACH ROW
   EXECUTE FUNCTION public.reject_unconfirmed_email_change();
 
+DROP FUNCTION IF EXISTS public.admin_invite_staff(text, text);
+DROP FUNCTION IF EXISTS public.admin_invite_staff(text, text, text);
+
 CREATE OR REPLACE FUNCTION public.admin_invite_staff(
   candidate_email text,
-  candidate_role text
+  candidate_role text,
+  actor_password text
 )
 RETURNS TABLE (
   status text,
@@ -968,6 +1027,8 @@ AS $function$
 DECLARE
   actor_id integer := NULLIF(current_setting('app.user_id', true), '')::integer;
   normalized_email text := lower(btrim(coalesce(candidate_email, '')));
+  stored_hash text;
+  password_to_check text;
   new_id integer;
   issued_token text;
   limited boolean;
@@ -985,6 +1046,36 @@ BEGIN
      OR position('@' IN normalized_email) = 0 THEN
     RETURN QUERY SELECT 'invalid'::text, NULL::integer, NULL::text, NULL::text;
     RETURN;
+  END IF;
+
+  IF candidate_role = 'admin' THEN
+    IF actor_password IS NULL
+       OR actor_password = ''
+       OR octet_length(actor_password) > 72 THEN
+      RETURN QUERY SELECT 'password_required'::text, NULL::integer, NULL::text, NULL::text;
+      RETURN;
+    END IF;
+
+    SELECT u.password_hash INTO stored_hash
+    FROM public.users AS u
+    WHERE u.id = actor_id AND u.role = 'admin' AND NOT u.blocked;
+    password_to_check := actor_password;
+    IF stored_hash IS NULL THEN
+      stored_hash := '$2a$12$vDAC/mONY1XhFCXLJzJKEeuU11gysuOWcZeEh61E/Bys6htguv6eC';
+      password_to_check := 'invalid-password';
+    ELSIF left(stored_hash, 4) = '$2b$' THEN
+      stored_hash := '$2a$' || substring(stored_hash FROM 5);
+    END IF;
+
+    IF public.crypt(password_to_check, stored_hash) IS DISTINCT FROM stored_hash
+       OR password_to_check IS DISTINCT FROM actor_password THEN
+      INSERT INTO public.audit_events (
+        actor_user_id, actor_role, action, target_type, target_id
+      )
+      VALUES (actor_id, 'admin', 'admin.create_denied', 'admin', actor_id);
+      RETURN QUERY SELECT 'password_denied'::text, NULL::integer, NULL::text, NULL::text;
+      RETURN;
+    END IF;
   END IF;
 
   INSERT INTO public.users (email, password_hash, role, blocked)
@@ -1018,7 +1109,13 @@ BEGIN
   INSERT INTO public.audit_events (
     actor_user_id, actor_role, action, target_type, target_id
   )
-  VALUES (actor_id, 'admin', 'user.invite', candidate_role, new_id);
+  VALUES (
+    actor_id,
+    'admin',
+    CASE WHEN candidate_role = 'admin' THEN 'admin.create' ELSE 'user.invite' END,
+    candidate_role,
+    new_id
+  );
 
   RETURN QUERY SELECT 'issued'::text, new_id, normalized_email, issued_token;
 END;
@@ -1322,9 +1419,13 @@ END;
 $function$;
 
 REVOKE ALL ON FUNCTION public.request_password_reset(text, text, boolean) FROM PUBLIC;
+REVOKE ALL ON FUNCTION public.password_reset_token_status(text) FROM PUBLIC;
+REVOKE ALL ON FUNCTION public.password_reset_account_email(text) FROM PUBLIC;
 REVOKE ALL ON FUNCTION public.consume_password_reset(text, text, text) FROM PUBLIC;
 REVOKE ALL ON FUNCTION public.revoke_patient_password_reset(text) FROM PUBLIC;
 GRANT EXECUTE ON FUNCTION public.request_password_reset(text, text, boolean) TO clinic_api;
+GRANT EXECUTE ON FUNCTION public.password_reset_token_status(text) TO clinic_api;
+GRANT EXECUTE ON FUNCTION public.password_reset_account_email(text) TO clinic_api;
 GRANT EXECUTE ON FUNCTION public.consume_password_reset(text, text, text) TO clinic_api;
 GRANT EXECUTE ON FUNCTION public.revoke_patient_password_reset(text) TO clinic_api;
 REVOKE ALL ON TABLE public.password_reset_tokens, public.password_reset_attempts
@@ -1388,13 +1489,13 @@ REVOKE UPDATE (email, password_hash, role) ON public.users
 GRANT UPDATE (blocked) ON public.users TO app_admin;
 REVOKE ALL ON TABLE public.visit_notes, public.prescriptions
   FROM app_admin, app_registrar;
-REVOKE ALL ON FUNCTION public.admin_invite_staff(text, text) FROM PUBLIC;
+REVOKE ALL ON FUNCTION public.admin_invite_staff(text, text, text) FROM PUBLIC;
 REVOKE ALL ON FUNCTION public.admin_invite_doctor(text, text, text, integer) FROM PUBLIC;
 REVOKE ALL ON FUNCTION public.discard_undelivered_invite(text) FROM PUBLIC;
 REVOKE ALL ON FUNCTION public.request_email_change(text) FROM PUBLIC;
 REVOKE ALL ON FUNCTION public.confirm_email_change(text) FROM PUBLIC;
 REVOKE ALL ON FUNCTION public.revoke_email_change(text, text) FROM PUBLIC;
-GRANT EXECUTE ON FUNCTION public.admin_invite_staff(text, text) TO app_admin;
+GRANT EXECUTE ON FUNCTION public.admin_invite_staff(text, text, text) TO app_admin;
 GRANT EXECUTE ON FUNCTION public.admin_invite_doctor(text, text, text, integer) TO app_admin;
 GRANT EXECUTE ON FUNCTION public.discard_undelivered_invite(text) TO clinic_api;
 GRANT EXECUTE ON FUNCTION public.request_email_change(text)
