@@ -136,7 +136,7 @@ def doctor_slots(request: Request, doctor_id: str):
                 FROM appointments a
                 JOIN doctors d ON d.id = a.doctor_id
                 WHERE a.patient_user_id=%s
-                  AND a.status='scheduled'
+                  AND a.status IN ('scheduled', 'completed')
                   AND a.ends_at > CURRENT_TIMESTAMP
                 ORDER BY a.starts_at
                 """,
@@ -196,7 +196,7 @@ def doctor_slots(request: Request, doctor_id: str):
                        SELECT 1
                        FROM appointments a
                        WHERE a.doctor_id = s.doctor_id
-                         AND a.status = 'scheduled'
+                         AND a.status IN ('scheduled', 'completed')
                          AND a.patient_user_id = %s
                          AND a.starts_at < s.starts_at
                                + make_interval(mins => s.duration_minutes)
@@ -206,7 +206,7 @@ def doctor_slots(request: Request, doctor_id: str):
                        SELECT a.id
                        FROM appointments a
                        WHERE a.doctor_id = s.doctor_id
-                         AND a.status = 'scheduled'
+                         AND a.status IN ('scheduled', 'completed')
                          AND a.starts_at < s.ends_at
                          AND a.reserved_ends_at > s.starts_at
                        ORDER BY a.starts_at
@@ -474,7 +474,7 @@ def book_slot(
         SELECT a.id
         FROM appointments a
         WHERE a.patient_user_id = %s
-          AND a.status = 'scheduled'
+          AND a.status IN ('scheduled', 'completed')
           AND a.starts_at < %s
           AND a.ends_at > %s
         """,

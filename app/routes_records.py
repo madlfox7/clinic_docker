@@ -203,7 +203,8 @@ def doctor_records(request: Request, appointment_id: str):
     cur = conn.cursor()
     cur.execute(
         """
-        SELECT a.id, dp.email, d.full_name, a.starts_at, a.ends_at, a.status
+        SELECT a.id, dp.email, d.full_name, a.starts_at, a.ends_at, a.status,
+               a.starts_at <= CURRENT_TIMESTAMP AS started
         FROM appointments a
         JOIN doctors d ON d.id = a.doctor_id
         JOIN public.doctor_patients(%s) dp ON dp.id = a.patient_user_id
@@ -256,10 +257,12 @@ def doctor_records(request: Request, appointment_id: str):
                 "ends_at": appointment[4],
                 "status": appointment[5],
             },
-            "can_edit": appointment[5] == "scheduled",
+            "can_edit": appointment[5] in ("scheduled", "completed"),
+            "can_complete": appointment[5] == "scheduled" and appointment[6],
             "notes": notes,
             "prescriptions": prescriptions,
             "saved": request.query_params.get("saved"),
+            "completed": request.query_params.get("completed"),
             "error": request.query_params.get("error"),
         },
     )
@@ -309,7 +312,8 @@ def save_doctor_record(
     conn = db_as(user)
     cur = conn.cursor()
     # Only locate the doctor's own appointment; the RLS policies decide
-    # whether a record may be written (scheduled visit, last 12 months).
+    # whether a record may be written (scheduled or completed visit,
+    # last 12 months).
     cur.execute(
         """
         SELECT a.id, a.doctor_id, a.patient_user_id
@@ -352,6 +356,46 @@ def save_doctor_record(
     conn.close()
     return RedirectResponse(
         f"/doctor/appointments/{appointment_id}/records?saved={record_type}",
+        status_code=303,
+    )
+
+
+@router.post("/doctor/appointments/{appointment_id}/complete")
+def complete_doctor_appointment(request: Request, appointment_id: str):
+    user, denied = require_user(request, "doctor")
+    if denied:
+        return denied
+    appointment_id = parse_strict_int(appointment_id, min_value=1)
+    if appointment_id is None:
+        return RedirectResponse(
+            "/doctor/appointments?error=record_unavailable", status_code=303
+        )
+
+    conn = db_as(user)
+    cur = conn.cursor()
+    # RLS allows only the doctor's own started scheduled visit -> completed.
+    try:
+        cur.execute(
+            "UPDATE appointments SET status = 'completed' WHERE id = %s",
+            (appointment_id,),
+        )
+        done = cur.rowcount == 1
+    except psycopg2.errors.InsufficientPrivilege:
+        done = False
+    if not done:
+        conn.rollback()
+        cur.close()
+        conn.close()
+        return RedirectResponse(
+            f"/doctor/appointments/{appointment_id}/records?error=complete_unavailable",
+            status_code=303,
+        )
+    record_audit_event(cur, "appointment.complete", "appointment", appointment_id)
+    conn.commit()
+    cur.close()
+    conn.close()
+    return RedirectResponse(
+        f"/doctor/appointments/{appointment_id}/records?completed=1",
         status_code=303,
     )
 

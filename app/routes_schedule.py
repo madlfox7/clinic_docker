@@ -240,7 +240,7 @@ def _load_calendar(cur, start_day, day_count, doctor_id, role):
         LEFT JOIN services svc ON svc.id = s.service_id
         LEFT JOIN appointments a
           ON a.doctor_id = s.doctor_id
-         AND a.status = 'scheduled'
+         AND a.status IN ('scheduled', 'completed')
          AND a.starts_at < s.ends_at
          AND a.reserved_ends_at > s.starts_at
         LEFT JOIN slots booked_slot ON booked_slot.id = a.slot_id

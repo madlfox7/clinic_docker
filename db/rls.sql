@@ -14,7 +14,7 @@ AS $function$
     FROM public.appointments AS a
     WHERE a.doctor_id = doc_id
       AND a.patient_user_id = pat_id
-      AND a.status = 'scheduled'
+      AND a.status IN ('scheduled', 'completed')
       AND a.starts_at > CURRENT_TIMESTAMP - INTERVAL '12 months'
   );
 $function$;
@@ -38,7 +38,7 @@ AS $function$
     WHERE a.id = target_appointment_id
       AND a.doctor_id = target_doctor_id
       AND a.patient_user_id = target_patient_user_id
-      AND a.status IN ('scheduled', 'cancelled')
+      AND a.status IN ('scheduled', 'completed', 'cancelled')
       AND a.starts_at > CURRENT_TIMESTAMP - INTERVAL '12 months'
   );
 $function$;
@@ -64,7 +64,7 @@ AS $function$
       FROM public.appointments AS a
       WHERE a.doctor_id = d.id
         AND a.patient_user_id = u.id
-        AND a.status IN ('scheduled', 'cancelled')
+        AND a.status IN ('scheduled', 'completed', 'cancelled')
         AND a.starts_at > CURRENT_TIMESTAMP - INTERVAL '12 months'
     );
 $function$;
@@ -103,7 +103,7 @@ AS $function$
      AND a.starts_at < s.ends_at
      AND a.reserved_ends_at > s.starts_at
     WHERE s.id = target_slot_id
-      AND a.status = 'scheduled'
+      AND a.status IN ('scheduled', 'completed')
   );
 $function$;
 
@@ -166,7 +166,7 @@ AS $function$
         WHERE a.doctor_id = s.doctor_id
           AND a.starts_at < s.ends_at
           AND a.reserved_ends_at > s.starts_at
-          AND a.status = 'scheduled'
+          AND a.status IN ('scheduled', 'completed')
       )
       AND NOT EXISTS (
         SELECT 1
@@ -199,7 +199,7 @@ AS $function$
     WHERE a.id = target_appointment_id
       AND a.doctor_id = target_doctor_id
       AND a.patient_user_id = target_patient_user_id
-      AND a.status = 'scheduled'
+      AND a.status IN ('scheduled', 'completed')
       AND a.starts_at > CURRENT_TIMESTAMP - INTERVAL '12 months'
       AND d.user_id = NULLIF(current_setting('app.user_id', true), '')::int
   );
@@ -1599,6 +1599,7 @@ GRANT INSERT (
   ON public.appointments TO app_patient, app_registrar;
 GRANT SELECT ON public.appointments TO app_doctor, app_admin;
 GRANT UPDATE (status), DELETE ON public.appointments TO app_admin;
+GRANT UPDATE (status) ON public.appointments TO app_doctor;
 GRANT USAGE, SELECT ON SEQUENCE public.appointments_id_seq TO app_patient, app_registrar;
 
 GRANT SELECT ON public.visit_notes, public.prescriptions TO app_patient;
@@ -1767,8 +1768,8 @@ CREATE POLICY appointments_admin_cancel ON public.appointments
 
 CREATE POLICY appointments_admin_update ON public.appointments
   FOR UPDATE TO app_admin
-  USING (true)
-  WITH CHECK (true);
+  USING (status = 'scheduled')
+  WITH CHECK (status = 'cancelled');
 CREATE POLICY appointments_admin_delete ON public.appointments
   FOR DELETE TO app_admin
   USING (status = 'cancelled');
@@ -2127,6 +2128,27 @@ ALTER TABLE public.visit_notes ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.visit_notes FORCE ROW LEVEL SECURITY;
 ALTER TABLE public.prescriptions ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.prescriptions FORCE ROW LEVEL SECURITY;
+
+-- doctor may only mark own started visit (last 12 months) as completed
+DROP POLICY IF EXISTS appointments_doctor_complete ON public.appointments;
+CREATE POLICY appointments_doctor_complete ON public.appointments
+  FOR UPDATE TO app_doctor
+  USING (
+    status = 'scheduled'
+    AND starts_at <= CURRENT_TIMESTAMP
+    AND starts_at > CURRENT_TIMESTAMP - INTERVAL '12 months'
+    AND doctor_id IN (
+      SELECT id FROM public.doctors
+      WHERE user_id = NULLIF(current_setting('app.user_id', true), '')::int
+    )
+  )
+  WITH CHECK (
+    status = 'completed'
+    AND doctor_id IN (
+      SELECT id FROM public.doctors
+      WHERE user_id = NULLIF(current_setting('app.user_id', true), '')::int
+    )
+  );
 
 -- registrar may only cancel a scheduled future visit
 DROP POLICY IF EXISTS appointments_registrar_update ON public.appointments;

@@ -973,7 +973,7 @@ def _purge_slots_without_scheduled(cur, where_sql, params):
               WHERE {where_sql}
                 AND NOT EXISTS (
                     SELECT 1 FROM appointments live
-                    WHERE live.slot_id = s.id AND live.status = 'scheduled'
+                    WHERE live.slot_id = s.id AND live.status IN ('scheduled', 'completed')
                 )
           )
         """,

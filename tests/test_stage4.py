@@ -1397,6 +1397,183 @@ def test_db_blocks_medical_writes_on_cancelled_or_foreign_visit(table):
 		assert "permission denied" in denied.stderr
 
 
+def _past_visit(doctor_email, patient_email=PAT, status="scheduled"):
+	for _ in range(20):
+		days = 20 + int(uuid.uuid4().int % 300)
+		hours = int(uuid.uuid4().int % 10)
+		result = _run_psql_raw(f"""
+			INSERT INTO appointments
+			  (slot_id, patient_user_id, doctor_id, starts_at, ends_at, reserved_ends_at, status)
+			SELECT s.id, (SELECT id FROM users WHERE email = '{patient_email}'), s.doctor_id,
+			       t.st, t.st + make_interval(mins => s.duration_minutes),
+			       t.st + (s.ends_at - s.starts_at), '{status}'
+			FROM slots s
+			JOIN doctors d ON d.id = s.doctor_id
+			JOIN users u ON u.id = d.user_id AND u.email = '{doctor_email}'
+			CROSS JOIN LATERAL (
+			  SELECT date_trunc('hour', now()::timestamp)
+			         - interval '{days} days' - interval '{hours} hours' AS st
+			) t
+			ORDER BY s.id LIMIT 1
+			RETURNING id;
+		""")
+		if result.returncode == 0:
+			return int(result.stdout.split()[0])
+	pytest.fail("could not create a past visit")
+
+
+def _as_role(role, email, sql):
+	return _run_psql_raw(
+		"BEGIN;\n"
+		f"SELECT set_config('app.user_id', (SELECT id FROM users WHERE email = '{email}')::text, true);\n"
+		f"SET LOCAL ROLE {role};\n{sql}\nCOMMIT;\n"
+	)
+
+
+def _status(appointment_id):
+	return psql(f"SELECT status FROM appointments WHERE id = {appointment_id}")
+
+
+def _drop_visit(appointment_id):
+	psql(
+		f"DELETE FROM prescriptions WHERE appointment_id = {appointment_id};"
+		f"DELETE FROM visit_notes WHERE appointment_id = {appointment_id};"
+		f"DELETE FROM appointments WHERE id = {appointment_id}"
+	)
+
+
+def test_only_doctor_can_complete_own_started_visit():
+	visit = _past_visit(DOC)
+	try:
+		complete = f"UPDATE appointments SET status = 'completed' WHERE id = {visit};"
+		for role, email in (
+			("app_patient", PAT),
+			("app_registrar", REG),
+			("app_admin", ADMIN),
+			("app_doctor", DOC2),
+		):
+			_as_role(role, email, complete)
+			assert _status(visit) == "scheduled", role
+
+		done = _as_role("app_doctor", DOC, complete)
+		assert done.returncode == 0, done.stderr
+		assert "UPDATE 1" in done.stdout
+		assert _status(visit) == "completed"
+
+		# completed is final: nobody can cancel or reopen it
+		for role, email in (
+			("app_patient", PAT),
+			("app_registrar", REG),
+			("app_admin", ADMIN),
+			("app_doctor", DOC),
+		):
+			for target in ("cancelled", "scheduled"):
+				_as_role(
+					role, email,
+					f"UPDATE appointments SET status = '{target}' WHERE id = {visit};",
+				)
+				assert _status(visit) == "completed", (role, target)
+	finally:
+		_drop_visit(visit)
+
+
+def test_doctor_cannot_complete_future_visit():
+	with client() as pat:
+		login(pat, PAT)
+		visit = _book_for_patient(pat, DOC)
+		try:
+			_as_role(
+				"app_doctor", DOC,
+				f"UPDATE appointments SET status = 'completed' WHERE id = {visit};",
+			)
+			assert _status(visit) == "scheduled"
+		finally:
+			pat.post(f"/appointments/{visit}/cancel")
+
+
+def test_records_on_completed_visit_and_survive_status_change():
+	visit = _past_visit(DOC)
+	cancelled_visit = _past_visit(DOC, status="cancelled")
+	marker = uuid.uuid4().hex[:8]
+	try:
+		with client() as doctor, client() as pat:
+			login(doctor, DOC)
+			login(pat, PAT)
+			record_url = f"/doctor/appointments/{visit}/records"
+			page = doctor.get(record_url).text
+			assert "Mark as completed" in page
+			saved = doctor.post(
+				record_url, data={"record_type": "note", "body": f"before-{marker}"}
+			)
+			assert "saved=note" in str(saved.url)
+
+			done = doctor.post(f"/doctor/appointments/{visit}/complete")
+			assert "completed=1" in str(done.url)
+			assert _status(visit) == "completed"
+			page = done.text
+			assert "Mark as completed" not in page
+			assert "<textarea" in page
+			assert f"before-{marker}" in page
+
+			for record_type in ("note", "prescription"):
+				saved = doctor.post(
+					record_url, data={"record_type": record_type, "body": f"after-{marker}"}
+				)
+				assert f"saved={record_type}" in str(saved.url)
+			assert psql(
+				f"SELECT count(*) FROM visit_notes WHERE appointment_id = {visit}"
+			) == "2"
+
+			my = pat.get("/my").text
+			assert "(completed)" in my
+			assert f"before-{marker}" in my and f"after-{marker}" in my
+
+			again = doctor.post(f"/doctor/appointments/{visit}/complete")
+			assert "error=complete_unavailable" in str(again.url)
+
+			cancelled_url = f"/doctor/appointments/{cancelled_visit}/records"
+			page = doctor.get(cancelled_url).text
+			assert "<textarea" not in page and "Mark as completed" not in page
+			blocked = doctor.post(
+				cancelled_url, data={"record_type": "note", "body": f"late-{marker}"}
+			)
+			assert "error=record_unavailable" in str(blocked.url)
+			blocked = doctor.post(f"/doctor/appointments/{cancelled_visit}/complete")
+			assert "error=complete_unavailable" in str(blocked.url)
+
+		for role in ("app_admin", "app_registrar"):
+			denied = _as_role(role, ADMIN if role == "app_admin" else REG,
+				f"SELECT body FROM visit_notes WHERE appointment_id = {visit};")
+			assert denied.returncode != 0
+			assert "permission denied" in denied.stderr
+	finally:
+		_drop_visit(visit)
+		_drop_visit(cancelled_visit)
+
+
+def test_notes_survive_cancel_of_scheduled_visit():
+	visit = _past_visit(DOC)
+	try:
+		wrote = _as_role(
+			"app_doctor", DOC,
+			"INSERT INTO visit_notes (appointment_id, doctor_id, patient_user_id, body) "
+			f"SELECT id, doctor_id, patient_user_id, 'kept' FROM appointments WHERE id = {visit};",
+		)
+		assert "INSERT 0 1" in wrote.stdout, wrote.stderr
+		psql(f"UPDATE appointments SET status = 'cancelled' WHERE id = {visit}")
+		assert psql(
+			f"SELECT count(*) FROM visit_notes WHERE appointment_id = {visit}"
+		) == "1"
+		late = _as_role(
+			"app_doctor", DOC,
+			"INSERT INTO visit_notes (appointment_id, doctor_id, patient_user_id, body) "
+			f"SELECT id, doctor_id, patient_user_id, 'late' FROM appointments WHERE id = {visit};",
+		)
+		assert late.returncode != 0 and "row-level security" in late.stderr
+	finally:
+		_drop_visit(visit)
+
+
 def test_admin_can_view_doctor_slots_without_actions():
 	with client() as admin:
 		login(admin, ADMIN)
