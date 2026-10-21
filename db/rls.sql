@@ -2126,4 +2126,11 @@ ALTER TABLE public.visit_notes FORCE ROW LEVEL SECURITY;
 ALTER TABLE public.prescriptions ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.prescriptions FORCE ROW LEVEL SECURITY;
 
+-- registrar may only cancel a scheduled future visit
+DROP POLICY IF EXISTS appointments_registrar_update ON public.appointments;
+CREATE POLICY appointments_registrar_update ON public.appointments
+  FOR UPDATE TO app_registrar
+  USING (status = 'scheduled' AND starts_at > CURRENT_TIMESTAMP)
+  WITH CHECK (status = 'cancelled');
+
 COMMIT;
