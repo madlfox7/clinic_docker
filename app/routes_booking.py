@@ -742,6 +742,22 @@ def my_appointments(request: Request):
         }
         for r in cur.fetchall()
     ]
+    items_by_id = {item["id"]: item for item in items}
+    for item in items:
+        item["notes"] = []
+        item["prescriptions"] = []
+    cur.execute(
+        """
+        SELECT 'notes', appointment_id, id, body FROM visit_notes
+        UNION ALL
+        SELECT 'prescriptions', appointment_id, id, body FROM prescriptions
+        ORDER BY 2, 3
+        """
+    )
+    for kind, appointment_id, _record_id, body in cur.fetchall():
+        item = items_by_id.get(appointment_id)
+        if item is not None:
+            item[kind].append(body)
     booking_confirmation = None
     raw_confirmation_id = request.query_params.get("appointment_id")
     confirmation_id = (

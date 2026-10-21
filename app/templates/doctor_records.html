@@ -28,7 +28,7 @@
 {% if can_edit %}
 <form method="post" action="/doctor/appointments/{{ appointment.id }}/records">
   <input type="hidden" name="record_type" value="note">
-  <label>Note
+  <label>Report / diagnosis
     <textarea name="body" rows="6" maxlength="4000" required></textarea>
   </label>
   <button type="submit">Save note</button>

@@ -1,3 +1,4 @@
+import psycopg2.errors
 from fastapi import APIRouter, Form, Request
 from fastapi.responses import RedirectResponse
 
@@ -307,38 +308,36 @@ def save_doctor_record(
 
     conn = db_as(user)
     cur = conn.cursor()
-    if record_type == "note":
-        cur.execute(
-            """
-            INSERT INTO visit_notes (appointment_id, doctor_id, patient_user_id, body)
-            SELECT a.id, d.id, a.patient_user_id, %s
-            FROM appointments a
-            JOIN doctors d ON d.id = a.doctor_id
-            WHERE a.id = %s
-              AND d.user_id = %s
-              AND a.status = 'scheduled'
-              AND a.starts_at > CURRENT_TIMESTAMP - INTERVAL '12 months'
-            """,
-            (body, appointment_id, user["id"]),
-        )
-        action = "medical.note.save"
-    else:
-        cur.execute(
-            """
-            INSERT INTO prescriptions (appointment_id, doctor_id, patient_user_id, body)
-            SELECT a.id, d.id, a.patient_user_id, %s
-            FROM appointments a
-            JOIN doctors d ON d.id = a.doctor_id
-            WHERE a.id = %s
-              AND d.user_id = %s
-              AND a.status = 'scheduled'
-              AND a.starts_at > CURRENT_TIMESTAMP - INTERVAL '12 months'
-            """,
-            (body, appointment_id, user["id"]),
-        )
-        action = "medical.prescription.add"
+    # Only locate the doctor's own appointment; the RLS policies decide
+    # whether a record may be written (scheduled visit, last 12 months).
+    cur.execute(
+        """
+        SELECT a.id, a.doctor_id, a.patient_user_id
+        FROM appointments a
+        JOIN doctors d ON d.id = a.doctor_id
+        WHERE a.id = %s
+          AND d.user_id = %s
+        """,
+        (appointment_id, user["id"]),
+    )
+    appointment = cur.fetchone()
+    table = "visit_notes" if record_type == "note" else "prescriptions"
+    action = "medical.note.save" if record_type == "note" else "medical.prescription.add"
+    saved = False
+    if appointment is not None:
+        try:
+            cur.execute(
+                f"""
+                INSERT INTO {table} (appointment_id, doctor_id, patient_user_id, body)
+                VALUES (%s, %s, %s, %s)
+                """,
+                (appointment[0], appointment[1], appointment[2], body),
+            )
+            saved = cur.rowcount == 1
+        except psycopg2.errors.InsufficientPrivilege:
+            saved = False
 
-    if cur.rowcount != 1:
+    if not saved:
         conn.rollback()
         cur.close()
         conn.close()

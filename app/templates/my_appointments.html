@@ -30,6 +30,16 @@
           <button type="submit">Cancel appointment</button>
         </form>
       {% endif %}
+      {% if a.notes %}
+        <div>Report / diagnosis:
+          {% for body in a.notes %}<pre>{{ body }}</pre>{% endfor %}
+        </div>
+      {% endif %}
+      {% if a.prescriptions %}
+        <div>Prescription:
+          <ul>{% for body in a.prescriptions %}<li>{{ body }}</li>{% endfor %}</ul>
+        </div>
+      {% endif %}
     </li>
   {% endfor %}
 </ul>

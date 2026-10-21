@@ -1263,6 +1263,140 @@ def test_medical_records_are_scoped_and_audited():
 					pat.post(f"/appointments/{appointment_id}/cancel")
 
 
+def _book_for_patient(pat, doctor_email):
+	doctor_id = psql(
+		f"SELECT id FROM doctors WHERE user_id = "
+		f"(SELECT id FROM users WHERE email = '{doctor_email}')"
+	)
+	existing_ids = set(appointment_ids(pat.get("/my").text))
+	for slot_id in slot_ids(pat.get(f"/doctors/{doctor_id}/slots").text):
+		pat.post(f"/slots/{slot_id}/book")
+		created_ids = set(appointment_ids(pat.get("/my").text)) - existing_ids
+		if created_ids:
+			return int(created_ids.pop())
+	pytest.fail("no bookable slot for medical record test")
+
+
+def test_medical_records_follow_visit_status_in_ui():
+	with client() as pat, client() as doctor, client() as other_doctor:
+		login(pat, PAT)
+		login(doctor, DOC)
+		login(other_doctor, DOC2)
+		appointment_id = None
+		marker = uuid.uuid4().hex[:8]
+		diagnosis = f"diagnosis-{marker}"
+		prescription = f"prescription-{marker}"
+		late_note = f"late-note-{marker}"
+		late_prescription = f"late-prescription-{marker}"
+		try:
+			appointment_id = _book_for_patient(pat, DOC)
+			record_url = f"/doctor/appointments/{appointment_id}/records"
+			page = doctor.get(record_url)
+			assert "Report / diagnosis" in page.text
+			assert "<label>Prescription" in page.text
+			assert "<textarea" in page.text
+
+			saved = doctor.post(record_url, data={"record_type": "note", "body": diagnosis})
+			assert "saved=note" in str(saved.url)
+			saved = doctor.post(
+				record_url, data={"record_type": "prescription", "body": prescription}
+			)
+			assert "saved=prescription" in str(saved.url)
+
+			foreign = other_doctor.post(
+				record_url, data={"record_type": "note", "body": f"foreign-{marker}"}
+			)
+			assert "error=record_unavailable" in str(foreign.url)
+
+			my = pat.get("/my").text
+			assert "Report / diagnosis:" in my and diagnosis in my
+			assert "Prescription:" in my and prescription in my
+			assert f"foreign-{marker}" not in my
+
+			cancelled = pat.post(f"/appointments/{appointment_id}/cancel")
+			assert "cancelled=1" in str(cancelled.url)
+
+			my = pat.get("/my").text
+			assert diagnosis in my and prescription in my
+			read_only = doctor.get(record_url)
+			assert diagnosis in read_only.text and prescription in read_only.text
+			assert "read-only" in read_only.text
+			assert "<textarea" not in read_only.text
+			for record_type, body in (("note", late_note), ("prescription", late_prescription)):
+				blocked = doctor.post(record_url, data={"record_type": record_type, "body": body})
+				assert "error=record_unavailable" in str(blocked.url)
+			my = pat.get("/my").text
+			assert late_note not in my and late_prescription not in my
+			assert psql(
+				f"SELECT count(*) FROM visit_notes WHERE appointment_id = {appointment_id}"
+			) == "1"
+			assert psql(
+				f"SELECT count(*) FROM prescriptions WHERE appointment_id = {appointment_id}"
+			) == "1"
+		finally:
+			if appointment_id is not None:
+				psql(
+					f"DELETE FROM prescriptions WHERE appointment_id = {appointment_id};"
+					f"DELETE FROM visit_notes WHERE appointment_id = {appointment_id}"
+				)
+				if str(appointment_id) in appointment_ids(pat.get("/my").text):
+					pat.post(f"/appointments/{appointment_id}/cancel")
+
+
+def _doctor_insert_sql(table, appointment_sql, doctor_user_email, status):
+	return f"""
+		BEGIN;
+		INSERT INTO appointments (slot_id, patient_user_id, doctor_id, starts_at, ends_at, reserved_ends_at, status)
+		  SELECT id, (SELECT id FROM users WHERE email = '{PAT}'), doctor_id, starts_at,
+		         starts_at + make_interval(mins => duration_minutes), ends_at, '{status}'
+		  FROM ({appointment_sql}) AS slot
+		  RETURNING id AS probe_id, doctor_id AS probe_doctor, patient_user_id AS probe_patient \\gset
+		SELECT set_config('app.user_id',
+		  (SELECT id FROM users WHERE email = '{doctor_user_email}')::text, true);
+		SET LOCAL ROLE app_doctor;
+		INSERT INTO {table} (appointment_id, doctor_id, patient_user_id, body)
+		  VALUES (:probe_id, :probe_doctor, :probe_patient, 'probe');
+		ROLLBACK;
+	"""
+
+
+def _run_psql_raw(sql):
+	return subprocess.run(
+		["docker", "compose", "exec", "-T", "db", "psql", "-X", "-U", "clinic",
+		 "-d", "clinic", "-v", "ON_ERROR_STOP=1", "-At"],
+		cwd=ROOT, input=sql, capture_output=True, text=True,
+	)
+
+
+@pytest.mark.parametrize("table", ["visit_notes", "prescriptions"])
+def test_db_blocks_medical_writes_on_cancelled_or_foreign_visit(table):
+	free_slot = (
+		"SELECT s.* FROM slots s JOIN doctors d ON d.id = s.doctor_id "
+		f"JOIN users u ON u.id = d.user_id AND u.email = '{DOC}' "
+		"WHERE s.starts_at > now() + interval '1 hour' "
+		"AND NOT EXISTS (SELECT 1 FROM appointments a WHERE a.slot_id = s.id) "
+		"ORDER BY s.id LIMIT 1"
+	)
+	own_scheduled = _run_psql_raw(_doctor_insert_sql(table, free_slot, DOC, "scheduled"))
+	assert own_scheduled.returncode == 0, own_scheduled.stderr
+	assert own_scheduled.stdout.count("INSERT 0 1") == 2, own_scheduled.stdout
+
+	own_cancelled = _run_psql_raw(_doctor_insert_sql(table, free_slot, DOC, "cancelled"))
+	assert own_cancelled.returncode != 0
+	assert "row-level security" in own_cancelled.stderr
+
+	foreign = _run_psql_raw(_doctor_insert_sql(table, free_slot, DOC2, "scheduled"))
+	assert foreign.returncode != 0
+	assert "row-level security" in foreign.stderr
+
+	for role in ("app_admin", "app_registrar"):
+		denied = _run_psql_raw(
+			f"BEGIN; SET LOCAL ROLE {role}; SELECT body FROM {table} LIMIT 1; ROLLBACK;"
+		)
+		assert denied.returncode != 0
+		assert "permission denied" in denied.stderr
+
+
 def test_admin_can_view_doctor_slots_without_actions():
 	with client() as admin:
 		login(admin, ADMIN)
