@@ -195,11 +195,13 @@ AS $function$
   SELECT EXISTS (
     SELECT 1
     FROM public.appointments AS a
+    JOIN public.doctors AS d ON d.id = a.doctor_id
     WHERE a.id = target_appointment_id
       AND a.doctor_id = target_doctor_id
       AND a.patient_user_id = target_patient_user_id
       AND a.status = 'scheduled'
       AND a.starts_at > CURRENT_TIMESTAMP - INTERVAL '12 months'
+      AND d.user_id = NULLIF(current_setting('app.user_id', true), '')::int
   );
 $function$;
 
