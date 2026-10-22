@@ -240,7 +240,6 @@ def _load_calendar(cur, start_day, day_count, doctor_id, role):
         LEFT JOIN services svc ON svc.id = s.service_id
         LEFT JOIN appointments a
           ON a.doctor_id = s.doctor_id
-         AND a.status IN ('scheduled', 'completed')
          AND a.starts_at < s.ends_at
          AND a.reserved_ends_at > s.starts_at
         LEFT JOIN slots booked_slot ON booked_slot.id = a.slot_id
@@ -292,7 +291,8 @@ def _load_calendar(cur, start_day, day_count, doctor_id, role):
             },
         )
         if row[12] is not None:
-            slot["has_appointment"] = True
+            if row[15] != "cancelled":
+                slot["has_appointment"] = True
             appointment = day_state["appointments"].setdefault(
                 row[12],
                 {

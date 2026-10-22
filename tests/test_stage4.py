@@ -4017,3 +4017,32 @@ def test_cancel_requires_csrf_token():
 		)
 		assert cancelled.status_code == 200
 		assert appointment_id not in appointment_ids(pat.get("/my").text)
+
+
+def test_doctor_calendar_shows_cancelled_visit_and_slot_stays_bookable():
+	with client() as pat, client() as pat2, client() as doctor:
+		login(pat, PAT)
+		login(pat2, PAT2)
+		login(doctor, DOC)
+		appointment_id = _book_for_patient(pat, DOC)
+		slot_id, day, start = psql(
+			f"SELECT slot_id, starts_at::date, to_char(starts_at, 'HH24:MI') "
+			f"FROM appointments WHERE id = {appointment_id}"
+		).split("|")
+		pat.post(f"/appointments/{appointment_id}/cancel")
+		assert _status(appointment_id) == "cancelled"
+
+		calendar = doctor.get(f"/doctor/calendar?day={day}").text
+		assert re.search(
+			rf'<li style="color: gray">\s*{start}[\s\S]*?{re.escape(PAT)} — cancelled',
+			calendar,
+		)
+		assert re.search(rf"<li>\s*{start}[\s\S]*?Available", calendar)
+
+		existing_ids = set(appointment_ids(pat2.get("/my").text))
+		pat2.post(f"/slots/{slot_id}/book")
+		created = set(appointment_ids(pat2.get("/my").text)) - existing_ids
+		assert created, "cancelled slot was not bookable again"
+		new_id = created.pop()
+		assert psql(f"SELECT slot_id FROM appointments WHERE id = {new_id}") == slot_id
+		pat2.post(f"/appointments/{new_id}/cancel")
