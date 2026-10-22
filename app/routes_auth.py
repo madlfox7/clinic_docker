@@ -173,7 +173,11 @@ def require_user(request: Request, *roles):
     if status != "ok":
         return None, RedirectResponse("/login", status_code=303)
     if roles and user["role"] not in roles:
-        return None, RedirectResponse("/login", status_code=303)
+        return None, templates.TemplateResponse(
+            "forbidden.html",
+            {"request": request, "role": user["role"]},
+            status_code=403,
+        )
     return user, None
 
 

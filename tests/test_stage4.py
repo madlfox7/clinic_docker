@@ -1026,9 +1026,9 @@ def test_admin_cannot_set_email_or_open_medical_text():
 	with client() as admin:
 		login(admin, ADMIN)
 		records = admin.get("/my/records")
-		assert records.url.path == "/login"
+		assert records.status_code == 403
 		doctor_page = admin.get("/doctor/patients")
-		assert doctor_page.url.path == "/login"
+		assert doctor_page.status_code == 403
 		users = admin.get("/admin/users")
 		assert 'name="password"' not in users.text
 		assert 'name="new_email"' not in users.text
@@ -1111,7 +1111,7 @@ def test_patient_cannot_open_doctor_appointments():
 	with client() as c:
 		login(c, PAT)
 		r = c.get("/doctor/appointments")
-		assert "/login" in str(r.url) or "patient" in r.text.lower()
+		assert r.status_code == 403
 		assert "Manage patients" not in r.text
 
 
@@ -1121,7 +1121,7 @@ def test_doctor_sees_only_own_cabinet():
 		r = c.get("/doctor/appointments")
 		assert r.status_code == 200
 		mine = c.get("/my")
-		assert "/login" in str(mine.url) or "Login" in mine.text
+		assert mine.status_code == 403
 
 
 def test_medical_records_are_scoped_and_audited():
@@ -1676,7 +1676,7 @@ def test_registrar_patient_directory_search_and_booking_prefill():
 		assert f'name="patient_email"' in slots_page.text
 
 		denied = patient.get("/registrar/patients/search?q=pat")
-		assert "/login" in str(denied.url)
+		assert denied.status_code == 403
 
 
 def test_registrar_patient_directory_marks_blocked_accounts():
@@ -1934,7 +1934,7 @@ def test_admin_slot_generator_respects_time_off_and_role():
 			f"/admin/doctors/{doctor_id}/generate",
 			data={"from_date": "2026-10-19", "to_date": "2026-10-19"},
 		)
-		assert "/login" in str(unauthorized.url)
+		assert unauthorized.status_code == 403
 
 
 def test_slot_generator_advances_across_nonworking_dates():
@@ -2043,7 +2043,7 @@ def test_admin_schedule_configuration_is_admin_only_and_repeatable():
 			assert response.status_code == 200
 			assert "/admin/schedule?saved=" in str(response.url)
 			unauthorized = registrar.post(path, data=data)
-			assert "/login" in str(unauthorized.url)
+			assert unauthorized.status_code == 403
 
 		past_day = psql("SELECT CURRENT_DATE - 1")
 		past_time_off = admin.post(
@@ -2313,7 +2313,7 @@ def test_apply_hours_removes_free_slots_outside_window_only():
 				"/admin/schedule/apply-hours",
 				data={"doctor_ids": doctor_id},
 			)
-			assert "/login" in str(denied.url)
+			assert denied.status_code == 403
 			applied = admin.post(
 				"/admin/schedule/apply-hours",
 				data={"doctor_ids": doctor_id},
@@ -2465,7 +2465,7 @@ def test_session_role_and_block_come_from_database():
 			assert admin_page.status_code == 200
 			assert "Manage patients" in admin_page.text
 			mine = pat.get("/my")
-			assert "/login" in str(mine.url)
+			assert mine.status_code == 403
 		finally:
 			psql("UPDATE users SET role = 'patient' WHERE email = 'pat@clinic.local'")
 
@@ -3971,7 +3971,7 @@ def test_admin_clinic_settings_are_visible_and_admin_only():
 
 			login(doctor, DOC)
 			forbidden = doctor.get("/admin/settings")
-			assert "/login" in str(forbidden.url)
+			assert forbidden.status_code == 403
 
 	finally:
 		psql(
@@ -4046,3 +4046,26 @@ def test_doctor_calendar_shows_cancelled_visit_and_slot_stays_bookable():
 		new_id = created.pop()
 		assert psql(f"SELECT slot_id FROM appointments WHERE id = {new_id}") == slot_id
 		pat2.post(f"/appointments/{new_id}/cancel")
+
+
+def test_wrong_role_gets_403_and_guest_goes_to_login():
+	with client() as guest:
+		page = guest.get("/admin/users")
+		assert page.url.path == "/login"
+	with client() as pat, client() as doctor, client() as registrar:
+		login(pat, PAT)
+		login(doctor, DOC)
+		login(registrar, REG)
+		for c, path in (
+			(pat, "/admin/users"),
+			(pat, "/doctor/patients"),
+			(doctor, "/registrar/patients"),
+			(registrar, "/my"),
+		):
+			denied = c.get(path)
+			assert denied.status_code == 403
+			assert denied.url.path == path
+			assert "Нет доступа" in denied.text
+		post = pat.post("/admin/holidays", data={"holiday_day": "2030-01-01", "name": "x"})
+		assert post.status_code == 403
+		assert "Нет доступа" in post.text
