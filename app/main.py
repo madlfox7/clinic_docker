@@ -2,9 +2,10 @@ import logging
 import os
 import re
 
-from fastapi import FastAPI
+from fastapi import Depends, FastAPI
 from starlette.middleware.sessions import SessionMiddleware
 
+from csrf import verify_csrf
 from routes_admin import router as admin_router
 from routes_auth import router as auth_router
 from routes_booking import router as booking_router
@@ -70,7 +71,7 @@ for _logger_name in ("uvicorn.access", "uvicorn", "uvicorn.error"):
 
 
 
-app = FastAPI()
+app = FastAPI(dependencies=[Depends(verify_csrf)])
 app.add_middleware(SessionMiddleware, secret_key=SESSION_SECRET)
 app.include_router(auth_router)
 app.include_router(booking_router)

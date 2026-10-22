@@ -25,6 +25,7 @@
     <p>{{ doctor.email }}</p>
     <p>{{ doctor.future_appointments }} future scheduled appointment(s)</p>
     <form method="post" action="/admin/doctors/{{ doctor.id }}">
+  <input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}">
       <label>Name <input name="full_name" value="{{ doctor.full_name }}" minlength="2" maxlength="100" required></label>
       <label>Specialty <input name="specialty" value="{{ doctor.specialty }}" minlength="2" maxlength="100" required></label>
       <label>Experience (years)
@@ -34,17 +35,20 @@
     </form>
     {% if not doctor.blocked %}
       <form method="post" action="/admin/users/{{ doctor.user_id }}/reset-link">
+  <input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}">
         <input type="hidden" name="next_page" value="doctors">
         <button type="submit">Send reset link</button>
       </form>
     {% endif %}
     {% if doctor.blocked %}
       <form method="post" action="/admin/doctors/{{ doctor.id }}/activate">
+  <input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}">
         <button type="submit">Reactivate doctor</button>
       </form>
     {% else %}
       <form method="post" action="/admin/doctors/{{ doctor.id }}/deactivate"
         onsubmit="return confirm('Deactivate this doctor? {{ doctor.future_appointments }} future appointment(s) will remain scheduled and will not be cancelled.')">
+  <input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}">
         <button type="submit">Deactivate doctor</button>
       </form>
     {% endif %}

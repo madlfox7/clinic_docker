@@ -10,6 +10,7 @@
 {% if completed == "1" %}<p>Appointment marked as completed.</p>{% endif %}
 {% if can_complete %}
 <form method="post" action="/doctor/appointments/{{ appointment.id }}/complete" onsubmit="return confirm('Mark this appointment as completed?');">
+  <input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}">
   <button type="submit">Mark as completed</button>
 </form>
 {% endif %}
@@ -35,6 +36,7 @@
 {% endif %}
 {% if can_edit %}
 <form method="post" action="/doctor/appointments/{{ appointment.id }}/records">
+  <input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}">
   <input type="hidden" name="record_type" value="note">
   <label>Report / diagnosis
     <textarea name="body" rows="6" maxlength="4000" required></textarea>
@@ -55,6 +57,7 @@
 </ul>
 {% if can_edit %}
 <form method="post" action="/doctor/appointments/{{ appointment.id }}/records">
+  <input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}">
   <input type="hidden" name="record_type" value="prescription">
   <label>Prescription
     <textarea name="body" rows="4" maxlength="4000" required></textarea>

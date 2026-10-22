@@ -36,6 +36,7 @@
 {% if notifications_saved == "1" %}<p>Email notification setting saved.</p>{% endif %}
 {% if notifications_error == "1" %}<p>Could not save the email notification setting.</p>{% endif %}
 <form method="post" action="/me/notifications">
+  <input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}">
   <label>
     <input type="checkbox" name="email_notifications" value="1" {% if email_notifications %}checked{% endif %}>
     Receive appointment emails
@@ -52,6 +53,7 @@
 {% elif email_error == "failed" %}<p>The confirmation email could not be sent. Try again later.</p>
 {% elif email_error == "rate_limited" %}<p>Too many email change attempts. Try again later.</p>{% endif %}
 <form method="post" action="/me/email">
+  <input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}">
   <label>New email <input name="new_email" type="email" maxlength="254" required></label>
   <button type="submit">Send confirmation links</button>
 </form>
@@ -66,6 +68,7 @@
 {% elif password_error == "stale" %}<p>Your password changed during this request. Please retry.</p>
 {% elif password_error == "unavailable" %}<p>Password change is unavailable for this account.</p>{% endif %}
 <form method="post" action="/me/password">
+  <input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}">
   <label>Current password
     <input type="password" name="current_password" autocomplete="current-password" required>
   </label>

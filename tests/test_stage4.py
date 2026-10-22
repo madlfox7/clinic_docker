@@ -10,6 +10,7 @@ from pathlib import Path
 import httpx
 import pytest
 
+from tests.csrf_client import CsrfClient
 from tests.clinical_notes import (
 	NOTE_DOCTOR1_PATIENT_A,
 	NOTE_DOCTOR2_PATIENT_B,
@@ -32,7 +33,7 @@ ADMIN = "admin@clinic.local"
 
 
 def client():
-	return httpx.Client(base_url=BASE, follow_redirects=True, timeout=10.0)
+	return CsrfClient(base_url=BASE, follow_redirects=True, timeout=10.0)
 
 
 def login(c: httpx.Client, email: str) -> httpx.Response:
@@ -3980,3 +3981,39 @@ def test_admin_clinic_settings_are_visible_and_admin_only():
 			+ old_phone.replace("'", "''")
 			+ "' WHERE id = 1"
 		)
+
+
+def test_cancel_requires_csrf_token():
+	with client() as pat:
+		login(pat, PAT)
+		_, slot_id = open_free_slot_page(pat)
+		existing_ids = set(appointment_ids(pat.get("/my").text))
+		pat.post(f"/slots/{slot_id}/book")
+		mine = pat.get("/my")
+		new_ids = set(appointment_ids(mine.text)) - existing_ids
+		assert new_ids
+		appointment_id = new_ids.pop()
+
+		missing = pat.post(f"/appointments/{appointment_id}/cancel", data={}, csrf=False)
+		assert missing.status_code == 403
+		wrong = pat.post(
+			f"/appointments/{appointment_id}/cancel",
+			data={"csrf_token": "wrong-token"},
+			csrf=False,
+		)
+		assert wrong.status_code == 403
+		assert appointment_id in appointment_ids(pat.get("/my").text)
+
+		form = re.search(
+			rf'action="/appointments/{appointment_id}/cancel".*?name="csrf_token" value="([^"]+)"',
+			pat.get("/my").text,
+			re.S,
+		)
+		assert form, "cancel form has no CSRF token"
+		cancelled = pat.post(
+			f"/appointments/{appointment_id}/cancel",
+			data={"csrf_token": form.group(1)},
+			csrf=False,
+		)
+		assert cancelled.status_code == 200
+		assert appointment_id not in appointment_ids(pat.get("/my").text)

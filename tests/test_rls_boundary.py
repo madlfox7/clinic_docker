@@ -5,6 +5,8 @@ from pathlib import Path
 
 import httpx
 
+from tests.csrf_client import CsrfClient
+
 
 ROOT = Path(__file__).resolve().parents[1]
 PATIENT_A = "pat@clinic.local"
@@ -699,7 +701,7 @@ print(json.dumps({
         assert result["guest_blocked_patient_insert_denied"] is True
         assert PATIENT_A in result["doctor_patient_emails"]
 
-        with httpx.Client(base_url=TEST_BASE, follow_redirects=True, timeout=10.0) as client:
+        with CsrfClient(base_url=TEST_BASE, follow_redirects=True, timeout=10.0) as client:
             login = client.post(
                 "/login",
                 data={"email": PATIENT_A, "password": "password123"},

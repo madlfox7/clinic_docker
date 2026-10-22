@@ -28,6 +28,7 @@
 <section>
   <h2>Create registrar or administrator</h2>
   <form method="post" action="/admin/users">
+  <input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}">
     <label>Email <input name="email" type="email" maxlength="254" value="{{ staff_email }}" required></label>
     <label>Role
       <select name="role" id="staff-role" required>
@@ -69,6 +70,7 @@
         {{ user.email }} — {{ user.role }} — {{ "Blocked" if user.blocked else "Active" }}
         {% if user.role == "registrar" or (user.role == "admin" and user.id != current_admin_id) %}
           <form method="post" action="/admin/users/{{ user.id }}/reset-link">
+  <input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}">
             <button type="submit">Send reset link</button>
           </form>
         {% elif user.role == "admin" %}
@@ -79,11 +81,13 @@
             <strong>Your own administrator account cannot be blocked.</strong>
           {% elif user.blocked %}
             <form method="post" action="/admin/users/{{ user.id }}/unblock" style="display:inline">
+  <input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}">
               <button type="submit">Unblock administrator</button>
             </form>
           {% else %}
             <form method="post" action="/admin/users/{{ user.id }}/block" style="display:inline"
               onsubmit="return confirm('Block this administrator?')">
+  <input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}">
               <button type="submit">Block administrator</button>
             </form>
           {% endif %}
@@ -105,21 +109,25 @@
       {% if user.blocked %}
         <strong>Blocked</strong>
         <form method="post" action="/admin/users/{{ user.id }}/unblock" style="display:inline">
+  <input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}">
           <button type="submit">Unblock</button>
         </form>
       {% else %}
         <strong>Active</strong>
         <form method="post" action="/admin/users/{{ user.id }}/block" style="display:inline">
+  <input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}">
           <button type="submit">Block</button>
         </form>
       {% endif %}
       {% if not user.blocked %}
         <form method="post" action="/admin/users/{{ user.id }}/reset-link" style="display:inline">
+  <input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}">
           <button type="submit">Send reset link</button>
         </form>
       {% endif %}
       {% if user.future_scheduled > 0 %}
         <form method="post" action="/admin/users/{{ user.id }}/cancel-future-appointments" style="display:inline" onsubmit="return confirm('Cancel all future appointments for this patient?')">
+  <input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}">
           <button type="submit">Cancel future appointments</button>
         </form>
       {% endif %}

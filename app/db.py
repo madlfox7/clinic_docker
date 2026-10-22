@@ -6,6 +6,8 @@ import psycopg2
 from fastapi.templating import Jinja2Templates
 from passlib.context import CryptContext
 
+from csrf import csrf_token
+
 
 
 
@@ -13,6 +15,7 @@ DATABASE_URL = os.environ.get("DATABASE_URL")
 pwd = CryptContext(schemes=["bcrypt"], deprecated="auto")
 log = logging.getLogger("clinic")
 templates = Jinja2Templates(directory="templates")
+templates.env.globals["csrf_token"] = csrf_token
 
 ROLE_BY_APP = {
     "guest": "app_guest",
