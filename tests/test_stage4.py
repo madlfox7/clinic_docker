@@ -4165,3 +4165,22 @@ def test_admin_cannot_cancel_started_visit():
 		assert _status(visit) == "scheduled"
 	finally:
 		_drop_visit(visit)
+
+
+def test_unicode_digits_in_ids_are_rejected_without_500():
+	with client() as doctor, client() as admin:
+		login(doctor, DOC)
+		login(admin, ADMIN)
+		for c, method, path in (
+			(doctor, "post", "/doctor/appointments/²/complete"),
+			(doctor, "get", "/doctor/appointments/²/records"),
+			(doctor, "get", "/doctor/patients/٣"),
+			(admin, "get", "/doctors/²/slots"),
+			(admin, "post", "/admin/users/²/block"),
+			(admin, "post", "/admin/services/¹/deactivate"),
+		):
+			response = getattr(c, method)(path)
+			assert response.status_code < 500, (path, response.status_code)
+		admin.post("/admin/users/ ² /block")
+		padded = admin.get("/doctors/ 1 /slots")
+		assert padded.status_code == 200

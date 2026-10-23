@@ -100,18 +100,19 @@ def clean_phone(value):
 
 
 def parse_strict_int(raw, min_value: int = PG_INT_MIN, max_value: int = PG_INT_MAX):
-    """Strict int parsing (like ft_atoi with no leniency): rejects None, empty, whitespace,
-    signs without digits, and any non-digit characters instead of trusting str/int coercion."""
+    """Strict int parsing (like ft_atoi with no leniency): rejects None, empty, signs without digits, and any non-digit characters instead of trusting str/int coercion."""
     if not isinstance(raw, str):
         return None
-    if raw == "" or raw != raw.strip():
+    raw = raw.strip()
+    if raw == "":
         return None
     body = raw
     negative = False
     if raw[0] in "+-":
         body = raw[1:]
         negative = raw[0] == "-"
-    if body == "" or not body.isdigit():
+    # ASCII only: "²".isdigit() is True but int("²") raises
+    if body == "" or not (body.isascii() and body.isdigit()):
         return None
     value = -int(body) if negative else int(body)
     if not min_value <= value <= max_value:
