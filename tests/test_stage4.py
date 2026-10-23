@@ -1241,8 +1241,19 @@ def test_medical_records_are_scoped_and_audited():
 			assert "read-only" in cancelled_records.text
 			assert "<textarea" not in cancelled_records.text
 			cancelled_history = doctor.get(f"/doctor/patients/{patient_id}")
-			assert "cancelled" in cancelled_history.text
-			assert note_body in cancelled_history.text
+			still_own = psql(
+				"SELECT count(*) FROM appointments a JOIN doctors d ON d.id = a.doctor_id "
+				f"JOIN users u ON u.id = d.user_id AND u.email = '{DOC}' "
+				f"WHERE a.patient_user_id = {patient_id} "
+				"AND a.status IN ('scheduled', 'completed') "
+				"AND a.starts_at > now() - interval '12 months'"
+			)
+			if still_own == "0":
+				# only a cancelled visit left: no longer this doctor's patient
+				assert "patient_unavailable" in str(cancelled_history.url)
+			else:
+				assert "cancelled" in cancelled_history.text
+				assert note_body in cancelled_history.text
 
 			patient_records = pat.get("/my/records")
 			assert note_body in patient_records.text
@@ -4109,3 +4120,28 @@ def test_patient_cannot_forge_audit_events():
 		"current_setting('app.user_id')::int);",
 	)
 	assert own.returncode == 0, own.stderr
+
+
+def test_cancelled_only_patient_is_not_own_patient_of_doctor():
+	email = f"cancelled-only-{uuid.uuid4().hex[:10]}@example.test"
+	psql(
+		"INSERT INTO users (email, password_hash, role, blocked) "
+		f"VALUES ('{email}', (SELECT password_hash FROM users WHERE email = '{PAT}'), 'patient', false)"
+	)
+	patient_id = int(psql(f"SELECT id FROM users WHERE email = '{email}'"))
+	visit = _past_visit(DOC, patient_email=email, status="cancelled")
+	try:
+		listed = _as_role("app_doctor", DOC, f"SELECT count(*) FROM public.doctor_patients(current_setting('app.user_id')::int) WHERE id = {patient_id};")
+		assert listed.returncode == 0, listed.stderr
+		assert listed.stdout.split()[-2] == "0", listed.stdout
+		with client() as doctor:
+			login(doctor, DOC)
+			assert email not in doctor.get("/doctor/patients").text
+			page = doctor.get(f"/doctor/patients/{patient_id}")
+			assert "patient_unavailable" in str(page.url)
+		psql(f"UPDATE appointments SET status = 'completed' WHERE id = {visit}")
+		listed = _as_role("app_doctor", DOC, f"SELECT count(*) FROM public.doctor_patients(current_setting('app.user_id')::int) WHERE id = {patient_id};")
+		assert listed.stdout.split()[-2] == "1", listed.stdout
+	finally:
+		_drop_visit(visit)
+		psql(f"DELETE FROM users WHERE id = {patient_id}")

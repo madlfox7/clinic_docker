@@ -207,7 +207,7 @@ def doctor_records(request: Request, appointment_id: str):
                a.starts_at <= CURRENT_TIMESTAMP AS started
         FROM appointments a
         JOIN doctors d ON d.id = a.doctor_id
-        JOIN public.doctor_patients(%s) dp ON dp.id = a.patient_user_id
+        JOIN public.doctor_visit_patients(%s) dp ON dp.id = a.patient_user_id
         WHERE a.id = %s
           AND d.user_id = %s
         """,

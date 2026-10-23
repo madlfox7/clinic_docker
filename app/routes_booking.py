@@ -804,7 +804,7 @@ def doctor_appointments(request: Request):
         JOIN slots s ON s.id=a.slot_id
         JOIN services svc ON svc.id=s.service_id
         JOIN doctors d ON d.id=s.doctor_id
-        JOIN public.doctor_patients(%s) dp ON dp.id=a.patient_user_id
+        JOIN public.doctor_visit_patients(%s) dp ON dp.id=a.patient_user_id
         WHERE d.user_id=%s
         ORDER BY a.starts_at
         """,

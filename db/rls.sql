@@ -64,13 +64,38 @@ AS $function$
       FROM public.appointments AS a
       WHERE a.doctor_id = d.id
         AND a.patient_user_id = u.id
-        AND a.status IN ('scheduled', 'completed', 'cancelled')
+        AND a.status IN ('scheduled', 'completed')
         AND a.starts_at > CURRENT_TIMESTAMP - INTERVAL '12 months'
     );
 $function$;
 
 REVOKE ALL ON FUNCTION public.doctor_patients(integer) FROM PUBLIC;
 GRANT EXECUTE ON FUNCTION public.doctor_patients(integer) TO app_doctor;
+
+-- identities on the doctor's own visits, cancelled ones included (schedule labels only)
+CREATE OR REPLACE FUNCTION public.doctor_visit_patients(doc_user_id int)
+RETURNS TABLE (id int, email text, blocked boolean)
+LANGUAGE sql
+STABLE
+SECURITY DEFINER
+SET search_path = pg_catalog, public, pg_temp
+AS $function$
+  SELECT u.id, u.email, u.blocked
+  FROM public.users AS u 
+  JOIN public.doctors AS d ON d.user_id = doc_user_id
+  WHERE doc_user_id = NULLIF(current_setting('app.user_id', true), '')::int
+    AND EXISTS (
+      SELECT 1
+      FROM public.appointments AS a
+      WHERE a.doctor_id = d.id
+        AND a.patient_user_id = u.id
+        AND a.status IN ('scheduled', 'completed', 'cancelled')
+        AND a.starts_at > CURRENT_TIMESTAMP - INTERVAL '12 months'
+    );
+$function$;
+
+REVOKE ALL ON FUNCTION public.doctor_visit_patients(integer) FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION public.doctor_visit_patients(integer) TO app_doctor;
 
 CREATE OR REPLACE FUNCTION public.current_patient_is_active()
 RETURNS boolean
@@ -820,7 +845,7 @@ BEGIN
        WHERE d.id = target_doctor_id AND d.user_id = actor_id
      ) THEN
     SELECT dp.email INTO patient_email
-    FROM public.doctor_patients(actor_id) AS dp
+    FROM public.doctor_visit_patients(actor_id) AS dp
     WHERE dp.id = target_patient_id;
   END IF;
 
