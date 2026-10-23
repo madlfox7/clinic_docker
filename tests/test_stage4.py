@@ -4184,3 +4184,18 @@ def test_unicode_digits_in_ids_are_rejected_without_500():
 		admin.post("/admin/users/ ² /block")
 		padded = admin.get("/doctors/ 1 /slots")
 		assert padded.status_code == 200
+
+
+def test_calendar_day_outside_supported_years_shows_error():
+	with client() as doctor, client() as registrar:
+		login(doctor, DOC)
+		login(registrar, REG)
+		for c, path in ((doctor, "/doctor/calendar"), (registrar, "/registrar/appointments")):
+			for day in ("0001-01-01", "9999-12-31", "1899-12-31", "2101-01-01"):
+				for view in ("day", "week"):
+					page = c.get(path, params={"day": day, "view": view})
+					assert page.status_code == 200, (path, day, view, page.status_code)
+					assert "between years 1900 and 2100" in page.text
+			edge = c.get(path, params={"day": "2100-12-31"})
+			assert edge.status_code == 200
+			assert "between years 1900 and 2100" not in edge.text

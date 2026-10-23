@@ -9,6 +9,7 @@
 {% if errors %}
   {% for error in errors %}
     {% if error == "invalid_day" %}<p>Invalid date; showing today.</p>
+    {% elif error == "day_out_of_range" %}<p>Date must be between years 1900 and 2100; showing today.</p>
     {% elif error == "invalid_view" %}<p>Invalid calendar view; showing day view.</p>
     {% elif error == "invalid_doctor" %}<p>Invalid doctor; showing all doctors.</p>{% endif %}
   {% endfor %}

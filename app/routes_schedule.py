@@ -146,6 +146,10 @@ def registrar_start_booking(request: Request, patient_id: str):
     )
 
 
+CALENDAR_MIN_YEAR = 1900
+CALENDAR_MAX_YEAR = 2100
+
+
 def _calendar_state(request: Request):
     errors = []
     raw_day = request.query_params.get("day")
@@ -155,7 +159,10 @@ def _calendar_state(request: Request):
             parsed_day = date.fromisoformat(raw_day)
             if parsed_day.isoformat() != raw_day:
                 raise ValueError
-            selected_day = parsed_day
+            if not CALENDAR_MIN_YEAR <= parsed_day.year <= CALENDAR_MAX_YEAR:
+                errors.append("day_out_of_range")
+            else:
+                selected_day = parsed_day
         except ValueError:
             errors.append("invalid_day")
 
