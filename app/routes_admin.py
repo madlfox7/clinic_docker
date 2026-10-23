@@ -1618,6 +1618,8 @@ def _generate_slots_for_doctors(
         return RedirectResponse("/admin/schedule?error=range_in_past", status_code=303)
     if (to_date - from_date).days + 1 > 90:
         return RedirectResponse("/admin/schedule?error=range_too_long", status_code=303)
+    if to_date > date.today() + timedelta(days=MAX_FUTURE_DAYS):
+        return RedirectResponse("/admin/schedule?error=range_too_far", status_code=303)
 
     conn = db_as(admin_user)
     cur = conn.cursor()

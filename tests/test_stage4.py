@@ -4199,3 +4199,17 @@ def test_calendar_day_outside_supported_years_shows_error():
 			edge = c.get(path, params={"day": "2100-12-31"})
 			assert edge.status_code == 200
 			assert "between years 1900 and 2100" not in edge.text
+
+
+def test_slot_generation_respects_max_future_days():
+	far = date.today() + timedelta(days=366 * 2 + 10)
+	before = psql(f"SELECT count(*) FROM slots WHERE starts_at::date >= '{far.isoformat()}'")
+	with client() as admin:
+		login(admin, ADMIN)
+		page = admin.post(
+			"/admin/schedule/generate",
+			data={"doctor_ids": ["1"], "from_date": far.isoformat(), "to_date": (far + timedelta(days=3)).isoformat()},
+		)
+		assert "error=range_too_far" in str(page.url)
+		assert "more than two years ahead" in page.text
+	assert psql(f"SELECT count(*) FROM slots WHERE starts_at::date >= '{far.isoformat()}'") == before

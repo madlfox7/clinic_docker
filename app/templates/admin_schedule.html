@@ -99,6 +99,7 @@
 {% if error == "range_order" %}<p>End date must not be before start date.</p>
 {% elif error == "range_in_past" %}<p>Slot generation cannot start in the past.</p>
 {% elif error == "range_too_long" %}<p>Choose a range of no more than 90 calendar days.</p>
+{% elif error == "range_too_far" %}<p>Slots cannot be generated more than two years ahead.</p>
 {% elif error == "invalid_work_hours" %}<p>Choose valid working hours.</p>
 {% elif error == "invalid_time_off" %}<p>End date must not be before start date.</p>
 {% elif error == "time_off_past" %}<p>Time off cannot start in the past.</p>
