@@ -3,7 +3,7 @@
 
 
 <h1>Schedule management</h1>
-<p><a href="/admin/users">Manage patients</a></p>
+<p><a href="/admin/users">Manage staff</a></p>
 
 <!-- Success checks & msgs -->
 {% if saved == "work-hours-bulk" %}
@@ -42,6 +42,7 @@
           {{ visit.service_name }} —
           {{ visit.starts_at.strftime("%Y-%m-%d %H:%M") }}–{{ visit.ends_at.strftime("%H:%M") }}
           <form method="post" action="/appointments/{{ visit.appointment_id }}/cancel" style="display:inline">
+  <input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}">
             <button type="submit">Cancel this appointment</button>
           </form>
         </li>
@@ -62,6 +63,7 @@
           {{ visit.service_name }} —
           {{ visit.starts_at.strftime("%Y-%m-%d %H:%M") }}–{{ visit.ends_at.strftime("%H:%M") }}
           <form method="post" action="/appointments/{{ visit.appointment_id }}/cancel" style="display:inline">
+  <input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}">
             <button type="submit">Cancel appointment</button>
           </form>
         </li>
@@ -82,6 +84,7 @@
           {{ visit.service_name }} —
           {{ visit.starts_at.strftime("%Y-%m-%d %H:%M") }}–{{ visit.ends_at.strftime("%H:%M") }}
           <form method="post" action="/appointments/{{ visit.appointment_id }}/cancel" style="display:inline">
+  <input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}">
             <button type="submit">Cancel appointment</button>
           </form>
         </li>
@@ -96,11 +99,13 @@
 {% if error == "range_order" %}<p>End date must not be before start date.</p>
 {% elif error == "range_in_past" %}<p>Slot generation cannot start in the past.</p>
 {% elif error == "range_too_long" %}<p>Choose a range of no more than 90 calendar days.</p>
+{% elif error == "range_too_far" %}<p>Slots cannot be generated more than two years ahead.</p>
 {% elif error == "invalid_work_hours" %}<p>Choose valid working hours.</p>
 {% elif error == "invalid_time_off" %}<p>End date must not be before start date.</p>
 {% elif error == "time_off_past" %}<p>Time off cannot start in the past.</p>
 {% elif error == "time_off_too_long" %}<p>Time off cannot cover more than a year or end more than two years from today.</p>
 {% elif error == "holiday_too_far" %}<p>A holiday cannot be more than two years ahead.</p>
+{% elif error == "holiday_in_past" %}<p>A holiday cannot be in the past.</p>
 {% elif error == "holiday_name_required" %}<p>Enter a holiday name.</p>
 {% elif error == "holiday_name_invalid" %}<p>Enter a holiday name of 2–100 characters without control characters.</p>
 {% elif error == "doctor_not_found" %}<p>Doctor not found.</p>
@@ -135,6 +140,7 @@
 <form id="bulk-work-hours-form" method="post" action="/admin/work-hours-bulk"
   data-confirm-selected="doctor_ids"
   data-confirm-message="Save these hours for {n} doctors?">
+  <input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}">
   <p><strong>Warning:</strong> Current hours are not preloaded. Saving replaces the existing hours for each selected weekday with the same values below. Review the schedule above before saving.</p>
   <fieldset>
     <legend>Doctors</legend>
@@ -184,6 +190,7 @@
 <form method="post" action="/admin/schedule/apply-hours"
   data-confirm-selected="doctor_ids"
   data-confirm-message="Remove free slots outside working hours for {n} doctors?">
+  <input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}">
   <fieldset>
     <legend>Doctors</legend>
     {% for doctor in doctors %}
@@ -212,10 +219,12 @@
       <td>
         {% if item.status == "pending" %}
           <form method="post" action="/admin/time-off-requests/{{ item.id }}/decision" style="display:inline">
+  <input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}">
             <input type="hidden" name="decision" value="approve">
             <button type="submit">Approve</button>
           </form>
           <form method="post" action="/admin/time-off-requests/{{ item.id }}/decision" style="display:inline">
+  <input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}">
             <input type="hidden" name="decision" value="reject">
             <button type="submit">Reject</button>
           </form>
@@ -237,6 +246,7 @@
 <form method="post" action="/admin/time-off"
   data-confirm-selected="doctor_ids"
   data-confirm-message="Add this time off for {n} doctors?">
+  <input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}">
   <fieldset>
     <legend>Doctors</legend>
     {% for doctor in doctors %}
@@ -258,6 +268,7 @@
   {% else %}<li>No holidays configured.</li>{% endfor %}
 </ul>
 <form method="post" action="/admin/holidays">
+  <input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}">
   <label>Date <input name="holiday_day" type="date" max="{{ max_schedule_date }}" required></label>
   <label>Name <input name="name" type="text" minlength="2" maxlength="100" required></label>
   <button type="submit">Save holiday</button>
@@ -287,6 +298,7 @@
 <form id="generate-slots-form" method="post" action="/admin/schedule/generate"
   data-confirm-selected="doctor_ids"
   data-confirm-message="Generate slots for {n} doctors?">
+  <input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}">
   <fieldset>
     <legend>Doctors</legend>
     {% for doctor in doctors %}

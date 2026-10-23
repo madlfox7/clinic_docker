@@ -27,8 +27,19 @@
       — {{ a.duration_minutes }} min service{% if a.buffer_minutes %} + {{ a.buffer_minutes }} min buffer{% endif %}
       {% if a.status == "scheduled" and a.cancellable %}
         <form method="post" action="/appointments/{{ a.id }}/cancel" style="display:inline" onsubmit="return confirm('Cancel this appointment?');">
+  <input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}">
           <button type="submit">Cancel appointment</button>
         </form>
+      {% endif %}
+      {% if a.notes %}
+        <div>Report / diagnosis:
+          {% for body in a.notes %}<pre>{{ body }}</pre>{% endfor %}
+        </div>
+      {% endif %}
+      {% if a.prescriptions %}
+        <div>Prescription:
+          <ul>{% for body in a.prescriptions %}<li>{{ body }}</li>{% endfor %}</ul>
+        </div>
       {% endif %}
     </li>
   {% endfor %}

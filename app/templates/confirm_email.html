@@ -12,6 +12,7 @@
 {% else %}
   <p>Confirm this step of the email change. Both addresses must confirm before the account changes.</p>
   <form method="post" action="/confirm-email">
+  <input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}">
     <input type="hidden" name="token" value="{{ token }}">
     <button type="submit">Confirm</button>
   </form>

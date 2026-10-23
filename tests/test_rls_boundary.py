@@ -5,6 +5,8 @@ from pathlib import Path
 
 import httpx
 
+from tests.csrf_client import CsrfClient
+
 
 ROOT = Path(__file__).resolve().parents[1]
 PATIENT_A = "pat@clinic.local"
@@ -217,7 +219,24 @@ def test_unfiltered_broken_selects_obey_role_rls():
                            ORDER BY candidate.day_offset
                            LIMIT 1
                        ) AS start_a,
-                       clock_timestamp() + INTERVAL '30 days 2 hours' AS start_b
+                       (
+                           SELECT CURRENT_DATE + candidate.day_offset + TIME '12:00'
+                           FROM generate_series(30, 365) AS candidate(day_offset)
+                           WHERE NOT EXISTS (
+                               SELECT 1
+                               FROM holidays h
+                               WHERE h.day = CURRENT_DATE + candidate.day_offset
+                           )
+                             AND NOT EXISTS (
+                                 SELECT 1
+                                 FROM time_off t
+                                 WHERE t.doctor_id = identities.doctor_b
+                                   AND CURRENT_DATE + candidate.day_offset
+                                       BETWEEN t.starts_on AND t.ends_on
+                             )
+                           ORDER BY candidate.day_offset
+                           LIMIT 1
+                       ) AS start_b
                 FROM identities
             ),
             slot_a AS (
@@ -699,7 +718,7 @@ print(json.dumps({
         assert result["guest_blocked_patient_insert_denied"] is True
         assert PATIENT_A in result["doctor_patient_emails"]
 
-        with httpx.Client(base_url=TEST_BASE, follow_redirects=True, timeout=10.0) as client:
+        with CsrfClient(base_url=TEST_BASE, follow_redirects=True, timeout=10.0) as client:
             login = client.post(
                 "/login",
                 data={"email": PATIENT_A, "password": "password123"},

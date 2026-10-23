@@ -146,6 +146,10 @@ def registrar_start_booking(request: Request, patient_id: str):
     )
 
 
+CALENDAR_MIN_YEAR = 1900
+CALENDAR_MAX_YEAR = 2100
+
+
 def _calendar_state(request: Request):
     errors = []
     raw_day = request.query_params.get("day")
@@ -155,7 +159,10 @@ def _calendar_state(request: Request):
             parsed_day = date.fromisoformat(raw_day)
             if parsed_day.isoformat() != raw_day:
                 raise ValueError
-            selected_day = parsed_day
+            if not CALENDAR_MIN_YEAR <= parsed_day.year <= CALENDAR_MAX_YEAR:
+                errors.append("day_out_of_range")
+            else:
+                selected_day = parsed_day
         except ValueError:
             errors.append("invalid_day")
 
@@ -240,7 +247,6 @@ def _load_calendar(cur, start_day, day_count, doctor_id, role):
         LEFT JOIN services svc ON svc.id = s.service_id
         LEFT JOIN appointments a
           ON a.doctor_id = s.doctor_id
-         AND a.status = 'scheduled'
          AND a.starts_at < s.ends_at
          AND a.reserved_ends_at > s.starts_at
         LEFT JOIN slots booked_slot ON booked_slot.id = a.slot_id
@@ -292,7 +298,8 @@ def _load_calendar(cur, start_day, day_count, doctor_id, role):
             },
         )
         if row[12] is not None:
-            slot["has_appointment"] = True
+            if row[15] != "cancelled":
+                slot["has_appointment"] = True
             appointment = day_state["appointments"].setdefault(
                 row[12],
                 {

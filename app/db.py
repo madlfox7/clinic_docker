@@ -1,10 +1,13 @@
 import logging
 import os
+import unicodedata
 from datetime import date
 
 import psycopg2
 from fastapi.templating import Jinja2Templates
 from passlib.context import CryptContext
+
+from csrf import csrf_token
 
 
 
@@ -13,6 +16,7 @@ DATABASE_URL = os.environ.get("DATABASE_URL")
 pwd = CryptContext(schemes=["bcrypt"], deprecated="auto")
 log = logging.getLogger("clinic")
 templates = Jinja2Templates(directory="templates")
+templates.env.globals["csrf_token"] = csrf_token
 
 ROLE_BY_APP = {
     "guest": "app_guest",
@@ -96,19 +100,29 @@ def clean_phone(value):
 
 
 
+def strip_control_chars(text: str) -> str:
+    """Drop C0/C1 control characters from free text, keeping newlines and tabs."""
+    text = text.replace("\r\n", "\n").replace("\r", "\n")
+    return "".join(
+        ch for ch in text
+        if ch in "\n\t" or unicodedata.category(ch) != "Cc"
+    )
+
+
 def parse_strict_int(raw, min_value: int = PG_INT_MIN, max_value: int = PG_INT_MAX):
-    """Strict int parsing (like ft_atoi with no leniency): rejects None, empty, whitespace,
-    signs without digits, and any non-digit characters instead of trusting str/int coercion."""
+    """Strict int parsing (like ft_atoi with no leniency): rejects None, empty, signs without digits, and any non-digit characters instead of trusting str/int coercion."""
     if not isinstance(raw, str):
         return None
-    if raw == "" or raw != raw.strip():
+    raw = raw.strip()
+    if raw == "":
         return None
     body = raw
     negative = False
     if raw[0] in "+-":
         body = raw[1:]
         negative = raw[0] == "-"
-    if body == "" or not body.isdigit():
+    # ASCII only: "²".isdigit() is True but int("²") raises
+    if body == "" or not (body.isascii() and body.isdigit()):
         return None
     value = -int(body) if negative else int(body)
     if not min_value <= value <= max_value:

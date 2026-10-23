@@ -973,7 +973,7 @@ def _purge_slots_without_scheduled(cur, where_sql, params):
               WHERE {where_sql}
                 AND NOT EXISTS (
                     SELECT 1 FROM appointments live
-                    WHERE live.slot_id = s.id AND live.status = 'scheduled'
+                    WHERE live.slot_id = s.id AND live.status IN ('scheduled', 'completed')
                 )
           )
         """,
@@ -1544,6 +1544,8 @@ def admin_save_holiday(
         return RedirectResponse(
             "/admin/schedule?error=holiday_name_invalid", status_code=303
         )
+    if holiday_day < date.today():
+        return RedirectResponse("/admin/schedule?error=holiday_in_past", status_code=303)
     if holiday_day > date.today() + timedelta(days=MAX_FUTURE_DAYS):
         return RedirectResponse("/admin/schedule?error=holiday_too_far", status_code=303)
     conn = db_as(admin_user)
@@ -1618,6 +1620,8 @@ def _generate_slots_for_doctors(
         return RedirectResponse("/admin/schedule?error=range_in_past", status_code=303)
     if (to_date - from_date).days + 1 > 90:
         return RedirectResponse("/admin/schedule?error=range_too_long", status_code=303)
+    if to_date > date.today() + timedelta(days=MAX_FUTURE_DAYS):
+        return RedirectResponse("/admin/schedule?error=range_too_far", status_code=303)
 
     conn = db_as(admin_user)
     cur = conn.cursor()
@@ -1850,6 +1854,7 @@ def cancel_future_appointments(request: Request, user_id: str):
           AND u.role='patient'
           AND a.status='scheduled'
           AND s.starts_at > CURRENT_TIMESTAMP
+          AND a.starts_at > CURRENT_TIMESTAMP
         RETURNING a.id
         """,
         (user_id,),

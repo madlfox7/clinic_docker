@@ -7,13 +7,22 @@
 <p>Status: {{ appointment.status }}</p>
 <p><a href="/doctor/appointments">Back to my appointments</a></p>
 
+{% if completed == "1" %}<p>Appointment marked as completed.</p>{% endif %}
+{% if can_complete %}
+<form method="post" action="/doctor/appointments/{{ appointment.id }}/complete" onsubmit="return confirm('Mark this appointment as completed?');">
+  <input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}">
+  <button type="submit">Mark as completed</button>
+</form>
+{% endif %}
+
 {% if saved == "note" %}<p>Clinical note saved.</p>{% endif %}
 {% if saved == "prescription" %}<p>Prescription saved.</p>{% endif %}
 {% if error == "empty" %}<p>Enter text before saving.</p>
 {% elif error == "invalid_text" %}<p>Record text cannot contain a NUL character.</p>
 {% elif error == "too_long" %}<p>Record text is too long.</p>
 {% elif error == "invalid_type" %}<p>Choose a valid record type.</p>
-{% elif error == "record_unavailable" %}<p>This appointment cannot be edited (it may be cancelled).</p>{% endif %}
+{% elif error == "record_unavailable" %}<p>This appointment cannot be edited (it may be cancelled).</p>
+{% elif error == "complete_unavailable" %}<p>This appointment cannot be marked as completed.</p>{% endif %}
 
 <h2>Clinical notes</h2>
 {% if notes %}
@@ -27,8 +36,9 @@
 {% endif %}
 {% if can_edit %}
 <form method="post" action="/doctor/appointments/{{ appointment.id }}/records">
+  <input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}">
   <input type="hidden" name="record_type" value="note">
-  <label>Note
+  <label>Report / diagnosis
     <textarea name="body" rows="6" maxlength="4000" required></textarea>
   </label>
   <button type="submit">Save note</button>
@@ -47,6 +57,7 @@
 </ul>
 {% if can_edit %}
 <form method="post" action="/doctor/appointments/{{ appointment.id }}/records">
+  <input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}">
   <input type="hidden" name="record_type" value="prescription">
   <label>Prescription
     <textarea name="body" rows="4" maxlength="4000" required></textarea>

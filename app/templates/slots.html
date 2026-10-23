@@ -96,7 +96,7 @@
   </dl>
 {% endif %}
 {% if cancelled == "1" %}<p>Appointment cancelled.</p>{% endif %}
-{% if cancel_error == "past" %}<p>Registrars cannot cancel past appointments.</p>
+{% if cancel_error == "past" %}<p>Past appointments cannot be cancelled.</p>
 {% elif cancel_error == "1" %}<p>Appointment could not be cancelled; it may already be cancelled.</p>{% endif %}
 {% for day in days %}
   <h2>{{ day.label }}</h2>
@@ -114,6 +114,7 @@
           {% if s.closed %}<strong>Clinic closed — staff action required.</strong>{% endif %}
           {% if not s.past %}
             <form method="post" action="/appointments/{{ s.appointment_id }}/cancel" style="display:inline">
+  <input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}">
               <button type="submit" onclick="return confirm('Cancel this appointment?')">Cancel appointment</button>
             </form>
           {% endif %}
@@ -130,6 +131,7 @@
       {% else %}
         {% if role == "registrar" %}
           <form method="post" action="/slots/{{ s.id }}/book">
+  <input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}">
           <input type="hidden" name="service_id" value="{{ selected_service.id }}">
           <input type="hidden" name="patient_email"
             value="{{ selected_patient.email if selected_patient else '' }}">
@@ -142,6 +144,7 @@
           Available
         {% else %}
           <form method="post" action="/slots/{{ s.id }}/book" style="display:inline">
+  <input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}">
             <input type="hidden" name="service_id" value="{{ selected_service.id }}">
             <button type="submit">Book appointment</button>
           </form>

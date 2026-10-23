@@ -10,6 +10,7 @@ from pathlib import Path
 import httpx
 import pytest
 
+from tests.csrf_client import CsrfClient
 from tests.clinical_notes import (
 	NOTE_DOCTOR1_PATIENT_A,
 	NOTE_DOCTOR2_PATIENT_B,
@@ -32,7 +33,7 @@ ADMIN = "admin@clinic.local"
 
 
 def client():
-	return httpx.Client(base_url=BASE, follow_redirects=True, timeout=10.0)
+	return CsrfClient(base_url=BASE, follow_redirects=True, timeout=10.0)
 
 
 def login(c: httpx.Client, email: str) -> httpx.Response:
@@ -738,7 +739,7 @@ def test_patient_cannot_cancel_another_or_past_appointment():
 				f"/appointments/{int(past_appointment_id)}/cancel"
 			)
 			assert "cancel_error=past" in str(registrar_past_cancel.url)
-			assert "Registrars cannot cancel past appointments." in registrar_past_cancel.text
+			assert "Past appointments cannot be cancelled." in registrar_past_cancel.text
 			assert psql(
 				f"SELECT status FROM appointments WHERE id = {int(past_appointment_id)}"
 			) == "scheduled"
@@ -1025,9 +1026,9 @@ def test_admin_cannot_set_email_or_open_medical_text():
 	with client() as admin:
 		login(admin, ADMIN)
 		records = admin.get("/my/records")
-		assert records.url.path == "/login"
+		assert records.status_code == 403
 		doctor_page = admin.get("/doctor/patients")
-		assert doctor_page.url.path == "/login"
+		assert doctor_page.status_code == 403
 		users = admin.get("/admin/users")
 		assert 'name="password"' not in users.text
 		assert 'name="new_email"' not in users.text
@@ -1110,8 +1111,8 @@ def test_patient_cannot_open_doctor_appointments():
 	with client() as c:
 		login(c, PAT)
 		r = c.get("/doctor/appointments")
-		assert "/login" in str(r.url) or "patient" in r.text.lower()
-		assert "Manage patients" not in r.text
+		assert r.status_code == 403
+		assert "Manage staff" not in r.text
 
 
 def test_doctor_sees_only_own_cabinet():
@@ -1120,7 +1121,7 @@ def test_doctor_sees_only_own_cabinet():
 		r = c.get("/doctor/appointments")
 		assert r.status_code == 200
 		mine = c.get("/my")
-		assert "/login" in str(mine.url) or "Login" in mine.text
+		assert mine.status_code == 403
 
 
 def test_medical_records_are_scoped_and_audited():
@@ -1240,8 +1241,19 @@ def test_medical_records_are_scoped_and_audited():
 			assert "read-only" in cancelled_records.text
 			assert "<textarea" not in cancelled_records.text
 			cancelled_history = doctor.get(f"/doctor/patients/{patient_id}")
-			assert "cancelled" in cancelled_history.text
-			assert note_body in cancelled_history.text
+			still_own = psql(
+				"SELECT count(*) FROM appointments a JOIN doctors d ON d.id = a.doctor_id "
+				f"JOIN users u ON u.id = d.user_id AND u.email = '{DOC}' "
+				f"WHERE a.patient_user_id = {patient_id} "
+				"AND a.status IN ('scheduled', 'completed') "
+				"AND a.starts_at > now() - interval '12 months'"
+			)
+			if still_own == "0":
+				# only a cancelled visit left: no longer this doctor's patient
+				assert "patient_unavailable" in str(cancelled_history.url)
+			else:
+				assert "cancelled" in cancelled_history.text
+				assert note_body in cancelled_history.text
 
 			patient_records = pat.get("/my/records")
 			assert note_body in patient_records.text
@@ -1261,6 +1273,317 @@ def test_medical_records_are_scoped_and_audited():
 				)
 				if str(appointment_id) in appointment_ids(pat.get("/my").text):
 					pat.post(f"/appointments/{appointment_id}/cancel")
+
+
+def _book_for_patient(pat, doctor_email):
+	doctor_id = psql(
+		f"SELECT id FROM doctors WHERE user_id = "
+		f"(SELECT id FROM users WHERE email = '{doctor_email}')"
+	)
+	existing_ids = set(appointment_ids(pat.get("/my").text))
+	for slot_id in slot_ids(pat.get(f"/doctors/{doctor_id}/slots").text):
+		pat.post(f"/slots/{slot_id}/book")
+		created_ids = set(appointment_ids(pat.get("/my").text)) - existing_ids
+		if created_ids:
+			return int(created_ids.pop())
+	pytest.fail("no bookable slot for medical record test")
+
+
+def test_medical_records_follow_visit_status_in_ui():
+	with client() as pat, client() as doctor, client() as other_doctor:
+		login(pat, PAT)
+		login(doctor, DOC)
+		login(other_doctor, DOC2)
+		appointment_id = None
+		marker = uuid.uuid4().hex[:8]
+		diagnosis = f"diagnosis-{marker}"
+		prescription = f"prescription-{marker}"
+		late_note = f"late-note-{marker}"
+		late_prescription = f"late-prescription-{marker}"
+		try:
+			appointment_id = _book_for_patient(pat, DOC)
+			record_url = f"/doctor/appointments/{appointment_id}/records"
+			page = doctor.get(record_url)
+			assert "Report / diagnosis" in page.text
+			assert "<label>Prescription" in page.text
+			assert "<textarea" in page.text
+
+			saved = doctor.post(record_url, data={"record_type": "note", "body": diagnosis})
+			assert "saved=note" in str(saved.url)
+			saved = doctor.post(
+				record_url, data={"record_type": "prescription", "body": prescription}
+			)
+			assert "saved=prescription" in str(saved.url)
+
+			foreign = other_doctor.post(
+				record_url, data={"record_type": "note", "body": f"foreign-{marker}"}
+			)
+			assert "error=record_unavailable" in str(foreign.url)
+
+			my = pat.get("/my").text
+			assert "Report / diagnosis:" in my and diagnosis in my
+			assert "Prescription:" in my and prescription in my
+			assert f"foreign-{marker}" not in my
+
+			cancelled = pat.post(f"/appointments/{appointment_id}/cancel")
+			assert "cancelled=1" in str(cancelled.url)
+
+			my = pat.get("/my").text
+			assert diagnosis in my and prescription in my
+			read_only = doctor.get(record_url)
+			assert diagnosis in read_only.text and prescription in read_only.text
+			assert "read-only" in read_only.text
+			assert "<textarea" not in read_only.text
+			for record_type, body in (("note", late_note), ("prescription", late_prescription)):
+				blocked = doctor.post(record_url, data={"record_type": record_type, "body": body})
+				assert "error=record_unavailable" in str(blocked.url)
+			my = pat.get("/my").text
+			assert late_note not in my and late_prescription not in my
+			assert psql(
+				f"SELECT count(*) FROM visit_notes WHERE appointment_id = {appointment_id}"
+			) == "1"
+			assert psql(
+				f"SELECT count(*) FROM prescriptions WHERE appointment_id = {appointment_id}"
+			) == "1"
+		finally:
+			if appointment_id is not None:
+				psql(
+					f"DELETE FROM prescriptions WHERE appointment_id = {appointment_id};"
+					f"DELETE FROM visit_notes WHERE appointment_id = {appointment_id}"
+				)
+				if str(appointment_id) in appointment_ids(pat.get("/my").text):
+					pat.post(f"/appointments/{appointment_id}/cancel")
+
+
+def _doctor_insert_sql(table, appointment_sql, doctor_user_email, status):
+	return f"""
+		BEGIN;
+		INSERT INTO appointments (slot_id, patient_user_id, doctor_id, starts_at, ends_at, reserved_ends_at, status)
+		  SELECT id, (SELECT id FROM users WHERE email = '{PAT}'), doctor_id, starts_at,
+		         starts_at + make_interval(mins => duration_minutes), ends_at, '{status}'
+		  FROM ({appointment_sql}) AS slot
+		  RETURNING id AS probe_id, doctor_id AS probe_doctor, patient_user_id AS probe_patient \\gset
+		SELECT set_config('app.user_id',
+		  (SELECT id FROM users WHERE email = '{doctor_user_email}')::text, true);
+		SET LOCAL ROLE app_doctor;
+		INSERT INTO {table} (appointment_id, doctor_id, patient_user_id, body)
+		  VALUES (:probe_id, :probe_doctor, :probe_patient, 'probe');
+		ROLLBACK;
+	"""
+
+
+def _run_psql_raw(sql):
+	return subprocess.run(
+		["docker", "compose", "exec", "-T", "db", "psql", "-X", "-U", "clinic",
+		 "-d", "clinic", "-v", "ON_ERROR_STOP=1", "-At"],
+		cwd=ROOT, input=sql, capture_output=True, text=True,
+	)
+
+
+@pytest.mark.parametrize("table", ["visit_notes", "prescriptions"])
+def test_db_blocks_medical_writes_on_cancelled_or_foreign_visit(table):
+	free_slot = (
+		"SELECT s.* FROM slots s JOIN doctors d ON d.id = s.doctor_id "
+		f"JOIN users u ON u.id = d.user_id AND u.email = '{DOC}' "
+		"WHERE s.starts_at > now() + interval '1 hour' "
+		"AND NOT EXISTS (SELECT 1 FROM appointments a WHERE a.slot_id = s.id) "
+		"ORDER BY s.id LIMIT 1"
+	)
+	own_scheduled = _run_psql_raw(_doctor_insert_sql(table, free_slot, DOC, "scheduled"))
+	assert own_scheduled.returncode == 0, own_scheduled.stderr
+	assert own_scheduled.stdout.count("INSERT 0 1") == 2, own_scheduled.stdout
+
+	own_cancelled = _run_psql_raw(_doctor_insert_sql(table, free_slot, DOC, "cancelled"))
+	assert own_cancelled.returncode != 0
+	assert "row-level security" in own_cancelled.stderr
+
+	foreign = _run_psql_raw(_doctor_insert_sql(table, free_slot, DOC2, "scheduled"))
+	assert foreign.returncode != 0
+	assert "row-level security" in foreign.stderr
+
+	for role in ("app_admin", "app_registrar"):
+		denied = _run_psql_raw(
+			f"BEGIN; SET LOCAL ROLE {role}; SELECT body FROM {table} LIMIT 1; ROLLBACK;"
+		)
+		assert denied.returncode != 0
+		assert "permission denied" in denied.stderr
+
+
+def _past_visit(doctor_email, patient_email=PAT, status="scheduled"):
+	for _ in range(20):
+		days = 20 + int(uuid.uuid4().int % 300)
+		hours = int(uuid.uuid4().int % 10)
+		result = _run_psql_raw(f"""
+			INSERT INTO appointments
+			  (slot_id, patient_user_id, doctor_id, starts_at, ends_at, reserved_ends_at, status)
+			SELECT s.id, (SELECT id FROM users WHERE email = '{patient_email}'), s.doctor_id,
+			       t.st, t.st + make_interval(mins => s.duration_minutes),
+			       t.st + (s.ends_at - s.starts_at), '{status}'
+			FROM slots s
+			JOIN doctors d ON d.id = s.doctor_id
+			JOIN users u ON u.id = d.user_id AND u.email = '{doctor_email}'
+			CROSS JOIN LATERAL (
+			  SELECT date_trunc('hour', now()::timestamp)
+			         - interval '{days} days' - interval '{hours} hours' AS st
+			) t
+			ORDER BY s.id LIMIT 1
+			RETURNING id;
+		""")
+		if result.returncode == 0:
+			return int(result.stdout.split()[0])
+	pytest.fail("could not create a past visit")
+
+
+def _as_role(role, email, sql):
+	return _run_psql_raw(
+		"BEGIN;\n"
+		f"SELECT set_config('app.user_id', (SELECT id FROM users WHERE email = '{email}')::text, true);\n"
+		f"SET LOCAL ROLE {role};\n{sql}\nCOMMIT;\n"
+	)
+
+
+def _status(appointment_id):
+	return psql(f"SELECT status FROM appointments WHERE id = {appointment_id}")
+
+
+def _drop_visit(appointment_id):
+	psql(
+		f"DELETE FROM prescriptions WHERE appointment_id = {appointment_id};"
+		f"DELETE FROM visit_notes WHERE appointment_id = {appointment_id};"
+		f"DELETE FROM appointments WHERE id = {appointment_id}"
+	)
+
+
+def test_only_doctor_can_complete_own_started_visit():
+	visit = _past_visit(DOC)
+	try:
+		complete = f"UPDATE appointments SET status = 'completed' WHERE id = {visit};"
+		for role, email in (
+			("app_patient", PAT),
+			("app_registrar", REG),
+			("app_admin", ADMIN),
+			("app_doctor", DOC2),
+		):
+			_as_role(role, email, complete)
+			assert _status(visit) == "scheduled", role
+
+		done = _as_role("app_doctor", DOC, complete)
+		assert done.returncode == 0, done.stderr
+		assert "UPDATE 1" in done.stdout
+		assert _status(visit) == "completed"
+
+		# completed is final: nobody can cancel or reopen it
+		for role, email in (
+			("app_patient", PAT),
+			("app_registrar", REG),
+			("app_admin", ADMIN),
+			("app_doctor", DOC),
+		):
+			for target in ("cancelled", "scheduled"):
+				_as_role(
+					role, email,
+					f"UPDATE appointments SET status = '{target}' WHERE id = {visit};",
+				)
+				assert _status(visit) == "completed", (role, target)
+	finally:
+		_drop_visit(visit)
+
+
+def test_doctor_cannot_complete_future_visit():
+	with client() as pat:
+		login(pat, PAT)
+		visit = _book_for_patient(pat, DOC)
+		try:
+			_as_role(
+				"app_doctor", DOC,
+				f"UPDATE appointments SET status = 'completed' WHERE id = {visit};",
+			)
+			assert _status(visit) == "scheduled"
+		finally:
+			pat.post(f"/appointments/{visit}/cancel")
+
+
+def test_records_on_completed_visit_and_survive_status_change():
+	visit = _past_visit(DOC)
+	cancelled_visit = _past_visit(DOC, status="cancelled")
+	marker = uuid.uuid4().hex[:8]
+	try:
+		with client() as doctor, client() as pat:
+			login(doctor, DOC)
+			login(pat, PAT)
+			record_url = f"/doctor/appointments/{visit}/records"
+			page = doctor.get(record_url).text
+			assert "Mark as completed" in page
+			saved = doctor.post(
+				record_url, data={"record_type": "note", "body": f"before-{marker}"}
+			)
+			assert "saved=note" in str(saved.url)
+
+			done = doctor.post(f"/doctor/appointments/{visit}/complete")
+			assert "completed=1" in str(done.url)
+			assert _status(visit) == "completed"
+			page = done.text
+			assert "Mark as completed" not in page
+			assert "<textarea" in page
+			assert f"before-{marker}" in page
+
+			for record_type in ("note", "prescription"):
+				saved = doctor.post(
+					record_url, data={"record_type": record_type, "body": f"after-{marker}"}
+				)
+				assert f"saved={record_type}" in str(saved.url)
+			assert psql(
+				f"SELECT count(*) FROM visit_notes WHERE appointment_id = {visit}"
+			) == "2"
+
+			my = pat.get("/my").text
+			assert "(completed)" in my
+			assert f"before-{marker}" in my and f"after-{marker}" in my
+
+			again = doctor.post(f"/doctor/appointments/{visit}/complete")
+			assert "error=complete_unavailable" in str(again.url)
+
+			cancelled_url = f"/doctor/appointments/{cancelled_visit}/records"
+			page = doctor.get(cancelled_url).text
+			assert "<textarea" not in page and "Mark as completed" not in page
+			blocked = doctor.post(
+				cancelled_url, data={"record_type": "note", "body": f"late-{marker}"}
+			)
+			assert "error=record_unavailable" in str(blocked.url)
+			blocked = doctor.post(f"/doctor/appointments/{cancelled_visit}/complete")
+			assert "error=complete_unavailable" in str(blocked.url)
+
+		for role in ("app_admin", "app_registrar"):
+			denied = _as_role(role, ADMIN if role == "app_admin" else REG,
+				f"SELECT body FROM visit_notes WHERE appointment_id = {visit};")
+			assert denied.returncode != 0
+			assert "permission denied" in denied.stderr
+	finally:
+		_drop_visit(visit)
+		_drop_visit(cancelled_visit)
+
+
+def test_notes_survive_cancel_of_scheduled_visit():
+	visit = _past_visit(DOC)
+	try:
+		wrote = _as_role(
+			"app_doctor", DOC,
+			"INSERT INTO visit_notes (appointment_id, doctor_id, patient_user_id, body) "
+			f"SELECT id, doctor_id, patient_user_id, 'kept' FROM appointments WHERE id = {visit};",
+		)
+		assert "INSERT 0 1" in wrote.stdout, wrote.stderr
+		psql(f"UPDATE appointments SET status = 'cancelled' WHERE id = {visit}")
+		assert psql(
+			f"SELECT count(*) FROM visit_notes WHERE appointment_id = {visit}"
+		) == "1"
+		late = _as_role(
+			"app_doctor", DOC,
+			"INSERT INTO visit_notes (appointment_id, doctor_id, patient_user_id, body) "
+			f"SELECT id, doctor_id, patient_user_id, 'late' FROM appointments WHERE id = {visit};",
+		)
+		assert late.returncode != 0 and "row-level security" in late.stderr
+	finally:
+		_drop_visit(visit)
 
 
 def test_admin_can_view_doctor_slots_without_actions():
@@ -1364,7 +1687,7 @@ def test_registrar_patient_directory_search_and_booking_prefill():
 		assert f'name="patient_email"' in slots_page.text
 
 		denied = patient.get("/registrar/patients/search?q=pat")
-		assert "/login" in str(denied.url)
+		assert denied.status_code == 403
 
 
 def test_registrar_patient_directory_marks_blocked_accounts():
@@ -1622,7 +1945,7 @@ def test_admin_slot_generator_respects_time_off_and_role():
 			f"/admin/doctors/{doctor_id}/generate",
 			data={"from_date": "2026-10-19", "to_date": "2026-10-19"},
 		)
-		assert "/login" in str(unauthorized.url)
+		assert unauthorized.status_code == 403
 
 
 def test_slot_generator_advances_across_nonworking_dates():
@@ -1731,7 +2054,7 @@ def test_admin_schedule_configuration_is_admin_only_and_repeatable():
 			assert response.status_code == 200
 			assert "/admin/schedule?saved=" in str(response.url)
 			unauthorized = registrar.post(path, data=data)
-			assert "/login" in str(unauthorized.url)
+			assert unauthorized.status_code == 403
 
 		past_day = psql("SELECT CURRENT_DATE - 1")
 		past_time_off = admin.post(
@@ -2001,7 +2324,7 @@ def test_apply_hours_removes_free_slots_outside_window_only():
 				"/admin/schedule/apply-hours",
 				data={"doctor_ids": doctor_id},
 			)
-			assert "/login" in str(denied.url)
+			assert denied.status_code == 403
 			applied = admin.post(
 				"/admin/schedule/apply-hours",
 				data={"doctor_ids": doctor_id},
@@ -2105,7 +2428,7 @@ def test_patient_overlap_rejected_by_exclusion_without_python_select():
 	levon_slot = psql(
 		"""
 		INSERT INTO slots (doctor_id, starts_at, ends_at)
-		SELECT id, TIMESTAMP '2036-05-05 10:30', TIMESTAMP '2036-05-05 11:30'
+		SELECT id, TIMESTAMP '2036-05-05 10:15', TIMESTAMP '2036-05-05 11:15'
 		FROM doctors WHERE full_name = 'Levon Petrosyan'
 		RETURNING id
 		"""
@@ -2151,9 +2474,9 @@ def test_session_role_and_block_come_from_database():
 			assert "Role: patient" not in me.text
 			admin_page = pat.get("/admin/users")
 			assert admin_page.status_code == 200
-			assert "Manage patients" in admin_page.text
+			assert "Manage staff" in admin_page.text
 			mine = pat.get("/my")
-			assert "/login" in str(mine.url)
+			assert mine.status_code == 403
 		finally:
 			psql("UPDATE users SET role = 'patient' WHERE email = 'pat@clinic.local'")
 
@@ -3659,7 +3982,7 @@ def test_admin_clinic_settings_are_visible_and_admin_only():
 
 			login(doctor, DOC)
 			forbidden = doctor.get("/admin/settings")
-			assert "/login" in str(forbidden.url)
+			assert forbidden.status_code == 403
 
 	finally:
 		psql(
@@ -3669,3 +3992,288 @@ def test_admin_clinic_settings_are_visible_and_admin_only():
 			+ old_phone.replace("'", "''")
 			+ "' WHERE id = 1"
 		)
+
+
+def test_cancel_requires_csrf_token():
+	with client() as pat:
+		login(pat, PAT)
+		_, slot_id = open_free_slot_page(pat)
+		existing_ids = set(appointment_ids(pat.get("/my").text))
+		pat.post(f"/slots/{slot_id}/book")
+		mine = pat.get("/my")
+		new_ids = set(appointment_ids(mine.text)) - existing_ids
+		assert new_ids
+		appointment_id = new_ids.pop()
+
+		missing = pat.post(f"/appointments/{appointment_id}/cancel", data={}, csrf=False)
+		assert missing.status_code == 403
+		wrong = pat.post(
+			f"/appointments/{appointment_id}/cancel",
+			data={"csrf_token": "wrong-token"},
+			csrf=False,
+		)
+		assert wrong.status_code == 403
+		assert appointment_id in appointment_ids(pat.get("/my").text)
+
+		form = re.search(
+			rf'action="/appointments/{appointment_id}/cancel".*?name="csrf_token" value="([^"]+)"',
+			pat.get("/my").text,
+			re.S,
+		)
+		assert form, "cancel form has no CSRF token"
+		cancelled = pat.post(
+			f"/appointments/{appointment_id}/cancel",
+			data={"csrf_token": form.group(1)},
+			csrf=False,
+		)
+		assert cancelled.status_code == 200
+		assert appointment_id not in appointment_ids(pat.get("/my").text)
+
+
+def test_doctor_calendar_shows_cancelled_visit_and_slot_stays_bookable():
+	with client() as pat, client() as pat2, client() as doctor:
+		login(pat, PAT)
+		login(pat2, PAT2)
+		login(doctor, DOC)
+		appointment_id = _book_for_patient(pat, DOC)
+		slot_id, day, start = psql(
+			f"SELECT slot_id, starts_at::date, to_char(starts_at, 'HH24:MI') "
+			f"FROM appointments WHERE id = {appointment_id}"
+		).split("|")
+		pat.post(f"/appointments/{appointment_id}/cancel")
+		assert _status(appointment_id) == "cancelled"
+
+		calendar = doctor.get(f"/doctor/calendar?day={day}").text
+		assert re.search(
+			rf'<li style="color: gray">\s*{start}[\s\S]*?{re.escape(PAT)} — cancelled',
+			calendar,
+		)
+		assert re.search(rf"<li>\s*{start}[\s\S]*?Available", calendar)
+
+		existing_ids = set(appointment_ids(pat2.get("/my").text))
+		pat2.post(f"/slots/{slot_id}/book")
+		created = set(appointment_ids(pat2.get("/my").text)) - existing_ids
+		assert created, "cancelled slot was not bookable again"
+		new_id = created.pop()
+		assert psql(f"SELECT slot_id FROM appointments WHERE id = {new_id}") == slot_id
+		pat2.post(f"/appointments/{new_id}/cancel")
+
+
+def test_wrong_role_gets_403_and_guest_goes_to_login():
+	with client() as guest:
+		page = guest.get("/admin/users")
+		assert page.url.path == "/login"
+	with client() as pat, client() as doctor, client() as registrar:
+		login(pat, PAT)
+		login(doctor, DOC)
+		login(registrar, REG)
+		for c, path in (
+			(pat, "/admin/users"),
+			(pat, "/doctor/patients"),
+			(doctor, "/registrar/patients"),
+			(registrar, "/my"),
+		):
+			denied = c.get(path)
+			assert denied.status_code == 403
+			assert denied.url.path == path
+			assert "Access denied" in denied.text
+		post = pat.post("/admin/holidays", data={"holiday_day": "2030-01-01", "name": "x"})
+		assert post.status_code == 403
+		assert "Access denied" in post.text
+
+
+def test_logout_revokes_copied_session_cookie():
+	with client() as c:
+		login(c, PAT2)
+		assert c.get("/my").url.path == "/my"
+		copied = dict(c.cookies)
+		logout(c)
+	with CsrfClient(base_url=BASE, follow_redirects=False, timeout=10.0, cookies=copied) as replay:
+		page = replay.get("/my")
+		assert page.status_code == 303
+		assert page.headers["location"].endswith("/login")
+
+
+def test_patient_cannot_forge_audit_events():
+	for action, target_type, target in (
+		("admin.user_delete", "user", "1"),
+		("service.delete", "service", "1"),
+		("appointment.cancel", "appointment", "(SELECT max(id) FROM appointments WHERE patient_user_id <> current_setting('app.user_id')::int)"),
+		("user.email_notifications", "user", "1"),
+	):
+		forged = _as_role(
+			"app_patient", PAT,
+			f"SELECT public.record_audit_event('{action}', '{target_type}', {target});",
+		)
+		assert forged.returncode != 0, (action, forged.stdout)
+		assert "not allowed" in forged.stderr or "permission denied" in forged.stderr
+	direct = _as_role(
+		"app_patient", PAT,
+		"INSERT INTO audit_events (actor_user_id, actor_role, action, target_type) "
+		"VALUES (1, 'admin', 'x', 'y');",
+	)
+	assert direct.returncode != 0
+	assert "permission denied" in direct.stderr
+	own = _as_role(
+		"app_patient", PAT,
+		"SELECT public.record_audit_event('user.email_notifications', 'user', "
+		"current_setting('app.user_id')::int);",
+	)
+	assert own.returncode == 0, own.stderr
+
+
+def test_cancelled_only_patient_is_not_own_patient_of_doctor():
+	email = f"cancelled-only-{uuid.uuid4().hex[:10]}@example.test"
+	psql(
+		"INSERT INTO users (email, password_hash, role, blocked) "
+		f"VALUES ('{email}', (SELECT password_hash FROM users WHERE email = '{PAT}'), 'patient', false)"
+	)
+	patient_id = int(psql(f"SELECT id FROM users WHERE email = '{email}'"))
+	visit = _past_visit(DOC, patient_email=email, status="cancelled")
+	try:
+		listed = _as_role("app_doctor", DOC, f"SELECT count(*) FROM public.doctor_patients(current_setting('app.user_id')::int) WHERE id = {patient_id};")
+		assert listed.returncode == 0, listed.stderr
+		assert listed.stdout.split()[-2] == "0", listed.stdout
+		with client() as doctor:
+			login(doctor, DOC)
+			assert email not in doctor.get("/doctor/patients").text
+			page = doctor.get(f"/doctor/patients/{patient_id}")
+			assert "patient_unavailable" in str(page.url)
+		psql(f"UPDATE appointments SET status = 'completed' WHERE id = {visit}")
+		listed = _as_role("app_doctor", DOC, f"SELECT count(*) FROM public.doctor_patients(current_setting('app.user_id')::int) WHERE id = {patient_id};")
+		assert listed.stdout.split()[-2] == "1", listed.stdout
+	finally:
+		_drop_visit(visit)
+		psql(f"DELETE FROM users WHERE id = {patient_id}")
+
+
+def test_admin_cannot_cancel_started_visit():
+	visit = _past_visit(DOC, patient_email=PAT2)
+	try:
+		with client() as admin:
+			login(admin, ADMIN)
+			admin.post(f"/appointments/{visit}/cancel")
+			assert _status(visit) == "scheduled"
+			admin.post(f"/admin/users/{psql(f'SELECT id FROM users WHERE email = {chr(39)}{PAT2}{chr(39)}')}/cancel-future-appointments")
+			assert _status(visit) == "scheduled"
+		direct = _as_role(
+			"app_admin", ADMIN,
+			f"UPDATE appointments SET status = 'cancelled' WHERE id = {visit};",
+		)
+		assert direct.returncode == 0, direct.stderr
+		assert "UPDATE 0" in direct.stdout
+		assert _status(visit) == "scheduled"
+	finally:
+		_drop_visit(visit)
+
+
+def test_unicode_digits_in_ids_are_rejected_without_500():
+	with client() as doctor, client() as admin:
+		login(doctor, DOC)
+		login(admin, ADMIN)
+		for c, method, path in (
+			(doctor, "post", "/doctor/appointments/²/complete"),
+			(doctor, "get", "/doctor/appointments/²/records"),
+			(doctor, "get", "/doctor/patients/٣"),
+			(admin, "get", "/doctors/²/slots"),
+			(admin, "post", "/admin/users/²/block"),
+			(admin, "post", "/admin/services/¹/deactivate"),
+		):
+			response = getattr(c, method)(path)
+			assert response.status_code < 500, (path, response.status_code)
+		admin.post("/admin/users/ ² /block")
+		padded = admin.get("/doctors/ 1 /slots")
+		assert padded.status_code == 200
+
+
+def test_calendar_day_outside_supported_years_shows_error():
+	with client() as doctor, client() as registrar:
+		login(doctor, DOC)
+		login(registrar, REG)
+		for c, path in ((doctor, "/doctor/calendar"), (registrar, "/registrar/appointments")):
+			for day in ("0001-01-01", "9999-12-31", "1899-12-31", "2101-01-01"):
+				for view in ("day", "week"):
+					page = c.get(path, params={"day": day, "view": view})
+					assert page.status_code == 200, (path, day, view, page.status_code)
+					assert "between years 1900 and 2100" in page.text
+			edge = c.get(path, params={"day": "2100-12-31"})
+			assert edge.status_code == 200
+			assert "between years 1900 and 2100" not in edge.text
+
+
+def test_slot_generation_respects_max_future_days():
+	far = date.today() + timedelta(days=366 * 2 + 10)
+	before = psql(f"SELECT count(*) FROM slots WHERE starts_at::date >= '{far.isoformat()}'")
+	with client() as admin:
+		login(admin, ADMIN)
+		page = admin.post(
+			"/admin/schedule/generate",
+			data={"doctor_ids": ["1"], "from_date": far.isoformat(), "to_date": (far + timedelta(days=3)).isoformat()},
+		)
+		assert "error=range_too_far" in str(page.url)
+		assert "more than two years ahead" in page.text
+	assert psql(f"SELECT count(*) FROM slots WHERE starts_at::date >= '{far.isoformat()}'") == before
+
+
+def test_error_responses_are_html_pages():
+	with client() as pat, client() as admin:
+		login(pat, PAT)
+		login(admin, ADMIN)
+		csrf = pat.post("/me/notifications", data={}, csrf=False)
+		assert csrf.status_code == 403
+		assert csrf.headers["content-type"].startswith("text/html")
+		assert "Session expired, please refresh the page" in csrf.text
+		not_allowed = pat.get("/appointments/1/cancel")
+		assert not_allowed.status_code == 405
+		assert not_allowed.headers["content-type"].startswith("text/html")
+		assert "Method not allowed" in not_allowed.text
+		invalid = admin.post("/admin/schedule/generate", data={"doctor_ids": ["1"], "from_date": "not-a-date"})
+		assert invalid.status_code == 422
+		assert invalid.headers["content-type"].startswith("text/html")
+		assert "Invalid input" in invalid.text
+		bad = admin.post(
+			"/admin/holidays",
+			content=b"broken",
+			headers={"content-type": "multipart/form-data"},
+		)
+		assert bad.status_code == 400
+		assert bad.headers["content-type"].startswith("text/html")
+		assert "Bad request" in bad.text
+
+
+def test_medical_text_drops_control_characters():
+	marker = uuid.uuid4().hex[:8]
+	with client() as pat, client() as doctor:
+		login(pat, PAT)
+		login(doctor, DOC)
+		appointment_id = _book_for_patient(pat, DOC)
+		try:
+			for record_type, table in (("note", "visit_notes"), ("prescription", "prescriptions")):
+				raw = f"{record_type}-{marker}\x07\x1b[31m\x7f\u0085\r\nline2\tcol"
+				doctor.post(
+					f"/doctor/appointments/{appointment_id}/records",
+					data={"record_type": record_type, "body": raw},
+				)
+				stored = psql(
+					f"SELECT md5(body) FROM {table} "
+					f"WHERE appointment_id = {appointment_id} ORDER BY id DESC LIMIT 1"
+				)
+				expected = psql(
+					f"SELECT md5(E'{record_type}-{marker}[31m\\nline2\\tcol')"
+				)
+				assert stored == expected, (stored, expected)
+		finally:
+			psql(f"DELETE FROM visit_notes WHERE appointment_id = {appointment_id}")
+			psql(f"DELETE FROM prescriptions WHERE appointment_id = {appointment_id}")
+			pat.post(f"/appointments/{appointment_id}/cancel")
+
+
+def test_holiday_in_the_past_is_rejected():
+	past = (date.today() - timedelta(days=3)).isoformat()
+	name = f"Past-{uuid.uuid4().hex[:6]}"
+	with client() as admin:
+		login(admin, ADMIN)
+		page = admin.post("/admin/holidays", data={"holiday_day": past, "name": name})
+		assert "error=holiday_in_past" in str(page.url)
+		assert "A holiday cannot be in the past." in page.text
+	assert psql(f"SELECT count(*) FROM holidays WHERE name = '{name}'") == "0"

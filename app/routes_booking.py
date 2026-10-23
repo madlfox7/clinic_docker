@@ -136,7 +136,7 @@ def doctor_slots(request: Request, doctor_id: str):
                 FROM appointments a
                 JOIN doctors d ON d.id = a.doctor_id
                 WHERE a.patient_user_id=%s
-                  AND a.status='scheduled'
+                  AND a.status IN ('scheduled', 'completed')
                   AND a.ends_at > CURRENT_TIMESTAMP
                 ORDER BY a.starts_at
                 """,
@@ -196,7 +196,7 @@ def doctor_slots(request: Request, doctor_id: str):
                        SELECT 1
                        FROM appointments a
                        WHERE a.doctor_id = s.doctor_id
-                         AND a.status = 'scheduled'
+                         AND a.status IN ('scheduled', 'completed')
                          AND a.patient_user_id = %s
                          AND a.starts_at < s.starts_at
                                + make_interval(mins => s.duration_minutes)
@@ -206,7 +206,7 @@ def doctor_slots(request: Request, doctor_id: str):
                        SELECT a.id
                        FROM appointments a
                        WHERE a.doctor_id = s.doctor_id
-                         AND a.status = 'scheduled'
+                         AND a.status IN ('scheduled', 'completed')
                          AND a.starts_at < s.ends_at
                          AND a.reserved_ends_at > s.starts_at
                        ORDER BY a.starts_at
@@ -474,7 +474,7 @@ def book_slot(
         SELECT a.id
         FROM appointments a
         WHERE a.patient_user_id = %s
-          AND a.status = 'scheduled'
+          AND a.status IN ('scheduled', 'completed')
           AND a.starts_at < %s
           AND a.ends_at > %s
         """,
@@ -610,7 +610,7 @@ def cancel_appointment(request: Request, appointment_id: str):
             )
         return RedirectResponse("/doctors", status_code=303)
 
-    if role == "registrar" and not is_future:
+    if role in ("registrar", "admin") and not is_future:
         cur.close()
         conn.close()
         return RedirectResponse(
@@ -657,6 +657,7 @@ def cancel_appointment(request: Request, appointment_id: str):
             UPDATE appointments
             SET status='cancelled'
             WHERE id=%s AND status='scheduled'
+              AND starts_at > CURRENT_TIMESTAMP
             """,
             (appointment_id,),
         )
@@ -742,6 +743,22 @@ def my_appointments(request: Request):
         }
         for r in cur.fetchall()
     ]
+    items_by_id = {item["id"]: item for item in items}
+    for item in items:
+        item["notes"] = []
+        item["prescriptions"] = []
+    cur.execute(
+        """
+        SELECT 'notes', appointment_id, id, body FROM visit_notes
+        UNION ALL
+        SELECT 'prescriptions', appointment_id, id, body FROM prescriptions
+        ORDER BY 2, 3
+        """
+    )
+    for kind, appointment_id, _record_id, body in cur.fetchall():
+        item = items_by_id.get(appointment_id)
+        if item is not None:
+            item[kind].append(body)
     booking_confirmation = None
     raw_confirmation_id = request.query_params.get("appointment_id")
     confirmation_id = (
@@ -788,7 +805,7 @@ def doctor_appointments(request: Request):
         JOIN slots s ON s.id=a.slot_id
         JOIN services svc ON svc.id=s.service_id
         JOIN doctors d ON d.id=s.doctor_id
-        JOIN public.doctor_patients(%s) dp ON dp.id=a.patient_user_id
+        JOIN public.doctor_visit_patients(%s) dp ON dp.id=a.patient_user_id
         WHERE d.user_id=%s
         ORDER BY a.starts_at
         """,

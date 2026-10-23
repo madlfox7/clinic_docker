@@ -6,6 +6,7 @@
 {% elif error == "invalid_text" %}<p>Text fields cannot contain a NUL character.</p>
 {% elif error == "invalid_phone" %}<p>Enter a phone number using digits, spaces, and +()- only.</p>{% endif %}
 <form method="post" action="/admin/settings">
+  <input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}">
   <label>Address <input name="address" value="{{ address }}" maxlength="300"></label>
   <label>Phone <input name="phone" value="{{ phone }}" maxlength="40" pattern="[0-9+() \-]{5,40}" title="Digits, spaces, and +()- only" required></label>
   <button type="submit">Save settings</button>

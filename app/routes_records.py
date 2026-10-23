@@ -1,3 +1,4 @@
+import psycopg2.errors
 from fastapi import APIRouter, Form, Request
 from fastapi.responses import RedirectResponse
 
@@ -7,6 +8,7 @@ from db import (
     db_as,
     parse_strict_int,
     record_audit_event,
+    strip_control_chars,
     templates,
     within_length,
 )
@@ -202,10 +204,11 @@ def doctor_records(request: Request, appointment_id: str):
     cur = conn.cursor()
     cur.execute(
         """
-        SELECT a.id, dp.email, d.full_name, a.starts_at, a.ends_at, a.status
+        SELECT a.id, dp.email, d.full_name, a.starts_at, a.ends_at, a.status,
+               a.starts_at <= CURRENT_TIMESTAMP AS started
         FROM appointments a
         JOIN doctors d ON d.id = a.doctor_id
-        JOIN public.doctor_patients(%s) dp ON dp.id = a.patient_user_id
+        JOIN public.doctor_visit_patients(%s) dp ON dp.id = a.patient_user_id
         WHERE a.id = %s
           AND d.user_id = %s
         """,
@@ -255,10 +258,12 @@ def doctor_records(request: Request, appointment_id: str):
                 "ends_at": appointment[4],
                 "status": appointment[5],
             },
-            "can_edit": appointment[5] == "scheduled",
+            "can_edit": appointment[5] in ("scheduled", "completed"),
+            "can_complete": appointment[5] == "scheduled" and appointment[6],
             "notes": notes,
             "prescriptions": prescriptions,
             "saved": request.query_params.get("saved"),
+            "completed": request.query_params.get("completed"),
             "error": request.query_params.get("error"),
         },
     )
@@ -286,7 +291,7 @@ def save_doctor_record(
             status_code=303,
         )
     record_type = record_type.strip().lower()
-    body = body.strip()
+    body = strip_control_chars(body).strip()
     if record_type not in ("note", "prescription"):
         return RedirectResponse(
             f"/doctor/appointments/{appointment_id}/records?error=invalid_type",
@@ -307,38 +312,37 @@ def save_doctor_record(
 
     conn = db_as(user)
     cur = conn.cursor()
-    if record_type == "note":
-        cur.execute(
-            """
-            INSERT INTO visit_notes (appointment_id, doctor_id, patient_user_id, body)
-            SELECT a.id, d.id, a.patient_user_id, %s
-            FROM appointments a
-            JOIN doctors d ON d.id = a.doctor_id
-            WHERE a.id = %s
-              AND d.user_id = %s
-              AND a.status = 'scheduled'
-              AND a.starts_at > CURRENT_TIMESTAMP - INTERVAL '12 months'
-            """,
-            (body, appointment_id, user["id"]),
-        )
-        action = "medical.note.save"
-    else:
-        cur.execute(
-            """
-            INSERT INTO prescriptions (appointment_id, doctor_id, patient_user_id, body)
-            SELECT a.id, d.id, a.patient_user_id, %s
-            FROM appointments a
-            JOIN doctors d ON d.id = a.doctor_id
-            WHERE a.id = %s
-              AND d.user_id = %s
-              AND a.status = 'scheduled'
-              AND a.starts_at > CURRENT_TIMESTAMP - INTERVAL '12 months'
-            """,
-            (body, appointment_id, user["id"]),
-        )
-        action = "medical.prescription.add"
+    # Only locate the doctor's own appointment; the RLS policies decide
+    # whether a record may be written (scheduled or completed visit,
+    # last 12 months).
+    cur.execute(
+        """
+        SELECT a.id, a.doctor_id, a.patient_user_id
+        FROM appointments a
+        JOIN doctors d ON d.id = a.doctor_id
+        WHERE a.id = %s
+          AND d.user_id = %s
+        """,
+        (appointment_id, user["id"]),
+    )
+    appointment = cur.fetchone()
+    table = "visit_notes" if record_type == "note" else "prescriptions"
+    action = "medical.note.save" if record_type == "note" else "medical.prescription.add"
+    saved = False
+    if appointment is not None:
+        try:
+            cur.execute(
+                f"""
+                INSERT INTO {table} (appointment_id, doctor_id, patient_user_id, body)
+                VALUES (%s, %s, %s, %s)
+                """,
+                (appointment[0], appointment[1], appointment[2], body),
+            )
+            saved = cur.rowcount == 1
+        except psycopg2.errors.InsufficientPrivilege:
+            saved = False
 
-    if cur.rowcount != 1:
+    if not saved:
         conn.rollback()
         cur.close()
         conn.close()
@@ -353,6 +357,46 @@ def save_doctor_record(
     conn.close()
     return RedirectResponse(
         f"/doctor/appointments/{appointment_id}/records?saved={record_type}",
+        status_code=303,
+    )
+
+
+@router.post("/doctor/appointments/{appointment_id}/complete")
+def complete_doctor_appointment(request: Request, appointment_id: str):
+    user, denied = require_user(request, "doctor")
+    if denied:
+        return denied
+    appointment_id = parse_strict_int(appointment_id, min_value=1)
+    if appointment_id is None:
+        return RedirectResponse(
+            "/doctor/appointments?error=record_unavailable", status_code=303
+        )
+
+    conn = db_as(user)
+    cur = conn.cursor()
+    # RLS allows only the doctor's own started scheduled visit -> completed.
+    try:
+        cur.execute(
+            "UPDATE appointments SET status = 'completed' WHERE id = %s",
+            (appointment_id,),
+        )
+        done = cur.rowcount == 1
+    except psycopg2.errors.InsufficientPrivilege:
+        done = False
+    if not done:
+        conn.rollback()
+        cur.close()
+        conn.close()
+        return RedirectResponse(
+            f"/doctor/appointments/{appointment_id}/records?error=complete_unavailable",
+            status_code=303,
+        )
+    record_audit_event(cur, "appointment.complete", "appointment", appointment_id)
+    conn.commit()
+    cur.close()
+    conn.close()
+    return RedirectResponse(
+        f"/doctor/appointments/{appointment_id}/records?completed=1",
         status_code=303,
     )
 

@@ -305,8 +305,22 @@ CREATE TABLE IF NOT EXISTS appointments (
   slot_id INTEGER NOT NULL REFERENCES slots(id),
   patient_user_id INTEGER NOT NULL REFERENCES users(id),
   status TEXT NOT NULL DEFAULT 'scheduled'
-    CHECK (status IN ('scheduled', 'cancelled'))
+    CHECK (status IN ('scheduled', 'completed', 'cancelled'))
 );
+
+-- upgrade older databases: allow 'completed'
+DO $$
+BEGIN
+  IF EXISTS (
+    SELECT 1 FROM pg_constraint
+    WHERE conname = 'appointments_status_check'
+      AND conrelid = 'public.appointments'::regclass
+      AND pg_get_constraintdef(oid) NOT LIKE '%completed%'
+  ) THEN
+    ALTER TABLE public.appointments DROP CONSTRAINT appointments_status_check;
+  END IF;
+END
+$$;
 
 DO $$
 BEGIN
@@ -317,7 +331,7 @@ BEGIN
   ) THEN
     ALTER TABLE public.appointments
       ADD CONSTRAINT appointments_status_check
-      CHECK (status IN ('scheduled', 'cancelled'));
+      CHECK (status IN ('scheduled', 'completed', 'cancelled'));
   END IF;
 END
 $$;
@@ -327,9 +341,22 @@ DROP CONSTRAINT IF EXISTS appointments_slot_id_key;
 
 DROP INDEX IF EXISTS appointments_slot_id_key;
 
+DO $$
+BEGIN
+  IF EXISTS (
+    SELECT 1 FROM pg_indexes
+    WHERE indexname = 'appointments_one_scheduled_per_slot'
+      AND indexdef NOT LIKE '%completed%'
+  ) THEN
+    DROP INDEX public.appointments_one_scheduled_per_slot;
+  END IF;
+END
+$$;
+
+-- a completed visit keeps its slot taken, like a scheduled one
 CREATE UNIQUE INDEX IF NOT EXISTS appointments_one_scheduled_per_slot
 ON appointments (slot_id)
-WHERE status = 'scheduled';
+WHERE status IN ('scheduled', 'completed');
 
 DROP INDEX IF EXISTS slots_doctor_start;
 CREATE UNIQUE INDEX IF NOT EXISTS slots_doctor_service_start
@@ -424,6 +451,19 @@ ALTER TABLE appointments
 
 DO $$
 BEGIN
+  IF EXISTS (
+    SELECT 1 FROM pg_constraint
+    WHERE conname = 'appointments_no_overlap_per_doctor_reservation'
+      AND conrelid = 'appointments'::regclass
+      AND pg_get_constraintdef(oid) NOT LIKE '%completed%'
+  ) THEN
+    ALTER TABLE appointments DROP CONSTRAINT appointments_no_overlap_per_doctor_reservation;
+  END IF;
+END
+$$;
+
+DO $$
+BEGIN
   IF NOT EXISTS (
     SELECT 1 FROM pg_constraint
     WHERE conname = 'appointments_no_overlap_per_doctor_reservation'
@@ -436,7 +476,20 @@ BEGIN
         doctor_id WITH =,
         doctor_period WITH &&
       )
-      WHERE (status = 'scheduled');
+      WHERE (status IN ('scheduled', 'completed'));
+  END IF;
+END
+$$;
+
+DO $$
+BEGIN
+  IF EXISTS (
+    SELECT 1 FROM pg_constraint
+    WHERE conname = 'appointments_no_overlap_per_patient'
+      AND conrelid = 'appointments'::regclass
+      AND pg_get_constraintdef(oid) NOT LIKE '%completed%'
+  ) THEN
+    ALTER TABLE appointments DROP CONSTRAINT appointments_no_overlap_per_patient;
   END IF;
 END
 $$;
@@ -455,7 +508,7 @@ BEGIN
         patient_user_id WITH =,
         period WITH &&
       )
-      WHERE (status = 'scheduled');
+      WHERE (status IN ('scheduled', 'completed'));
   END IF;
 END
 $$;

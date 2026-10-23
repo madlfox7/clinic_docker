@@ -6,6 +6,7 @@
 {% elif error == "invalid_details" %}<p>Enter a name and specialty of 2–100 characters, and experience from 0 to 70 years.</p>
 {% elif error == "password_link_failed" %}<p>The setup email could not be sent. The account was not created.</p>{% endif %}
 <form method="post" action="/admin/doctors">
+  <input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}">
   <label>Email <input name="email" type="email" maxlength="254" required></label>
   <label>Full name <input name="full_name" minlength="2" maxlength="100" required></label>
   <label>Specialty <input name="specialty" minlength="2" maxlength="100" required></label>
