@@ -4076,10 +4076,10 @@ def test_wrong_role_gets_403_and_guest_goes_to_login():
 			denied = c.get(path)
 			assert denied.status_code == 403
 			assert denied.url.path == path
-			assert "Нет доступа" in denied.text
+			assert "Access denied" in denied.text
 		post = pat.post("/admin/holidays", data={"holiday_day": "2030-01-01", "name": "x"})
 		assert post.status_code == 403
-		assert "Нет доступа" in post.text
+		assert "Access denied" in post.text
 
 
 def test_logout_revokes_copied_session_cookie():
