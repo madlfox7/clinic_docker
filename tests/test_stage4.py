@@ -1112,7 +1112,7 @@ def test_patient_cannot_open_doctor_appointments():
 		login(c, PAT)
 		r = c.get("/doctor/appointments")
 		assert r.status_code == 403
-		assert "Manage patients" not in r.text
+		assert "Manage staff" not in r.text
 
 
 def test_doctor_sees_only_own_cabinet():
@@ -2474,7 +2474,7 @@ def test_session_role_and_block_come_from_database():
 			assert "Role: patient" not in me.text
 			admin_page = pat.get("/admin/users")
 			assert admin_page.status_code == 200
-			assert "Manage patients" in admin_page.text
+			assert "Manage staff" in admin_page.text
 			mine = pat.get("/my")
 			assert mine.status_code == 403
 		finally:
