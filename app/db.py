@@ -1,5 +1,6 @@
 import logging
 import os
+import unicodedata
 from datetime import date
 
 import psycopg2
@@ -97,6 +98,15 @@ def clean_phone(value):
         return None
     return cleaned
 
+
+
+def strip_control_chars(text: str) -> str:
+    """Drop C0/C1 control characters from free text, keeping newlines and tabs."""
+    text = text.replace("\r\n", "\n").replace("\r", "\n")
+    return "".join(
+        ch for ch in text
+        if ch in "\n\t" or unicodedata.category(ch) != "Cc"
+    )
 
 
 def parse_strict_int(raw, min_value: int = PG_INT_MIN, max_value: int = PG_INT_MAX):

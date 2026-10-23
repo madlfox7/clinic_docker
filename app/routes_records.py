@@ -8,6 +8,7 @@ from db import (
     db_as,
     parse_strict_int,
     record_audit_event,
+    strip_control_chars,
     templates,
     within_length,
 )
@@ -290,7 +291,7 @@ def save_doctor_record(
             status_code=303,
         )
     record_type = record_type.strip().lower()
-    body = body.strip()
+    body = strip_control_chars(body).strip()
     if record_type not in ("note", "prescription"):
         return RedirectResponse(
             f"/doctor/appointments/{appointment_id}/records?error=invalid_type",

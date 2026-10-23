@@ -4239,3 +4239,30 @@ def test_error_responses_are_html_pages():
 		assert bad.status_code == 400
 		assert bad.headers["content-type"].startswith("text/html")
 		assert "Bad request" in bad.text
+
+
+def test_medical_text_drops_control_characters():
+	marker = uuid.uuid4().hex[:8]
+	with client() as pat, client() as doctor:
+		login(pat, PAT)
+		login(doctor, DOC)
+		appointment_id = _book_for_patient(pat, DOC)
+		try:
+			for record_type, table in (("note", "visit_notes"), ("prescription", "prescriptions")):
+				raw = f"{record_type}-{marker}\x07\x1b[31m\x7f\u0085\r\nline2\tcol"
+				doctor.post(
+					f"/doctor/appointments/{appointment_id}/records",
+					data={"record_type": record_type, "body": raw},
+				)
+				stored = psql(
+					f"SELECT md5(body) FROM {table} "
+					f"WHERE appointment_id = {appointment_id} ORDER BY id DESC LIMIT 1"
+				)
+				expected = psql(
+					f"SELECT md5(E'{record_type}-{marker}[31m\\nline2\\tcol')"
+				)
+				assert stored == expected, (stored, expected)
+		finally:
+			psql(f"DELETE FROM visit_notes WHERE appointment_id = {appointment_id}")
+			psql(f"DELETE FROM prescriptions WHERE appointment_id = {appointment_id}")
+			pat.post(f"/appointments/{appointment_id}/cancel")
