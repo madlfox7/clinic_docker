@@ -1544,6 +1544,8 @@ def admin_save_holiday(
         return RedirectResponse(
             "/admin/schedule?error=holiday_name_invalid", status_code=303
         )
+    if holiday_day < date.today():
+        return RedirectResponse("/admin/schedule?error=holiday_in_past", status_code=303)
     if holiday_day > date.today() + timedelta(days=MAX_FUTURE_DAYS):
         return RedirectResponse("/admin/schedule?error=holiday_too_far", status_code=303)
     conn = db_as(admin_user)

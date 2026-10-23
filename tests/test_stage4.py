@@ -4266,3 +4266,14 @@ def test_medical_text_drops_control_characters():
 			psql(f"DELETE FROM visit_notes WHERE appointment_id = {appointment_id}")
 			psql(f"DELETE FROM prescriptions WHERE appointment_id = {appointment_id}")
 			pat.post(f"/appointments/{appointment_id}/cancel")
+
+
+def test_holiday_in_the_past_is_rejected():
+	past = (date.today() - timedelta(days=3)).isoformat()
+	name = f"Past-{uuid.uuid4().hex[:6]}"
+	with client() as admin:
+		login(admin, ADMIN)
+		page = admin.post("/admin/holidays", data={"holiday_day": past, "name": name})
+		assert "error=holiday_in_past" in str(page.url)
+		assert "A holiday cannot be in the past." in page.text
+	assert psql(f"SELECT count(*) FROM holidays WHERE name = '{name}'") == "0"
