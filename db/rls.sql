@@ -239,6 +239,56 @@ BEGIN
       USING ERRCODE = '42501';
   END IF;
 
+  -- only events the application itself emits, with targets the actor owns
+  IF NOT (
+    (event_action IN ('user.email_notifications')
+      AND target_type = 'user' AND target_id = actor_id)
+    OR (event_action = 'user.password_change'
+      AND target_type IN ('user', actor_role) AND target_id = actor_id)
+    OR (actor_role = 'patient' AND (
+      (event_action IN ('appointment.book', 'appointment.cancel')
+        AND target_type = 'appointment'
+        AND EXISTS (SELECT 1 FROM public.appointments AS a
+                    WHERE a.id = target_id AND a.patient_user_id = actor_id))
+      OR (event_action = 'medical.records.view'
+        AND target_type = 'patient' AND target_id = actor_id)))
+    OR (actor_role = 'registrar'
+      AND event_action IN ('appointment.book', 'appointment.cancel')
+      AND target_type = 'appointment'
+      AND EXISTS (SELECT 1 FROM public.appointments AS a WHERE a.id = target_id))
+    OR (actor_role = 'doctor' AND (
+      (event_action IN ('medical.records.view', 'medical.note.save',
+                        'medical.prescription.add', 'appointment.complete')
+        AND target_type = 'appointment'
+        AND EXISTS (SELECT 1 FROM public.appointments AS a
+                    JOIN public.doctors AS d ON d.id = a.doctor_id
+                    WHERE a.id = target_id AND d.user_id = actor_id))
+      OR (event_action = 'medical.patient_history.view'
+        AND target_type = 'patient'
+        AND EXISTS (SELECT 1 FROM public.appointments AS a
+                    JOIN public.doctors AS d ON d.id = a.doctor_id
+                    WHERE a.patient_user_id = target_id AND d.user_id = actor_id))
+      OR (event_action = 'schedule.time_off_request.submit'
+        AND target_type = 'time_off_request'
+        AND EXISTS (SELECT 1 FROM public.time_off_requests AS r
+                    JOIN public.doctors AS d ON d.id = r.doctor_id
+                    WHERE r.id = target_id AND d.user_id = actor_id))))
+    OR (actor_role = 'admin' AND event_action IN (
+      'user.password_link', 'user.block', 'user.unblock',
+      'service.create', 'service.update', 'service.activate',
+      'service.deactivate', 'service.delete',
+      'doctor.update', 'doctor.activate', 'doctor.deactivate',
+      'clinic.settings.update',
+      'schedule.work_hours.save', 'schedule.work_hours.apply',
+      'schedule.time_off.add', 'schedule.time_off_request.approved',
+      'schedule.time_off_request.rejected', 'schedule.holiday.save',
+      'schedule.slots.generate',
+      'appointment.cancel', 'appointment.cancel_future'))
+  ) THEN
+    RAISE EXCEPTION 'audit event is not allowed for this role'
+      USING ERRCODE = '42501';
+  END IF;
+
   INSERT INTO public.audit_events (
     actor_user_id, actor_role, action, target_type, target_id
   )

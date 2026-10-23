@@ -4081,3 +4081,31 @@ def test_logout_revokes_copied_session_cookie():
 		page = replay.get("/my")
 		assert page.status_code == 303
 		assert page.headers["location"].endswith("/login")
+
+
+def test_patient_cannot_forge_audit_events():
+	for action, target_type, target in (
+		("admin.user_delete", "user", "1"),
+		("service.delete", "service", "1"),
+		("appointment.cancel", "appointment", "(SELECT max(id) FROM appointments WHERE patient_user_id <> current_setting('app.user_id')::int)"),
+		("user.email_notifications", "user", "1"),
+	):
+		forged = _as_role(
+			"app_patient", PAT,
+			f"SELECT public.record_audit_event('{action}', '{target_type}', {target});",
+		)
+		assert forged.returncode != 0, (action, forged.stdout)
+		assert "not allowed" in forged.stderr or "permission denied" in forged.stderr
+	direct = _as_role(
+		"app_patient", PAT,
+		"INSERT INTO audit_events (actor_user_id, actor_role, action, target_type) "
+		"VALUES (1, 'admin', 'x', 'y');",
+	)
+	assert direct.returncode != 0
+	assert "permission denied" in direct.stderr
+	own = _as_role(
+		"app_patient", PAT,
+		"SELECT public.record_audit_event('user.email_notifications', 'user', "
+		"current_setting('app.user_id')::int);",
+	)
+	assert own.returncode == 0, own.stderr
