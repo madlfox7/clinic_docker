@@ -4069,3 +4069,15 @@ def test_wrong_role_gets_403_and_guest_goes_to_login():
 		post = pat.post("/admin/holidays", data={"holiday_day": "2030-01-01", "name": "x"})
 		assert post.status_code == 403
 		assert "Нет доступа" in post.text
+
+
+def test_logout_revokes_copied_session_cookie():
+	with client() as c:
+		login(c, PAT2)
+		assert c.get("/my").url.path == "/my"
+		copied = dict(c.cookies)
+		logout(c)
+	with CsrfClient(base_url=BASE, follow_redirects=False, timeout=10.0, cookies=copied) as replay:
+		page = replay.get("/my")
+		assert page.status_code == 303
+		assert page.headers["location"].endswith("/login")

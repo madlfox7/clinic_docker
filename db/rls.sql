@@ -2157,4 +2157,27 @@ CREATE POLICY appointments_registrar_update ON public.appointments
   USING (status = 'scheduled' AND starts_at > CURRENT_TIMESTAMP)
   WITH CHECK (status = 'cancelled');
 
+-- logout invalidates every cookie issued for the current account
+CREATE OR REPLACE FUNCTION public.revoke_own_sessions()
+RETURNS void
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = pg_catalog, public, pg_temp
+AS $function$
+DECLARE
+  actor_id integer := NULLIF(current_setting('app.user_id', true), '')::integer;
+BEGIN
+  IF actor_id IS NULL OR actor_id < 1 THEN
+    RETURN;
+  END IF;
+  UPDATE public.users
+  SET auth_version = auth_version + 1
+  WHERE id = actor_id;
+END;
+$function$;
+
+REVOKE ALL ON FUNCTION public.revoke_own_sessions() FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION public.revoke_own_sessions()
+  TO app_patient, app_doctor, app_registrar, app_admin;
+
 COMMIT;

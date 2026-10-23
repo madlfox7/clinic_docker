@@ -858,6 +858,15 @@ def change_own_password(
 
 @router.get("/logout")
 def logout(request: Request):
+    user = viewer(request)
+    if user:
+        conn = db_as(user)
+        try:
+            with conn:
+                with conn.cursor() as cur:
+                    cur.execute("SELECT public.revoke_own_sessions()")
+        finally:
+            conn.close()
     request.session.clear()
     return RedirectResponse("/", status_code=303)
 
