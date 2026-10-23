@@ -2428,7 +2428,7 @@ def test_patient_overlap_rejected_by_exclusion_without_python_select():
 	levon_slot = psql(
 		"""
 		INSERT INTO slots (doctor_id, starts_at, ends_at)
-		SELECT id, TIMESTAMP '2036-05-05 10:30', TIMESTAMP '2036-05-05 11:30'
+		SELECT id, TIMESTAMP '2036-05-05 10:15', TIMESTAMP '2036-05-05 11:15'
 		FROM doctors WHERE full_name = 'Levon Petrosyan'
 		RETURNING id
 		"""
