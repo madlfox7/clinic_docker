@@ -6,6 +6,7 @@ from fastapi import HTTPException, Request
 SESSION_KEY = "csrf_token"
 FIELD_NAME = "csrf_token"
 HEADER_NAME = "x-csrf-token"
+CSRF_ERROR_DETAIL = "Invalid CSRF token"
 
 
 def csrf_token(request: Request) -> str:
@@ -30,4 +31,4 @@ async def verify_csrf(request: Request) -> None:
             value = form.get(FIELD_NAME, "")
             supplied = value if isinstance(value, str) else ""
     if not supplied or not hmac.compare_digest(supplied, expected):
-        raise HTTPException(status_code=403, detail="Invalid CSRF token")
+        raise HTTPException(status_code=403, detail=CSRF_ERROR_DETAIL)

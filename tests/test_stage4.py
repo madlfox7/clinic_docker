@@ -4213,3 +4213,29 @@ def test_slot_generation_respects_max_future_days():
 		assert "error=range_too_far" in str(page.url)
 		assert "more than two years ahead" in page.text
 	assert psql(f"SELECT count(*) FROM slots WHERE starts_at::date >= '{far.isoformat()}'") == before
+
+
+def test_error_responses_are_html_pages():
+	with client() as pat, client() as admin:
+		login(pat, PAT)
+		login(admin, ADMIN)
+		csrf = pat.post("/me/notifications", data={}, csrf=False)
+		assert csrf.status_code == 403
+		assert csrf.headers["content-type"].startswith("text/html")
+		assert "Session expired, please refresh the page" in csrf.text
+		not_allowed = pat.get("/appointments/1/cancel")
+		assert not_allowed.status_code == 405
+		assert not_allowed.headers["content-type"].startswith("text/html")
+		assert "Method not allowed" in not_allowed.text
+		invalid = admin.post("/admin/schedule/generate", data={"doctor_ids": ["1"], "from_date": "not-a-date"})
+		assert invalid.status_code == 422
+		assert invalid.headers["content-type"].startswith("text/html")
+		assert "Invalid input" in invalid.text
+		bad = admin.post(
+			"/admin/holidays",
+			content=b"broken",
+			headers={"content-type": "multipart/form-data"},
+		)
+		assert bad.status_code == 400
+		assert bad.headers["content-type"].startswith("text/html")
+		assert "Bad request" in bad.text
