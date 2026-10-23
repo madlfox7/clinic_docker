@@ -739,7 +739,7 @@ def test_patient_cannot_cancel_another_or_past_appointment():
 				f"/appointments/{int(past_appointment_id)}/cancel"
 			)
 			assert "cancel_error=past" in str(registrar_past_cancel.url)
-			assert "Registrars cannot cancel past appointments." in registrar_past_cancel.text
+			assert "Past appointments cannot be cancelled." in registrar_past_cancel.text
 			assert psql(
 				f"SELECT status FROM appointments WHERE id = {int(past_appointment_id)}"
 			) == "scheduled"
@@ -4145,3 +4145,23 @@ def test_cancelled_only_patient_is_not_own_patient_of_doctor():
 	finally:
 		_drop_visit(visit)
 		psql(f"DELETE FROM users WHERE id = {patient_id}")
+
+
+def test_admin_cannot_cancel_started_visit():
+	visit = _past_visit(DOC, patient_email=PAT2)
+	try:
+		with client() as admin:
+			login(admin, ADMIN)
+			admin.post(f"/appointments/{visit}/cancel")
+			assert _status(visit) == "scheduled"
+			admin.post(f"/admin/users/{psql(f'SELECT id FROM users WHERE email = {chr(39)}{PAT2}{chr(39)}')}/cancel-future-appointments")
+			assert _status(visit) == "scheduled"
+		direct = _as_role(
+			"app_admin", ADMIN,
+			f"UPDATE appointments SET status = 'cancelled' WHERE id = {visit};",
+		)
+		assert direct.returncode == 0, direct.stderr
+		assert "UPDATE 0" in direct.stdout
+		assert _status(visit) == "scheduled"
+	finally:
+		_drop_visit(visit)

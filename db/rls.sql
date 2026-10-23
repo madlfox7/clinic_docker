@@ -1843,7 +1843,7 @@ CREATE POLICY appointments_admin_cancel ON public.appointments
 
 CREATE POLICY appointments_admin_update ON public.appointments
   FOR UPDATE TO app_admin
-  USING (status = 'scheduled')
+  USING (status = 'scheduled' AND starts_at > CURRENT_TIMESTAMP)
   WITH CHECK (status = 'cancelled');
 CREATE POLICY appointments_admin_delete ON public.appointments
   FOR DELETE TO app_admin

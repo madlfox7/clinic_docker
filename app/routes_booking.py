@@ -610,7 +610,7 @@ def cancel_appointment(request: Request, appointment_id: str):
             )
         return RedirectResponse("/doctors", status_code=303)
 
-    if role == "registrar" and not is_future:
+    if role in ("registrar", "admin") and not is_future:
         cur.close()
         conn.close()
         return RedirectResponse(
@@ -657,6 +657,7 @@ def cancel_appointment(request: Request, appointment_id: str):
             UPDATE appointments
             SET status='cancelled'
             WHERE id=%s AND status='scheduled'
+              AND starts_at > CURRENT_TIMESTAMP
             """,
             (appointment_id,),
         )

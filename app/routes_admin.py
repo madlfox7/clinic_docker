@@ -1850,6 +1850,7 @@ def cancel_future_appointments(request: Request, user_id: str):
           AND u.role='patient'
           AND a.status='scheduled'
           AND s.starts_at > CURRENT_TIMESTAMP
+          AND a.starts_at > CURRENT_TIMESTAMP
         RETURNING a.id
         """,
         (user_id,),
