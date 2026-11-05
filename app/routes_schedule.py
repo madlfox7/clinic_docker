@@ -566,6 +566,31 @@ def submit_time_off_request(
         return RedirectResponse("/me?error=doctor_profile_missing", status_code=303)
     cur.execute(
         """
+        SELECT 1
+        FROM time_off_requests
+        WHERE doctor_id = %s
+          AND status = 'pending'
+          AND starts_on <= %s
+          AND ends_on >= %s
+        LIMIT 1
+        """,
+        (doctor[0], ends_on, starts_on),
+    )
+    if cur.fetchone() is not None:
+        cur.close()
+        conn.close()
+        return templates.TemplateResponse(
+            "error.html",
+            {
+                "request": request,
+                "role": user["role"],
+                "title": "Bad request",
+                "message": "A pending time-off request already overlaps these dates.",
+            },
+            status_code=400,
+        )
+    cur.execute(
+        """
         INSERT INTO time_off_requests (doctor_id, starts_on, ends_on, comment)
         VALUES (%s, %s, %s, %s)
         RETURNING id

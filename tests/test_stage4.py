@@ -2097,6 +2097,8 @@ def test_admin_cannot_approve_a_past_time_off_request():
 		psql(f"DELETE FROM time_off_requests WHERE id = {int(request_id)}")
 
 
+
+
 def test_admin_time_off_keeps_cancelled_appointments_with_notes():
 	"""Closing time off must not 500 when a cancelled visit still has notes."""
 	doctor_id = psql(
@@ -2292,6 +2294,110 @@ def test_admin_time_off_keeps_cancelled_appointments_with_notes():
 			"""
 		)
 
+
+def test_doctor_pending_time_off_rejects_overlapping_dates():
+	doctor_id = psql(
+		f"SELECT id FROM doctors WHERE user_id = (SELECT id FROM users WHERE email = '{DOC}')"
+	)
+	base_start = psql("SELECT CURRENT_DATE + 250")
+	base_end = psql("SELECT CURRENT_DATE + 252")
+	exact_comment = "overlap-exact-pending-test"
+	partial_comment = "overlap-partial-pending-test"
+	non_overlap_comment = "overlap-free-pending-test"
+	psql(
+		f"""
+		DELETE FROM time_off_requests
+		WHERE doctor_id = {doctor_id}
+		  AND comment IN ('{exact_comment}', '{partial_comment}', '{non_overlap_comment}');
+		"""
+	)
+	try:
+		with client() as doctor:
+			login(doctor, DOC)
+			first = doctor.post(
+				"/doctor/time-off-requests",
+				data={
+					"starts_on": base_start,
+					"ends_on": base_end,
+					"comment": exact_comment,
+				},
+			)
+			assert "request_submitted=1" in str(first.url)
+			assert psql(
+				f"""
+				SELECT count(*) FROM time_off_requests
+				WHERE doctor_id = {doctor_id} AND comment = '{exact_comment}'
+				  AND status = 'pending'
+				"""
+			) == "1"
+
+			# Exact same dates
+			exact = doctor.post(
+				"/doctor/time-off-requests",
+				data={
+					"starts_on": base_start,
+					"ends_on": base_end,
+					"comment": "duplicate-exact-should-fail",
+				},
+			)
+			assert exact.status_code == 400
+			assert "Bad request" in exact.text
+			assert "overlaps these dates" in exact.text
+			assert "<h1>Bad request</h1>" in exact.text
+
+			# Partial overlap: existing 250-252 vs new 251-253
+			partial_start = psql("SELECT CURRENT_DATE + 251")
+			partial_end = psql("SELECT CURRENT_DATE + 253")
+			partial = doctor.post(
+				"/doctor/time-off-requests",
+				data={
+					"starts_on": partial_start,
+					"ends_on": partial_end,
+					"comment": partial_comment,
+				},
+			)
+			assert partial.status_code == 400
+			assert "overlaps these dates" in partial.text
+			assert psql(
+				f"""
+				SELECT count(*) FROM time_off_requests
+				WHERE doctor_id = {doctor_id} AND comment = '{partial_comment}'
+				"""
+			) == "0"
+
+			# Non-overlapping range still succeeds
+			free_start = psql("SELECT CURRENT_DATE + 260")
+			free_end = psql("SELECT CURRENT_DATE + 262")
+			free = doctor.post(
+				"/doctor/time-off-requests",
+				data={
+					"starts_on": free_start,
+					"ends_on": free_end,
+					"comment": non_overlap_comment,
+				},
+			)
+			assert "request_submitted=1" in str(free.url)
+			assert psql(
+				f"""
+				SELECT count(*) FROM time_off_requests
+				WHERE doctor_id = {doctor_id}
+				  AND comment IN ('{exact_comment}', '{non_overlap_comment}')
+				  AND status = 'pending'
+				"""
+			) == "2"
+	finally:
+		psql(
+			f"""
+			DELETE FROM time_off_requests
+			WHERE doctor_id = {doctor_id}
+			  AND comment IN (
+				'{exact_comment}',
+				'{partial_comment}',
+				'{non_overlap_comment}',
+				'duplicate-exact-should-fail'
+			  );
+			"""
+		)
 
 
 def psql(sql: str) -> str:
@@ -3062,12 +3168,18 @@ def test_registrar_day_list_doctor_calendar_and_time_off_approval():
 			)
 			assert "cancelled" in registrar_cancelled.text
 
-			for comment in (approved_comment, rejected_comment):
+			# Rejected request uses a non-overlapping day so both pending
+			# submissions succeed under the overlap guard.
+			rejected_day = psql("SELECT CURRENT_DATE + 400")
+			for comment, day in (
+				(approved_comment, selected_day),
+				(rejected_comment, rejected_day),
+			):
 				response = doctor.post(
 					"/doctor/time-off-requests",
 					data={
-						"starts_on": selected_day,
-						"ends_on": selected_day,
+						"starts_on": day,
+						"ends_on": day,
 						"comment": comment,
 					},
 				)
