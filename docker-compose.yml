@@ -73,7 +73,6 @@ services:
       SMTP_STARTTLS: ${SMTP_STARTTLS:-false}
       SMTP_SSL: ${SMTP_SSL:-false}
       SMTP_USERNAME: ${SMTP_USERNAME:-}
-      SMTP_PASSWORD: ${SMTP_PASSWORD:-}
       SMTP_TIMEOUT: ${SMTP_TIMEOUT:-5}
       PUBLIC_BASE_URL: ${PUBLIC_BASE_URL:-http://localhost:8080}
     secrets:
