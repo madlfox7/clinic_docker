@@ -2097,6 +2097,203 @@ def test_admin_cannot_approve_a_past_time_off_request():
 		psql(f"DELETE FROM time_off_requests WHERE id = {int(request_id)}")
 
 
+def test_admin_time_off_keeps_cancelled_appointments_with_notes():
+	"""Closing time off must not 500 when a cancelled visit still has notes."""
+	doctor_id = psql(
+		f"SELECT id FROM doctors WHERE user_id = (SELECT id FROM users WHERE email = '{DOC}')"
+	)
+	patient_id = psql(f"SELECT id FROM users WHERE email = '{PAT}'")
+	selected_day = psql(
+		f"""
+		SELECT g.day::date
+		FROM generate_series(CURRENT_DATE + 120, CURRENT_DATE + 365, INTERVAL '1 day')
+			AS g(day)
+		WHERE EXISTS (
+			SELECT 1 FROM work_hours w
+			WHERE w.doctor_id = {doctor_id}
+			  AND w.weekday = ((EXTRACT(DOW FROM g.day)::int + 6) % 7)
+		)
+		  AND NOT EXISTS (SELECT 1 FROM holidays h WHERE h.day = g.day::date)
+		  AND NOT EXISTS (
+			SELECT 1 FROM time_off t
+			WHERE t.doctor_id = {doctor_id}
+			  AND g.day::date BETWEEN t.starts_on AND t.ends_on
+		  )
+		  AND NOT EXISTS (
+			SELECT 1 FROM slots s
+			WHERE s.doctor_id = {doctor_id} AND s.starts_at::date = g.day::date
+		  )
+		ORDER BY g.day
+		LIMIT 1
+		"""
+	)
+	assert selected_day, "no free future workday for time-off note purge test"
+	approve_day = psql(
+		f"""
+		SELECT g.day::date
+		FROM generate_series(CURRENT_DATE + 121, CURRENT_DATE + 365, INTERVAL '1 day')
+			AS g(day)
+		WHERE g.day::date <> DATE '{selected_day}'
+		  AND EXISTS (
+			SELECT 1 FROM work_hours w
+			WHERE w.doctor_id = {doctor_id}
+			  AND w.weekday = ((EXTRACT(DOW FROM g.day)::int + 6) % 7)
+		  )
+		  AND NOT EXISTS (SELECT 1 FROM holidays h WHERE h.day = g.day::date)
+		  AND NOT EXISTS (
+			SELECT 1 FROM time_off t
+			WHERE t.doctor_id = {doctor_id}
+			  AND g.day::date BETWEEN t.starts_on AND t.ends_on
+		  )
+		  AND NOT EXISTS (
+			SELECT 1 FROM slots s
+			WHERE s.doctor_id = {doctor_id} AND s.starts_at::date = g.day::date
+		  )
+		ORDER BY g.day
+		LIMIT 1
+		"""
+	)
+	assert approve_day, "no free day for approve-path note purge test"
+	note_body = f"time-off-purge-note-{selected_day}"
+	rx_body = f"time-off-purge-rx-{selected_day}"
+	approve_note = f"time-off-approve-note-{approve_day}"
+	slot_with_notes = slot_plain_cancelled = free_slot = None
+	appointment_with_notes = plain_cancelled = None
+	approve_slot = approve_appointment = request_id = None
+	try:
+		psql(
+			f"""
+			INSERT INTO slots (doctor_id, starts_at, ends_at)
+			VALUES
+				({doctor_id}, TIMESTAMP '{selected_day} 10:00', TIMESTAMP '{selected_day} 10:30'),
+				({doctor_id}, TIMESTAMP '{selected_day} 11:00', TIMESTAMP '{selected_day} 11:30'),
+				({doctor_id}, TIMESTAMP '{selected_day} 12:00', TIMESTAMP '{selected_day} 12:30'),
+				({doctor_id}, TIMESTAMP '{approve_day} 10:00', TIMESTAMP '{approve_day} 10:30');
+			"""
+		)
+		slot_with_notes, slot_plain_cancelled, free_slot = psql(
+			f"""
+			SELECT string_agg(id::text, ',' ORDER BY starts_at)
+			FROM slots
+			WHERE doctor_id = {doctor_id} AND starts_at::date = '{selected_day}'
+			"""
+		).split(",")
+		approve_slot = psql(
+			f"""
+			SELECT id FROM slots
+			WHERE doctor_id = {doctor_id}
+			  AND starts_at = TIMESTAMP '{approve_day} 10:00'
+			"""
+		)
+		appointment_with_notes = psql(
+			f"""
+			INSERT INTO appointments
+				(slot_id, patient_user_id, status, doctor_id, starts_at, ends_at)
+			SELECT id, {patient_id}, 'cancelled', doctor_id, starts_at, ends_at
+			FROM slots WHERE id = {slot_with_notes}
+			RETURNING id
+			"""
+		)
+		plain_cancelled = psql(
+			f"""
+			INSERT INTO appointments
+				(slot_id, patient_user_id, status, doctor_id, starts_at, ends_at)
+			SELECT id, {patient_id}, 'cancelled', doctor_id, starts_at, ends_at
+			FROM slots WHERE id = {slot_plain_cancelled}
+			RETURNING id
+			"""
+		)
+		approve_appointment = psql(
+			f"""
+			INSERT INTO appointments
+				(slot_id, patient_user_id, status, doctor_id, starts_at, ends_at)
+			SELECT id, {patient_id}, 'cancelled', doctor_id, starts_at, ends_at
+			FROM slots WHERE id = {approve_slot}
+			RETURNING id
+			"""
+		)
+		psql(
+			f"""
+			INSERT INTO visit_notes (appointment_id, doctor_id, patient_user_id, body)
+			VALUES
+				({appointment_with_notes}, {doctor_id}, {patient_id}, '{note_body}'),
+				({approve_appointment}, {doctor_id}, {patient_id}, '{approve_note}');
+			INSERT INTO prescriptions (appointment_id, doctor_id, patient_user_id, body)
+			VALUES ({appointment_with_notes}, {doctor_id}, {patient_id}, '{rx_body}');
+			INSERT INTO time_off_requests (doctor_id, starts_on, ends_on, comment)
+			VALUES ({doctor_id}, '{approve_day}', '{approve_day}', 'approve-path-purge-test');
+			"""
+		)
+		request_id = psql(
+			f"""
+			SELECT id FROM time_off_requests
+			WHERE comment = 'approve-path-purge-test'
+			ORDER BY id DESC LIMIT 1
+			"""
+		)
+		with client() as admin:
+			login(admin, ADMIN)
+			response = admin.post(
+				"/admin/time-off",
+				data={
+					"doctor_id": doctor_id,
+					"starts_on": selected_day,
+					"ends_on": selected_day,
+				},
+			)
+			assert response.status_code == 200
+			assert "saved=time-off" in str(response.url)
+			assert psql(
+				f"SELECT count(*) FROM appointments WHERE id = {appointment_with_notes}"
+			) == "1"
+			assert psql(
+				f"SELECT count(*) FROM slots WHERE id = {slot_with_notes}"
+			) == "1"
+			assert psql(
+				f"SELECT count(*) FROM visit_notes WHERE appointment_id = {appointment_with_notes}"
+			) == "1"
+			assert psql(
+				f"SELECT count(*) FROM prescriptions WHERE appointment_id = {appointment_with_notes}"
+			) == "1"
+			assert psql(
+				f"SELECT count(*) FROM appointments WHERE id = {plain_cancelled}"
+			) == "0"
+			assert psql(
+				f"SELECT count(*) FROM slots WHERE id IN ({slot_plain_cancelled}, {free_slot})"
+			) == "0"
+
+			approved = admin.post(
+				f"/admin/time-off-requests/{request_id}/decision",
+				data={"decision": "approve"},
+			)
+			assert approved.status_code == 200
+			assert "time_off_request_decision=approved" in str(approved.url)
+			assert psql(
+				f"SELECT count(*) FROM appointments WHERE id = {approve_appointment}"
+			) == "1"
+			assert psql(
+				f"SELECT count(*) FROM slots WHERE id = {approve_slot}"
+			) == "1"
+	finally:
+		psql(
+			f"""
+			DELETE FROM prescriptions WHERE body = '{rx_body}';
+			DELETE FROM visit_notes WHERE body IN ('{note_body}', '{approve_note}');
+			DELETE FROM appointments WHERE slot_id IN (
+				SELECT id FROM slots WHERE doctor_id = {doctor_id}
+				  AND starts_at::date IN ('{selected_day}', '{approve_day}')
+			);
+			DELETE FROM slots WHERE doctor_id = {doctor_id}
+			  AND starts_at::date IN ('{selected_day}', '{approve_day}');
+			DELETE FROM time_off WHERE doctor_id = {doctor_id}
+			  AND starts_on IN ('{selected_day}', '{approve_day}');
+			DELETE FROM time_off_requests
+			WHERE doctor_id = {doctor_id} AND comment = 'approve-path-purge-test';
+			"""
+		)
+
+
+
 def psql(sql: str) -> str:
 	completed = subprocess.run(
 		[

@@ -3,7 +3,7 @@ from datetime import time as datetime_time
 from typing import List
 
 import psycopg2
-from fastapi import APIRouter, Form, Request
+from fastapi import APIRouter, Form, HTTPException, Request
 from fastapi.responses import RedirectResponse
 
 from urllib.parse import urlencode
@@ -962,10 +962,15 @@ def update_admin_settings(
 
 
 def _purge_slots_without_scheduled(cur, where_sql, params):
-   #cancelled 
+    # Remove cancelled appointments only when they have no medical history.
+    # visit_notes.appointment_id and prescriptions.appointment_id FK to
+    # appointments(id); admin cannot SELECT those tables under RLS, so each
+    # delete uses a savepoint and skips rows that still have dependents.
+    # Slots stay whenever any appointment row remains.
     cur.execute(
         f"""
-        DELETE FROM appointments a
+        SELECT a.id
+        FROM appointments a
         WHERE a.status = 'cancelled'
           AND a.slot_id IN (
               SELECT s.id
@@ -979,6 +984,20 @@ def _purge_slots_without_scheduled(cur, where_sql, params):
         """,
         params,
     )
+    cancelled_ids = [row[0] for row in cur.fetchall()]
+    for appointment_id in cancelled_ids:
+        cur.execute("SAVEPOINT purge_cancelled_appointment")
+        try:
+            cur.execute(
+                """
+                DELETE FROM appointments
+                WHERE id = %s AND status = 'cancelled'
+                """,
+                (appointment_id,),
+            )
+            cur.execute("RELEASE SAVEPOINT purge_cancelled_appointment")
+        except psycopg2.errors.ForeignKeyViolation:
+            cur.execute("ROLLBACK TO SAVEPOINT purge_cancelled_appointment")
     cur.execute(
         f"""
         DELETE FROM slots s
@@ -1383,21 +1402,30 @@ def admin_add_time_off(
         conn.close()
         return RedirectResponse("/admin/schedule?error=doctor_not_found", status_code=303)
     removed_slots = 0
-    for selected_doctor_id in selected_doctors:
-        cur.execute(
-            """
-            INSERT INTO time_off (doctor_id, starts_on, ends_on)
-            VALUES (%s, %s, %s)
-            ON CONFLICT (doctor_id, starts_on, ends_on) DO NOTHING
-            """,
-            (selected_doctor_id, starts_on, ends_on),
+    try:
+        for selected_doctor_id in selected_doctors:
+            cur.execute(
+                """
+                INSERT INTO time_off (doctor_id, starts_on, ends_on)
+                VALUES (%s, %s, %s)
+                ON CONFLICT (doctor_id, starts_on, ends_on) DO NOTHING
+                """,
+                (selected_doctor_id, starts_on, ends_on),
+            )
+            removed, _ = _close_slots_for_period(
+                cur, starts_on, ends_on, selected_doctor_id
+            )
+            removed_slots += removed
+            record_audit_event(cur, "schedule.time_off.add", "doctor", selected_doctor_id)
+        conn.commit()
+    except psycopg2.errors.ForeignKeyViolation:
+        conn.rollback()
+        cur.close()
+        conn.close()
+        raise HTTPException(
+            status_code=400,
+            detail="Could not close schedule slots because related records still exist.",
         )
-        removed, _ = _close_slots_for_period(
-            cur, starts_on, ends_on, selected_doctor_id
-        )
-        removed_slots += removed
-        record_audit_event(cur, "schedule.time_off.add", "doctor", selected_doctor_id)
-    conn.commit()
     cur.close()
     conn.close()
     request.session["closure_report"] = {
@@ -1486,26 +1514,35 @@ def admin_decide_time_off_request(
         )
 
     removed_slots = 0
-    if decision == "approve":
-        doctor_id, starts_on, ends_on = time_off_request
-        cur.execute(
-            """
-            INSERT INTO time_off (doctor_id, starts_on, ends_on)
-            VALUES (%s, %s, %s)
-            ON CONFLICT (doctor_id, starts_on, ends_on) DO NOTHING
-            """,
-            (doctor_id, starts_on, ends_on),
+    try:
+        if decision == "approve":
+            doctor_id, starts_on, ends_on = time_off_request
+            cur.execute(
+                """
+                INSERT INTO time_off (doctor_id, starts_on, ends_on)
+                VALUES (%s, %s, %s)
+                ON CONFLICT (doctor_id, starts_on, ends_on) DO NOTHING
+                """,
+                (doctor_id, starts_on, ends_on),
+            )
+            removed_slots, _ = _close_slots_for_period(
+                cur, starts_on, ends_on, doctor_id
+            )
+        record_audit_event(
+            cur,
+            f"schedule.time_off_request.{new_status}",
+            "time_off_request",
+            request_id,
         )
-        removed_slots, _ = _close_slots_for_period(
-            cur, starts_on, ends_on, doctor_id
+        conn.commit()
+    except psycopg2.errors.ForeignKeyViolation:
+        conn.rollback()
+        cur.close()
+        conn.close()
+        raise HTTPException(
+            status_code=400,
+            detail="Could not close schedule slots because related records still exist.",
         )
-    record_audit_event(
-        cur,
-        f"schedule.time_off_request.{new_status}",
-        "time_off_request",
-        request_id,
-    )
-    conn.commit()
     cur.close()
     conn.close()
     if decision == "approve":
