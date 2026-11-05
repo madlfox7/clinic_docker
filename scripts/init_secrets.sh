@@ -33,3 +33,10 @@ fi
 chmod 700 secrets
 chmod 644 secrets/postgres_password secrets/clinic_api_password \
   secrets/session_secret secrets/smtp_password
+
+# Older clones may still have unused secret variables in .env.
+# The app no longer reads them; strip the lines without printing values.
+if [ -f .env ] && grep -E '^(POSTGRES_PASSWORD|CLINIC_API_PASSWORD|SESSION_SECRET|SMTP_PASSWORD)=' .env >/dev/null 2>&1; then
+  sed -i -E '/^(POSTGRES_PASSWORD|CLINIC_API_PASSWORD|SESSION_SECRET|SMTP_PASSWORD)=/d' .env
+  echo "removed leftover secret variables from .env"
+fi

@@ -42,7 +42,7 @@ cp .env.example .env
 ./scripts/init_secrets.sh && docker compose up --build -d
 ```
 
-`.env` содержит только несекретные настройки. Пароли БД, ключ сессии и пароль SMTP лежат в `secrets/` (не коммитится) и попадают в контейнеры как Docker secrets в `/run/secrets/`. `scripts/init_secrets.sh` создаёт недостающие файлы и не перезаписывает существующие. Если раньше пароли были в `.env`, удалите их оттуда и пересоздайте стек: `docker compose down -v && ./scripts/init_secrets.sh && docker compose up --build -d`. Подробнее: `docs/sec_doc.md`.
+`.env` содержит только несекретные настройки. Пароли БД, ключ сессии и пароль SMTP лежат в `secrets/` (не коммитится) и попадают в контейнеры как Docker secrets в `/run/secrets/`. `scripts/init_secrets.sh` создаёт недостающие файлы, не перезаписывает существующие и удаляет из `.env` устаревшие строки `POSTGRES_PASSWORD`, `CLINIC_API_PASSWORD`, `SESSION_SECRET` и `SMTP_PASSWORD`. Если раньше пароли были в `.env`, после этого пересоздайте стек: `docker compose down -v && ./scripts/init_secrets.sh && docker compose up --build -d`. Подробнее: `docs/sec_doc.md`.
 
 http://127.0.0.1:8025.
 
