@@ -26,12 +26,14 @@ services:
     build:
       context: .
       dockerfile: docker/db/Dockerfile
-    env_file: .env
     environment:
       TZ: Asia/Yerevan
       PGTZ: Asia/Yerevan
-      PGPASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}
-      CLINIC_API_PASSWORD: ${CLINIC_API_PASSWORD:?Set CLINIC_API_PASSWORD in .env}
+      POSTGRES_USER: ${POSTGRES_USER:-clinic}
+      POSTGRES_DB: ${POSTGRES_DB:-clinic}
+    secrets:
+      - postgres_password
+      - clinic_api_password
     networks:
       - backend
     depends_on:
@@ -40,6 +42,11 @@ services:
     entrypoint: ["/bin/sh", "-ec"]
     command:
       - |
+        PGPASSFILE="$$(mktemp)"
+        export PGPASSFILE
+        trap 'rm -f "$$PGPASSFILE"' EXIT
+        chmod 600 "$$PGPASSFILE"
+        printf 'db:5432:*:%s:%s\n' "$$POSTGRES_USER" "$$(cat /run/secrets/postgres_password)" > "$$PGPASSFILE"
         psql -X -v ON_ERROR_STOP=1 -h db -U "$$POSTGRES_USER" -d "$$POSTGRES_DB" \
           -f /docker-entrypoint-initdb.d/init.sql
         psql -X -v ON_ERROR_STOP=1 -h db -U "$$POSTGRES_USER" -d "$$POSTGRES_DB" \
@@ -47,6 +54,7 @@ services:
         psql -X -v ON_ERROR_STOP=1 -h db -U "$$POSTGRES_USER" -d "$$POSTGRES_DB" \
           -f /migrations/rls.sql
         psql -X -v ON_ERROR_STOP=1 -h db -U "$$POSTGRES_USER" -d "$$POSTGRES_DB" \
+          -v clinic_api_password="$$(cat /run/secrets/clinic_api_password)" \
           -f /migrations/set_api_password.sql
 
   api:
@@ -129,6 +137,8 @@ services:
 secrets:
   postgres_password:
     file: ./secrets/postgres_password
+  clinic_api_password:
+    file: ./secrets/clinic_api_password
   session_secret:
     file: ./secrets/session_secret
   smtp_password:
