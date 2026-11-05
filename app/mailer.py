@@ -3,6 +3,8 @@ import os
 import smtplib
 from email.message import EmailMessage
 
+from secret_files import read_secret
+
 log = logging.getLogger("clinic.mail")
 
 
@@ -28,7 +30,7 @@ def _login(smtp) -> None:
         smtp.ehlo()
     username = os.environ.get("SMTP_USERNAME", "").strip()
     if username:
-        password = _secret_file("smtp_password") or os.environ.get("SMTP_PASSWORD", "")
+        password = read_secret("smtp_password")
         smtp.login(username, password)
 
 
@@ -46,15 +48,6 @@ def smtp_ready() -> bool:
         log.exception("SMTP is unavailable")
         return False
     return True
-
-
-def _secret_file(name: str) -> str:
-    path = f"/run/secrets/{name}"
-    try:
-        with open(path, encoding="utf-8") as handle:
-            return handle.read().strip()
-    except OSError:
-        return ""
 
 
 def send_account_message(recipient: str, subject: str, body: str) -> None:

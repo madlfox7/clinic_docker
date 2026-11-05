@@ -1,5 +1,4 @@
 import logging
-import os
 import re
 
 from fastapi import Depends, FastAPI, Request
@@ -9,6 +8,7 @@ from starlette.middleware.sessions import SessionMiddleware
 
 from csrf import CSRF_ERROR_DETAIL, verify_csrf
 from db import load_session_user, templates
+from secret_files import read_secret
 from routes_admin import router as admin_router
 from routes_auth import router as auth_router
 from routes_booking import router as booking_router
@@ -27,17 +27,10 @@ _REJECTED_SECRETS = {
 
 
 def _session_secret() -> str:
-    raw = ""
-    try:
-        with open("/run/secrets/session_secret", encoding="utf-8") as handle:
-            raw = handle.read().strip()
-    except OSError:
-        raw = ""
-    if not raw:
-        raw = os.environ.get("SESSION_SECRET", "").strip()
+    raw = read_secret("session_secret")
     if len(raw) < 32 or raw.lower() in _REJECTED_SECRETS:
         raise RuntimeError(
-            "SESSION_SECRET must be a non-default secret of at least 32 characters"
+            "session_secret must be a non-default secret of at least 32 characters"
         )
     return raw
 
