@@ -13,7 +13,6 @@ from secret_files import read_secret
 
 
 
-DATABASE_URL = os.environ.get("DATABASE_URL")
 pwd = CryptContext(schemes=["bcrypt"], deprecated="auto")
 log = logging.getLogger("clinic")
 templates = Jinja2Templates(directory="templates")
@@ -142,8 +141,6 @@ SEED_USERS = [
 
 
 def db():
-    if DATABASE_URL:
-        return psycopg2.connect(DATABASE_URL)
     return psycopg2.connect(
         host=os.environ["PGHOST"],
         dbname=os.environ["PGDATABASE"],
