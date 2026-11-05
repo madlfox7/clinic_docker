@@ -97,8 +97,9 @@ services:
       PGTZ: Asia/Yerevan
       PGHOST: db
       PGUSER: clinic_api
-      PGPASSWORD: ${CLINIC_API_PASSWORD:?Set CLINIC_API_PASSWORD in .env}
-      PGDATABASE: ${POSTGRES_DB:?Set POSTGRES_DB in .env}
+      PGDATABASE: ${POSTGRES_DB:-clinic}
+    secrets:
+      - clinic_api_password
     networks:
       - backend
     depends_on:

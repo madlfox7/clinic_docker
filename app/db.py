@@ -8,6 +8,7 @@ from fastapi.templating import Jinja2Templates
 from passlib.context import CryptContext
 
 from csrf import csrf_token
+from secret_files import read_secret
 
 
 
@@ -147,7 +148,7 @@ def db():
         host=os.environ["PGHOST"],
         dbname=os.environ["PGDATABASE"],
         user=os.environ["PGUSER"],
-        password=os.environ["PGPASSWORD"],
+        password=read_secret("clinic_api_password"),
     )
 
 
