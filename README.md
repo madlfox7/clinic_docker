@@ -5,11 +5,10 @@
 http://127.0.0.1:8025
 
 
+cp -n .env.example .env
+docker compose down -v
+./scripts/init_secrets.sh && docker compose up --build -d
 
-cp .env.example .env
-bash scripts/init_secrets.sh
-docker compose up --build -d
-docker compose ps
 
 
 FastAPI, PostgreSQL и Nginx.
