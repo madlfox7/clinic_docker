@@ -6,6 +6,12 @@ http://127.0.0.1:8025
 
 
 
+cp .env.example .env
+bash scripts/init_secrets.sh
+docker compose up --build -d
+docker compose ps
+
+
 FastAPI, PostgreSQL и Nginx.
 
 API и `seed` подключаются к PostgreSQL ролью `clinic_api`; `POSTGRES_USER` используется только миграциями и администрированием. Одноразовый сервис `migrate` применяет схему, роли и RLS-политики до запуска API. Роли `app_guest`, `app_patient`, `app_doctor`, `app_registrar` и `app_admin` используются как контексты доступа.
