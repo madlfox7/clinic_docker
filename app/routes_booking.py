@@ -756,10 +756,10 @@ def my_appointments(request: Request):
         ORDER BY 2, 3
         """
     )
-    for kind, appointment_id, _record_id, body in cur.fetchall():
+    for kind, appointment_id, record_id, body in cur.fetchall():
         item = items_by_id.get(appointment_id)
         if item is not None:
-            item[kind].append(body)
+            item[kind].append((record_id, appointment_id, body))
     booking_confirmation = None
     raw_confirmation_id = request.query_params.get("appointment_id")
     confirmation_id = (
@@ -779,9 +779,9 @@ def my_appointments(request: Request):
     cur.close()
     conn.close()
     for item in items:
-        item["notes"] = [decrypt_body("visit_notes", body) for body in item["notes"]]
+        item["notes"] = [decrypt_body("visit_notes", *row) for row in item["notes"]]
         item["prescriptions"] = [
-            decrypt_body("prescriptions", body) for body in item["prescriptions"]
+            decrypt_body("prescriptions", *row) for row in item["prescriptions"]
         ]
     return templates.TemplateResponse(
         "my_appointments.html",

@@ -12,7 +12,7 @@ import pytest
 
 from tests.csrf_client import CsrfClient
 from tests.demo_secret import demo_password
-from tests.field_key import PROBE_PACKET, decrypt, is_packet, sql_packet
+from tests.field_key import PROBE_PACKET, decrypt, is_packet, seal_pending, sql_packet
 from tests.clinical_notes import (
 	NOTE_DOCTOR1_PATIENT_A,
 	NOTE_DOCTOR2_PATIENT_B,
@@ -1375,11 +1375,13 @@ def _doctor_insert_sql(table, appointment_sql, doctor_user_email, status):
 
 
 def _run_psql_raw(sql):
-	return subprocess.run(
+	completed = subprocess.run(
 		["docker", "compose", "exec", "-T", "db", "psql", "-X", "-U", "clinic",
 		 "-d", "clinic", "-v", "ON_ERROR_STOP=1", "-At"],
 		cwd=ROOT, input=sql, capture_output=True, text=True,
 	)
+	seal_pending()
+	return completed
 
 
 @pytest.mark.parametrize("table", ["visit_notes", "prescriptions"])
@@ -2426,6 +2428,7 @@ def psql(sql: str) -> str:
 		capture_output=True,
 		text=True,
 	)
+	seal_pending()
 	if completed.returncode != 0:
 		raise AssertionError(completed.stderr or completed.stdout)
 	lines = [line.strip() for line in completed.stdout.splitlines() if line.strip()]
@@ -2892,8 +2895,12 @@ def test_visit_notes_keep_medical_text_off_appointment_status():
 		stored_b = psql(f"SELECT body FROM visit_notes WHERE id = {created['note_b_id']}")
 		assert is_packet(stored_a) and NOTE_DOCTOR1_PATIENT_A not in stored_a
 		assert is_packet(stored_b) and NOTE_DOCTOR2_PATIENT_B not in stored_b
-		assert decrypt("visit_notes", stored_a) == NOTE_DOCTOR1_PATIENT_A
-		assert decrypt("visit_notes", stored_b) == NOTE_DOCTOR2_PATIENT_B
+		assert decrypt(
+			"visit_notes", created["note_a_id"], created["appointment_a_id"], stored_a
+		) == NOTE_DOCTOR1_PATIENT_A
+		assert decrypt(
+			"visit_notes", created["note_b_id"], created["appointment_b_id"], stored_b
+		) == NOTE_DOCTOR2_PATIENT_B
 
 		psql(
 			f"""
@@ -2968,15 +2975,17 @@ def test_visit_notes_keep_medical_text_off_appointment_status():
 				data={"record_type": "note", "body": unicode_note},
 			)
 			assert "saved=note" in str(accepted_limit.url)
-			stored = psql(
+			stored_id, stored = psql(
 				f"""
-				SELECT body FROM visit_notes
+				SELECT id || '|' || body FROM visit_notes
 				WHERE appointment_id = {created['appointment_a_id']}
 				ORDER BY id DESC LIMIT 1
 				"""
-			)
+			).split("|", 1)
 			assert is_packet(stored) and len(stored) > 4000
-			assert decrypt("visit_notes", stored) == unicode_note
+			assert decrypt(
+				"visit_notes", int(stored_id), created["appointment_a_id"], stored
+			) == unicode_note
 
 			too_long = doctor.post(
 				f"/doctor/appointments/{created['appointment_a_id']}/records",
@@ -4588,12 +4597,12 @@ def test_medical_text_drops_control_characters():
 					f"/doctor/appointments/{appointment_id}/records",
 					data={"record_type": record_type, "body": raw},
 				)
-				stored = psql(
-					f"SELECT body FROM {table} "
+				stored_id, stored = psql(
+					f"SELECT id || '|' || body FROM {table} "
 					f"WHERE appointment_id = {appointment_id} ORDER BY id DESC LIMIT 1"
-				)
+				).split("|", 1)
 				expected = f"{record_type}-{marker}[31m\nline2\tcol"
-				assert decrypt(table, stored) == expected
+				assert decrypt(table, int(stored_id), int(appointment_id), stored) == expected
 		finally:
 			psql(f"DELETE FROM visit_notes WHERE appointment_id = {appointment_id}")
 			psql(f"DELETE FROM prescriptions WHERE appointment_id = {appointment_id}")

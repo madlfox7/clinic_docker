@@ -2256,25 +2256,30 @@ GRANT EXECUTE ON FUNCTION public.revoke_own_sessions()
   TO app_patient, app_doctor, app_registrar, app_admin;
 
 -- Medical text encryption: the api encrypts plaintext rows left in an older
--- volume and re-encrypts rows after a key rotation. The key never reaches SQL:
--- these functions only hand out stored values and accept finished packets.
--- Only the clinic_api login itself (not an app_* role) may call them.
-CREATE OR REPLACE FUNCTION public.medical_bodies_to_encrypt(
+-- volume, rewrites legacy fe1 packets (not bound to their row) as row-bound
+-- fe2 packets, and re-encrypts rows after a key rotation. The key never
+-- reaches SQL: these functions only hand out stored values and accept
+-- finished fe2 packets. Only the clinic_api login itself (not an app_* role)
+-- may call them.
+-- The result now carries appointment_id (bound into the packet), so the
+-- older signature is dropped first.
+DROP FUNCTION IF EXISTS public.medical_bodies_to_encrypt(text, text, boolean, integer, integer);
+CREATE FUNCTION public.medical_bodies_to_encrypt(
   p_table text,
   p_current_key_id text,
   p_include_other_keys boolean,
   p_after_id integer,
   p_limit integer
 )
-RETURNS TABLE (id integer, body text)
+RETURNS TABLE (id integer, appointment_id integer, body text)
 LANGUAGE plpgsql
 STABLE
 SECURITY DEFINER
 SET search_path = pg_catalog, public, pg_temp
 AS $function$
 DECLARE
-  packet_re constant text :=
-    '^fe1:[A-Za-z0-9_-]{1,32}:[A-Za-z0-9_-]{16}:[A-Za-z0-9_-]+:[A-Za-z0-9_-]{22}$';
+  bound_re constant text :=
+    '^fe2:[A-Za-z0-9_-]{1,32}:[A-Za-z0-9_-]{16}:[A-Za-z0-9_-]+:[A-Za-z0-9_-]{22}$';
 BEGIN
   IF session_user IS DISTINCT FROM 'clinic_api'
      OR coalesce(current_setting('role', true), 'none') <> 'none'
@@ -2285,13 +2290,15 @@ BEGIN
       USING ERRCODE = '42501';
   END IF;
 
+  -- Rows that are not yet bound fe2 packets (plaintext or fe1), plus fe2
+  -- packets under another key id when re-encrypting after a rotation.
   IF p_table = 'visit_notes' THEN
     RETURN QUERY
-      SELECT n.id, n.body
+      SELECT n.id, n.appointment_id, n.body
       FROM public.visit_notes n
       WHERE n.id > coalesce(p_after_id, 0)
         AND (
-          n.body !~ packet_re
+          n.body !~ bound_re
           OR (p_include_other_keys
               AND split_part(n.body, ':', 2) <> p_current_key_id)
         )
@@ -2299,11 +2306,11 @@ BEGIN
       LIMIT p_limit;
   ELSIF p_table = 'prescriptions' THEN
     RETURN QUERY
-      SELECT p.id, p.body
+      SELECT p.id, p.appointment_id, p.body
       FROM public.prescriptions p
       WHERE p.id > coalesce(p_after_id, 0)
         AND (
-          p.body !~ packet_re
+          p.body !~ bound_re
           OR (p_include_other_keys
               AND split_part(p.body, ':', 2) <> p_current_key_id)
         )
@@ -2335,7 +2342,7 @@ BEGIN
      OR p_id IS NULL OR p_old_body IS NULL
      OR p_new_body IS NULL
      OR char_length(p_new_body) > 24000
-     OR p_new_body !~ '^fe1:[A-Za-z0-9_-]{1,32}:[A-Za-z0-9_-]{16}:[A-Za-z0-9_-]+:[A-Za-z0-9_-]{22}$' THEN
+     OR p_new_body !~ '^fe2:[A-Za-z0-9_-]{1,32}:[A-Za-z0-9_-]{16}:[A-Za-z0-9_-]+:[A-Za-z0-9_-]{22}$' THEN
     RAISE EXCEPTION 'invalid medical encryption context'
       USING ERRCODE = '42501';
   END IF;

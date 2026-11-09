@@ -3,7 +3,7 @@
 import subprocess
 from pathlib import Path
 
-from tests.field_key import sql_packet
+from tests.field_key import seal_pending, sql_packet
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -26,6 +26,7 @@ def _psql(sql: str) -> str:
 		capture_output=True,
 		text=True,
 	)
+	seal_pending()
 	if completed.returncode != 0:
 		raise AssertionError(completed.stderr or completed.stdout)
 	lines = [line.strip() for line in completed.stdout.splitlines() if line.strip()]

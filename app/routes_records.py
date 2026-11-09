@@ -143,31 +143,31 @@ def doctor_patient_history(request: Request, patient_id: str):
 
     cur.execute(
         """
-        SELECT appointment_id, body
+        SELECT id, appointment_id, body
         FROM visit_notes
         WHERE doctor_id = %s AND patient_user_id = %s
         ORDER BY appointment_id DESC, id
         """,
         (doctor[0], patient_id),
     )
-    for appointment_id, body in cur.fetchall():
+    for record_id, appointment_id, body in cur.fetchall():
         visit = visits_by_id.get(appointment_id)
         if visit is not None:
-            visit["notes"].append(body)
+            visit["notes"].append((record_id, appointment_id, body))
 
     cur.execute(
         """
-        SELECT appointment_id, body
+        SELECT id, appointment_id, body
         FROM prescriptions
         WHERE doctor_id = %s AND patient_user_id = %s
         ORDER BY appointment_id DESC, id
         """,
         (doctor[0], patient_id),
     )
-    for appointment_id, body in cur.fetchall():
+    for record_id, appointment_id, body in cur.fetchall():
         visit = visits_by_id.get(appointment_id)
         if visit is not None:
-            visit["prescriptions"].append(body)
+            visit["prescriptions"].append((record_id, appointment_id, body))
 
     record_audit_event(cur, "medical.patient_history.view", "patient", patient_id)
     conn.commit()
@@ -175,9 +175,9 @@ def doctor_patient_history(request: Request, patient_id: str):
     conn.close()
 
     for visit in visits:
-        visit["notes"] = [decrypt_body("visit_notes", body) for body in visit["notes"]]
+        visit["notes"] = [decrypt_body("visit_notes", *row) for row in visit["notes"]]
         visit["prescriptions"] = [
-            decrypt_body("prescriptions", body) for body in visit["prescriptions"]
+            decrypt_body("prescriptions", *row) for row in visit["prescriptions"]
         ]
 
     return templates.TemplateResponse(
@@ -231,29 +231,33 @@ def doctor_records(request: Request, appointment_id: str):
 
     cur.execute(
         """
-        SELECT id, body FROM visit_notes
+        SELECT id, appointment_id, body FROM visit_notes
         WHERE appointment_id = %s
         ORDER BY id
         """,
         (appointment_id,),
     )
-    notes = [{"id": row[0], "body": row[1]} for row in cur.fetchall()]
+    notes = [
+        {"id": row[0], "appointment_id": row[1], "body": row[2]} for row in cur.fetchall()
+    ]
     cur.execute(
         """
-        SELECT body FROM prescriptions
+        SELECT id, appointment_id, body FROM prescriptions
         WHERE appointment_id = %s
         ORDER BY id
         """,
         (appointment_id,),
     )
-    prescriptions = [row[0] for row in cur.fetchall()]
+    prescriptions = cur.fetchall()
     record_audit_event(cur, "medical.records.view", "appointment", appointment_id)
     conn.commit()
     cur.close()
     conn.close()
     for note in notes:
-        note["body"] = decrypt_body("visit_notes", note["body"])
-    prescriptions = [decrypt_body("prescriptions", body) for body in prescriptions]
+        note["body"] = decrypt_body(
+            "visit_notes", note["id"], note.pop("appointment_id"), note["body"]
+        )
+    prescriptions = [decrypt_body("prescriptions", *row) for row in prescriptions]
 
     return templates.TemplateResponse(
         "doctor_records.html",
@@ -339,16 +343,20 @@ def save_doctor_record(
     table = "visit_notes" if record_type == "note" else "prescriptions"
     action = "medical.note.save" if record_type == "note" else "medical.prescription.add"
     saved = False
-    # Encrypt after the plaintext length check; only the packet reaches SQL.
-    stored_body = encrypt_body(table, body)
     if appointment is not None:
         try:
+            # The packet is bound to the row id and appointment id, so take the
+            # id from the sequence first, encrypt (after the plaintext length
+            # check), then insert with that id. Only the packet reaches SQL.
+            cur.execute("SELECT nextval(%s::regclass)", (f"public.{table}_id_seq",))
+            record_id = cur.fetchone()[0]
+            stored_body = encrypt_body(table, record_id, appointment[0], body)
             cur.execute(
                 f"""
-                INSERT INTO {table} (appointment_id, doctor_id, patient_user_id, body)
-                VALUES (%s, %s, %s, %s)
+                INSERT INTO {table} (id, appointment_id, doctor_id, patient_user_id, body)
+                VALUES (%s, %s, %s, %s, %s)
                 """,
-                (appointment[0], appointment[1], appointment[2], stored_body),
+                (record_id, appointment[0], appointment[1], appointment[2], stored_body),
             )
             saved = cur.rowcount == 1
         except psycopg2.errors.InsufficientPrivilege:
@@ -423,21 +431,21 @@ def patient_records(request: Request):
     cur = conn.cursor()
     cur.execute(
         """
-        SELECT record_type, body, doctor_name, starts_at, appointment_id
+        SELECT record_type, body, doctor_name, starts_at, appointment_id, record_id
         FROM (
-          SELECT 'Clinical note'::text AS record_type, n.body,
+          SELECT 'Clinical note'::text AS record_type, n.body, n.id AS record_id,
                  d.full_name AS doctor_name, a.starts_at, a.id AS appointment_id
           FROM visit_notes n
           JOIN appointments a ON a.id = n.appointment_id
           JOIN doctors d ON d.id = a.doctor_id
           UNION ALL
-          SELECT 'Prescription'::text AS record_type, p.body,
+          SELECT 'Prescription'::text AS record_type, p.body, p.id AS record_id,
                  d.full_name AS doctor_name, a.starts_at, a.id AS appointment_id
           FROM prescriptions p
           JOIN appointments a ON a.id = p.appointment_id
           JOIN doctors d ON d.id = a.doctor_id
         ) AS records
-        ORDER BY starts_at DESC, appointment_id DESC, record_type
+        ORDER BY starts_at DESC, appointment_id DESC, record_type, record_id
         """
     )
     records = [
@@ -447,6 +455,7 @@ def patient_records(request: Request):
             "doctor_name": row[2],
             "starts_at": row[3],
             "appointment_id": row[4],
+            "record_id": row[5],
         }
         for row in cur.fetchall()
     ]
@@ -456,7 +465,9 @@ def patient_records(request: Request):
     conn.close()
     for record in records:
         table = "visit_notes" if record["record_type"] == "Clinical note" else "prescriptions"
-        record["body"] = decrypt_body(table, record["body"])
+        record["body"] = decrypt_body(
+            table, record.pop("record_id"), record["appointment_id"], record["body"]
+        )
     return templates.TemplateResponse(
         "my_records.html",
         {"request": request, "role": user["role"], "records": records},

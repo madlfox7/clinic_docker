@@ -7,7 +7,7 @@ import httpx
 
 from tests.csrf_client import CsrfClient
 from tests.demo_secret import demo_password
-from tests.field_key import PROBE_PACKET, sql_packet
+from tests.field_key import PROBE_PACKET, seal_pending, sql_packet
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -25,6 +25,8 @@ def compose_exec(service: str, command: list[str], *, input_text: str = "") -> s
         capture_output=True,
         text=True,
     )
+    if service == "db":
+        seal_pending()
     assert completed.returncode == 0, completed.stderr or completed.stdout
     return completed.stdout.strip()
 

@@ -567,37 +567,41 @@ CREATE TABLE IF NOT EXISTS prescriptions (
 );
 
 -- body holds an AES-256-GCM packet written by the api (app/field_crypto.py):
--- fe1:<key_id>:<nonce>:<ciphertext>:<tag>. The 4000-character limit applies to
--- the plaintext in the api; the packet is longer, so the old length check goes.
--- New rows must be packets. NOT VALID keeps an older volume usable until the
--- api startup migration has encrypted its plaintext rows.
+-- fe2:<key_id>:<nonce>:<ciphertext>:<tag>, bound to the table, row id and
+-- appointment id. The 4000-character limit applies to the plaintext in the
+-- api; the packet is longer, so the old length check goes.
+-- New and updated rows must be fe2 packets. NOT VALID keeps an older volume
+-- usable until the api startup migration has encrypted its plaintext rows and
+-- rewritten fe1 packets (not bound to their row) as fe2.
 ALTER TABLE public.visit_notes DROP CONSTRAINT IF EXISTS visit_notes_body_length_check;
 ALTER TABLE public.prescriptions DROP CONSTRAINT IF EXISTS prescriptions_body_length_check;
+ALTER TABLE public.visit_notes DROP CONSTRAINT IF EXISTS visit_notes_body_encrypted_check;
+ALTER TABLE public.prescriptions DROP CONSTRAINT IF EXISTS prescriptions_body_encrypted_check;
 
 DO $$
 BEGIN
   IF NOT EXISTS (
     SELECT 1 FROM pg_constraint
-    WHERE conname = 'visit_notes_body_encrypted_check'
+    WHERE conname = 'visit_notes_body_bound_check'
       AND conrelid = 'public.visit_notes'::regclass
   ) THEN
     ALTER TABLE public.visit_notes
-      ADD CONSTRAINT visit_notes_body_encrypted_check
+      ADD CONSTRAINT visit_notes_body_bound_check
       CHECK (
         char_length(body) <= 24000
-        AND body ~ '^fe1:[A-Za-z0-9_-]{1,32}:[A-Za-z0-9_-]{16}:[A-Za-z0-9_-]+:[A-Za-z0-9_-]{22}$'
+        AND body ~ '^fe2:[A-Za-z0-9_-]{1,32}:[A-Za-z0-9_-]{16}:[A-Za-z0-9_-]+:[A-Za-z0-9_-]{22}$'
       ) NOT VALID;
   END IF;
   IF NOT EXISTS (
     SELECT 1 FROM pg_constraint
-    WHERE conname = 'prescriptions_body_encrypted_check'
+    WHERE conname = 'prescriptions_body_bound_check'
       AND conrelid = 'public.prescriptions'::regclass
   ) THEN
     ALTER TABLE public.prescriptions
-      ADD CONSTRAINT prescriptions_body_encrypted_check
+      ADD CONSTRAINT prescriptions_body_bound_check
       CHECK (
         char_length(body) <= 24000
-        AND body ~ '^fe1:[A-Za-z0-9_-]{1,32}:[A-Za-z0-9_-]{16}:[A-Za-z0-9_-]+:[A-Za-z0-9_-]{22}$'
+        AND body ~ '^fe2:[A-Za-z0-9_-]{1,32}:[A-Za-z0-9_-]{16}:[A-Za-z0-9_-]+:[A-Za-z0-9_-]{22}$'
       ) NOT VALID;
   END IF;
 END
