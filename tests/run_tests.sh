@@ -51,4 +51,5 @@ if [ "$ready" != true ]; then
 fi
 
 echo "Running stage 4 and RLS boundary tests against the local database."
-"$TEST_PYTHON" -m pytest -v tests/test_stage4.py tests/test_rls_boundary.py tests/test_secrets.py "$@"
+"$TEST_PYTHON" -m pytest -v tests/test_stage4.py tests/test_rls_boundary.py tests/test_secrets.py \
+  tests/test_field_encryption.py "$@"

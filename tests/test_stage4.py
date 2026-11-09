@@ -12,6 +12,7 @@ import pytest
 
 from tests.csrf_client import CsrfClient
 from tests.demo_secret import demo_password
+from tests.field_key import PROBE_PACKET, decrypt, is_packet, sql_packet
 from tests.clinical_notes import (
 	NOTE_DOCTOR1_PATIENT_A,
 	NOTE_DOCTOR2_PATIENT_B,
@@ -1368,7 +1369,7 @@ def _doctor_insert_sql(table, appointment_sql, doctor_user_email, status):
 		  (SELECT id FROM users WHERE email = '{doctor_user_email}')::text, true);
 		SET LOCAL ROLE app_doctor;
 		INSERT INTO {table} (appointment_id, doctor_id, patient_user_id, body)
-		  VALUES (:probe_id, :probe_doctor, :probe_patient, 'probe');
+		  VALUES (:probe_id, :probe_doctor, :probe_patient, '{PROBE_PACKET}');
 		ROLLBACK;
 	"""
 
@@ -1570,7 +1571,8 @@ def test_notes_survive_cancel_of_scheduled_visit():
 		wrote = _as_role(
 			"app_doctor", DOC,
 			"INSERT INTO visit_notes (appointment_id, doctor_id, patient_user_id, body) "
-			f"SELECT id, doctor_id, patient_user_id, 'kept' FROM appointments WHERE id = {visit};",
+			f"SELECT id, doctor_id, patient_user_id, {sql_packet('visit_notes', 'kept')} "
+			f"FROM appointments WHERE id = {visit};",
 		)
 		assert "INSERT 0 1" in wrote.stdout, wrote.stderr
 		psql(f"UPDATE appointments SET status = 'cancelled' WHERE id = {visit}")
@@ -1580,7 +1582,8 @@ def test_notes_survive_cancel_of_scheduled_visit():
 		late = _as_role(
 			"app_doctor", DOC,
 			"INSERT INTO visit_notes (appointment_id, doctor_id, patient_user_id, body) "
-			f"SELECT id, doctor_id, patient_user_id, 'late' FROM appointments WHERE id = {visit};",
+			f"SELECT id, doctor_id, patient_user_id, {sql_packet('visit_notes', 'late')} "
+			f"FROM appointments WHERE id = {visit};",
 		)
 		assert late.returncode != 0 and "row-level security" in late.stderr
 	finally:
@@ -2219,10 +2222,13 @@ def test_admin_time_off_keeps_cancelled_appointments_with_notes():
 			f"""
 			INSERT INTO visit_notes (appointment_id, doctor_id, patient_user_id, body)
 			VALUES
-				({appointment_with_notes}, {doctor_id}, {patient_id}, '{note_body}'),
-				({approve_appointment}, {doctor_id}, {patient_id}, '{approve_note}');
+				({appointment_with_notes}, {doctor_id}, {patient_id},
+				 {sql_packet('visit_notes', note_body)}),
+				({approve_appointment}, {doctor_id}, {patient_id},
+				 {sql_packet('visit_notes', approve_note)});
 			INSERT INTO prescriptions (appointment_id, doctor_id, patient_user_id, body)
-			VALUES ({appointment_with_notes}, {doctor_id}, {patient_id}, '{rx_body}');
+			VALUES ({appointment_with_notes}, {doctor_id}, {patient_id},
+				{sql_packet('prescriptions', rx_body)});
 			INSERT INTO time_off_requests (doctor_id, starts_on, ends_on, comment)
 			VALUES ({doctor_id}, '{approve_day}', '{approve_day}', 'approve-path-purge-test');
 			"""
@@ -2280,8 +2286,16 @@ def test_admin_time_off_keeps_cancelled_appointments_with_notes():
 	finally:
 		psql(
 			f"""
-			DELETE FROM prescriptions WHERE body = '{rx_body}';
-			DELETE FROM visit_notes WHERE body IN ('{note_body}', '{approve_note}');
+			DELETE FROM prescriptions WHERE appointment_id IN (
+				SELECT a.id FROM appointments a JOIN slots s ON s.id = a.slot_id
+				WHERE s.doctor_id = {doctor_id}
+				  AND s.starts_at::date IN ('{selected_day}', '{approve_day}')
+			);
+			DELETE FROM visit_notes WHERE appointment_id IN (
+				SELECT a.id FROM appointments a JOIN slots s ON s.id = a.slot_id
+				WHERE s.doctor_id = {doctor_id}
+				  AND s.starts_at::date IN ('{selected_day}', '{approve_day}')
+			);
 			DELETE FROM appointments WHERE slot_id IN (
 				SELECT id FROM slots WHERE doctor_id = {doctor_id}
 				  AND starts_at::date IN ('{selected_day}', '{approve_day}')
@@ -2873,17 +2887,19 @@ def test_visit_notes_keep_medical_text_off_appointment_status():
 		assert NOTE_DOCTOR1_PATIENT_A not in psql(
 			f"SELECT status FROM appointments WHERE id = {created['appointment_a_id']}"
 		)
-		assert psql(
-			f"SELECT body FROM visit_notes WHERE id = {created['note_a_id']}"
-		) == NOTE_DOCTOR1_PATIENT_A
-		assert psql(
-			f"SELECT body FROM visit_notes WHERE id = {created['note_b_id']}"
-		) == NOTE_DOCTOR2_PATIENT_B
+		# body holds an encrypted packet, never the note text itself
+		stored_a = psql(f"SELECT body FROM visit_notes WHERE id = {created['note_a_id']}")
+		stored_b = psql(f"SELECT body FROM visit_notes WHERE id = {created['note_b_id']}")
+		assert is_packet(stored_a) and NOTE_DOCTOR1_PATIENT_A not in stored_a
+		assert is_packet(stored_b) and NOTE_DOCTOR2_PATIENT_B not in stored_b
+		assert decrypt("visit_notes", stored_a) == NOTE_DOCTOR1_PATIENT_A
+		assert decrypt("visit_notes", stored_b) == NOTE_DOCTOR2_PATIENT_B
 
 		psql(
 			f"""
 			INSERT INTO visit_notes (appointment_id, doctor_id, patient_user_id, body)
-			SELECT appointment_id, doctor_id, patient_user_id, 'second note'
+			SELECT appointment_id, doctor_id, patient_user_id,
+			       {sql_packet('visit_notes', 'second note')}
 			FROM visit_notes
 			WHERE id = {created['note_a_id']}
 			"""
@@ -2898,10 +2914,12 @@ def test_visit_notes_keep_medical_text_off_appointment_status():
 		psql(
 			f"""
 			INSERT INTO prescriptions (appointment_id, doctor_id, patient_user_id, body)
-			SELECT appointment_id, doctor_id, patient_user_id, 'rx-1'
+			SELECT appointment_id, doctor_id, patient_user_id,
+			       {sql_packet('prescriptions', 'rx-1')}
 			FROM visit_notes WHERE id = {created['note_a_id']};
 			INSERT INTO prescriptions (appointment_id, doctor_id, patient_user_id, body)
-			SELECT appointment_id, doctor_id, patient_user_id, 'rx-2'
+			SELECT appointment_id, doctor_id, patient_user_id,
+			       {sql_packet('prescriptions', 'rx-2')}
 			FROM visit_notes WHERE id = {created['note_a_id']};
 			"""
 		)
@@ -2912,9 +2930,13 @@ def test_visit_notes_keep_medical_text_off_appointment_status():
 			"""
 		) == "2"
 
-		for table, source_id in (
-			("visit_notes", created["note_a_id"]),
-			("prescriptions", created["note_a_id"]),
+		# The database accepts only encrypted packets: plaintext of any length,
+		# including 5001 characters, is rejected. The 4000-character limit on the
+		# plaintext itself is enforced by the api below.
+		for (table, source_id), (label, value) in (
+			(pair, case)
+			for pair in (("visit_notes", created["note_a_id"]), ("prescriptions", created["note_a_id"]))
+			for case in (("5001-character", "repeat('x', 5001)"), ("plaintext", "'plain medical text'"))
 		):
 			psql(
 				f"""
@@ -2924,14 +2946,14 @@ def test_visit_notes_keep_medical_text_off_appointment_status():
 					BEGIN
 						INSERT INTO {table}
 							(appointment_id, doctor_id, patient_user_id, body)
-						SELECT appointment_id, doctor_id, patient_user_id, repeat('x', 5001)
+						SELECT appointment_id, doctor_id, patient_user_id, {value}
 						FROM visit_notes
 						WHERE id = {source_id};
 					EXCEPTION WHEN check_violation THEN
 						rejected := TRUE;
 					END;
 					IF NOT rejected THEN
-						RAISE EXCEPTION '5001-character {table} body was accepted';
+						RAISE EXCEPTION '{label} {table} body was accepted';
 					END IF;
 				END
 				$$;
@@ -2946,13 +2968,15 @@ def test_visit_notes_keep_medical_text_off_appointment_status():
 				data={"record_type": "note", "body": unicode_note},
 			)
 			assert "saved=note" in str(accepted_limit.url)
-			assert psql(
+			stored = psql(
 				f"""
-				SELECT char_length(body) FROM visit_notes
+				SELECT body FROM visit_notes
 				WHERE appointment_id = {created['appointment_a_id']}
 				ORDER BY id DESC LIMIT 1
 				"""
-			) == "4000"
+			)
+			assert is_packet(stored) and len(stored) > 4000
+			assert decrypt("visit_notes", stored) == unicode_note
 
 			too_long = doctor.post(
 				f"/doctor/appointments/{created['appointment_a_id']}/records",
@@ -4565,13 +4589,11 @@ def test_medical_text_drops_control_characters():
 					data={"record_type": record_type, "body": raw},
 				)
 				stored = psql(
-					f"SELECT md5(body) FROM {table} "
+					f"SELECT body FROM {table} "
 					f"WHERE appointment_id = {appointment_id} ORDER BY id DESC LIMIT 1"
 				)
-				expected = psql(
-					f"SELECT md5(E'{record_type}-{marker}[31m\\nline2\\tcol')"
-				)
-				assert stored == expected, (stored, expected)
+				expected = f"{record_type}-{marker}[31m\nline2\tcol"
+				assert decrypt(table, stored) == expected
 		finally:
 			psql(f"DELETE FROM visit_notes WHERE appointment_id = {appointment_id}")
 			psql(f"DELETE FROM prescriptions WHERE appointment_id = {appointment_id}")

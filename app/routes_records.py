@@ -12,6 +12,7 @@ from db import (
     templates,
     within_length,
 )
+from field_crypto import decrypt_body, encrypt_body
 from routes_auth import require_user
 
 
@@ -173,6 +174,12 @@ def doctor_patient_history(request: Request, patient_id: str):
     cur.close()
     conn.close()
 
+    for visit in visits:
+        visit["notes"] = [decrypt_body("visit_notes", body) for body in visit["notes"]]
+        visit["prescriptions"] = [
+            decrypt_body("prescriptions", body) for body in visit["prescriptions"]
+        ]
+
     return templates.TemplateResponse(
         "doctor_patient_history.html",
         {
@@ -244,6 +251,9 @@ def doctor_records(request: Request, appointment_id: str):
     conn.commit()
     cur.close()
     conn.close()
+    for note in notes:
+        note["body"] = decrypt_body("visit_notes", note["body"])
+    prescriptions = [decrypt_body("prescriptions", body) for body in prescriptions]
 
     return templates.TemplateResponse(
         "doctor_records.html",
@@ -329,6 +339,8 @@ def save_doctor_record(
     table = "visit_notes" if record_type == "note" else "prescriptions"
     action = "medical.note.save" if record_type == "note" else "medical.prescription.add"
     saved = False
+    # Encrypt after the plaintext length check; only the packet reaches SQL.
+    stored_body = encrypt_body(table, body)
     if appointment is not None:
         try:
             cur.execute(
@@ -336,7 +348,7 @@ def save_doctor_record(
                 INSERT INTO {table} (appointment_id, doctor_id, patient_user_id, body)
                 VALUES (%s, %s, %s, %s)
                 """,
-                (appointment[0], appointment[1], appointment[2], body),
+                (appointment[0], appointment[1], appointment[2], stored_body),
             )
             saved = cur.rowcount == 1
         except psycopg2.errors.InsufficientPrivilege:
@@ -442,6 +454,9 @@ def patient_records(request: Request):
     conn.commit()
     cur.close()
     conn.close()
+    for record in records:
+        table = "visit_notes" if record["record_type"] == "Clinical note" else "prescriptions"
+        record["body"] = decrypt_body(table, record["body"])
     return templates.TemplateResponse(
         "my_records.html",
         {"request": request, "role": user["role"], "records": records},

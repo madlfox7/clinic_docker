@@ -2255,4 +2255,113 @@ REVOKE ALL ON FUNCTION public.revoke_own_sessions() FROM PUBLIC;
 GRANT EXECUTE ON FUNCTION public.revoke_own_sessions()
   TO app_patient, app_doctor, app_registrar, app_admin;
 
+-- Medical text encryption: the api encrypts plaintext rows left in an older
+-- volume and re-encrypts rows after a key rotation. The key never reaches SQL:
+-- these functions only hand out stored values and accept finished packets.
+-- Only the clinic_api login itself (not an app_* role) may call them.
+CREATE OR REPLACE FUNCTION public.medical_bodies_to_encrypt(
+  p_table text,
+  p_current_key_id text,
+  p_include_other_keys boolean,
+  p_after_id integer,
+  p_limit integer
+)
+RETURNS TABLE (id integer, body text)
+LANGUAGE plpgsql
+STABLE
+SECURITY DEFINER
+SET search_path = pg_catalog, public, pg_temp
+AS $function$
+DECLARE
+  packet_re constant text :=
+    '^fe1:[A-Za-z0-9_-]{1,32}:[A-Za-z0-9_-]{16}:[A-Za-z0-9_-]+:[A-Za-z0-9_-]{22}$';
+BEGIN
+  IF session_user IS DISTINCT FROM 'clinic_api'
+     OR coalesce(current_setting('role', true), 'none') <> 'none'
+     OR p_current_key_id IS NULL
+     OR p_current_key_id !~ '^[A-Za-z0-9_-]{1,32}$'
+     OR p_limit IS NULL OR p_limit < 1 OR p_limit > 1000 THEN
+    RAISE EXCEPTION 'invalid medical encryption context'
+      USING ERRCODE = '42501';
+  END IF;
+
+  IF p_table = 'visit_notes' THEN
+    RETURN QUERY
+      SELECT n.id, n.body
+      FROM public.visit_notes n
+      WHERE n.id > coalesce(p_after_id, 0)
+        AND (
+          n.body !~ packet_re
+          OR (p_include_other_keys
+              AND split_part(n.body, ':', 2) <> p_current_key_id)
+        )
+      ORDER BY n.id
+      LIMIT p_limit;
+  ELSIF p_table = 'prescriptions' THEN
+    RETURN QUERY
+      SELECT p.id, p.body
+      FROM public.prescriptions p
+      WHERE p.id > coalesce(p_after_id, 0)
+        AND (
+          p.body !~ packet_re
+          OR (p_include_other_keys
+              AND split_part(p.body, ':', 2) <> p_current_key_id)
+        )
+      ORDER BY p.id
+      LIMIT p_limit;
+  ELSE
+    RAISE EXCEPTION 'invalid medical table'
+      USING ERRCODE = '42501';
+  END IF;
+END;
+$function$;
+
+CREATE OR REPLACE FUNCTION public.medical_body_replace(
+  p_table text,
+  p_id integer,
+  p_old_body text,
+  p_new_body text
+)
+RETURNS boolean
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = pg_catalog, public, pg_temp
+AS $function$
+DECLARE
+  changed integer;
+BEGIN
+  IF session_user IS DISTINCT FROM 'clinic_api'
+     OR coalesce(current_setting('role', true), 'none') <> 'none'
+     OR p_id IS NULL OR p_old_body IS NULL
+     OR p_new_body IS NULL
+     OR char_length(p_new_body) > 24000
+     OR p_new_body !~ '^fe1:[A-Za-z0-9_-]{1,32}:[A-Za-z0-9_-]{16}:[A-Za-z0-9_-]+:[A-Za-z0-9_-]{22}$' THEN
+    RAISE EXCEPTION 'invalid medical encryption context'
+      USING ERRCODE = '42501';
+  END IF;
+
+  IF p_table = 'visit_notes' THEN
+    UPDATE public.visit_notes SET body = p_new_body
+    WHERE visit_notes.id = p_id AND visit_notes.body = p_old_body;
+  ELSIF p_table = 'prescriptions' THEN
+    UPDATE public.prescriptions SET body = p_new_body
+    WHERE prescriptions.id = p_id AND prescriptions.body = p_old_body;
+  ELSE
+    RAISE EXCEPTION 'invalid medical table'
+      USING ERRCODE = '42501';
+  END IF;
+  GET DIAGNOSTICS changed = ROW_COUNT;
+  RETURN changed = 1;
+END;
+$function$;
+
+REVOKE ALL ON FUNCTION public.medical_bodies_to_encrypt(text, text, boolean, integer, integer)
+  FROM PUBLIC, app_guest, app_patient, app_doctor, app_registrar, app_admin;
+REVOKE ALL ON FUNCTION public.medical_body_replace(text, integer, text, text)
+  FROM PUBLIC, app_guest, app_patient, app_doctor, app_registrar, app_admin;
+GRANT EXECUTE ON FUNCTION public.medical_bodies_to_encrypt(text, text, boolean, integer, integer)
+  TO clinic_api;
+GRANT EXECUTE ON FUNCTION public.medical_body_replace(text, integer, text, text)
+  TO clinic_api;
+
 COMMIT;

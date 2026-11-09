@@ -79,6 +79,9 @@ services:
       - clinic_api_password
       - session_secret
       - smtp_password
+      # medical field keys: api only, never db/migrate/seed
+      - field_encryption_key
+      - field_encryption_previous_keys
     networks:
       - frontend
       - backend
@@ -148,6 +151,10 @@ secrets:
     file: ./secrets/smtp_password
   demo_password:
     file: ./secrets/demo_password
+  field_encryption_key:
+    file: ./secrets/field_encryption_key
+  field_encryption_previous_keys:
+    file: ./secrets/field_encryption_previous_keys
 
 volumes:
   db_data:

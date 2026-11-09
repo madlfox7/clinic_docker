@@ -550,27 +550,12 @@ CREATE TABLE IF NOT EXISTS visit_notes (
   appointment_id INTEGER NOT NULL REFERENCES appointments(id),
   doctor_id INTEGER NOT NULL REFERENCES doctors(id),
   patient_user_id INTEGER NOT NULL REFERENCES users(id),
-  body TEXT NOT NULL CONSTRAINT visit_notes_body_length_check
-    CHECK (char_length(body) <= 4000)
+  body TEXT NOT NULL
 );
 
 ALTER TABLE public.visit_notes
   DROP CONSTRAINT IF EXISTS visit_notes_appointment_id_key;
 DROP INDEX IF EXISTS public.visit_notes_appointment_id_key;
-
-DO $$
-BEGIN
-  IF NOT EXISTS (
-    SELECT 1 FROM pg_constraint
-    WHERE conname = 'visit_notes_body_length_check'
-      AND conrelid = 'public.visit_notes'::regclass
-  ) THEN
-    ALTER TABLE public.visit_notes
-      ADD CONSTRAINT visit_notes_body_length_check
-      CHECK (char_length(body) <= 4000) NOT VALID;
-  END IF;
-END
-$$;
 
 --this one for rls
 CREATE TABLE IF NOT EXISTS prescriptions (
@@ -578,20 +563,42 @@ CREATE TABLE IF NOT EXISTS prescriptions (
   appointment_id INTEGER NOT NULL REFERENCES appointments(id),
   doctor_id INTEGER NOT NULL REFERENCES doctors(id),
   patient_user_id INTEGER NOT NULL REFERENCES users(id),
-  body TEXT NOT NULL CONSTRAINT prescriptions_body_length_check
-    CHECK (char_length(body) <= 4000)
+  body TEXT NOT NULL
 );
+
+-- body holds an AES-256-GCM packet written by the api (app/field_crypto.py):
+-- fe1:<key_id>:<nonce>:<ciphertext>:<tag>. The 4000-character limit applies to
+-- the plaintext in the api; the packet is longer, so the old length check goes.
+-- New rows must be packets. NOT VALID keeps an older volume usable until the
+-- api startup migration has encrypted its plaintext rows.
+ALTER TABLE public.visit_notes DROP CONSTRAINT IF EXISTS visit_notes_body_length_check;
+ALTER TABLE public.prescriptions DROP CONSTRAINT IF EXISTS prescriptions_body_length_check;
 
 DO $$
 BEGIN
   IF NOT EXISTS (
     SELECT 1 FROM pg_constraint
-    WHERE conname = 'prescriptions_body_length_check'
+    WHERE conname = 'visit_notes_body_encrypted_check'
+      AND conrelid = 'public.visit_notes'::regclass
+  ) THEN
+    ALTER TABLE public.visit_notes
+      ADD CONSTRAINT visit_notes_body_encrypted_check
+      CHECK (
+        char_length(body) <= 24000
+        AND body ~ '^fe1:[A-Za-z0-9_-]{1,32}:[A-Za-z0-9_-]{16}:[A-Za-z0-9_-]+:[A-Za-z0-9_-]{22}$'
+      ) NOT VALID;
+  END IF;
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_constraint
+    WHERE conname = 'prescriptions_body_encrypted_check'
       AND conrelid = 'public.prescriptions'::regclass
   ) THEN
     ALTER TABLE public.prescriptions
-      ADD CONSTRAINT prescriptions_body_length_check
-      CHECK (char_length(body) <= 4000) NOT VALID;
+      ADD CONSTRAINT prescriptions_body_encrypted_check
+      CHECK (
+        char_length(body) <= 24000
+        AND body ~ '^fe1:[A-Za-z0-9_-]{1,32}:[A-Za-z0-9_-]{16}:[A-Za-z0-9_-]+:[A-Za-z0-9_-]{22}$'
+      ) NOT VALID;
   END IF;
 END
 $$;

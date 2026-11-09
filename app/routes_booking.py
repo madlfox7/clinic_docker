@@ -16,6 +16,7 @@ from db import (
     templates,
     within_length,
 )
+from field_crypto import decrypt_body
 from mailer import deliver_appointment_emails
 from routes_auth import _normalize_registration_email, require_user
 
@@ -777,6 +778,11 @@ def my_appointments(request: Request):
         )
     cur.close()
     conn.close()
+    for item in items:
+        item["notes"] = [decrypt_body("visit_notes", body) for body in item["notes"]]
+        item["prescriptions"] = [
+            decrypt_body("prescriptions", body) for body in item["prescriptions"]
+        ]
     return templates.TemplateResponse(
         "my_appointments.html",
         {

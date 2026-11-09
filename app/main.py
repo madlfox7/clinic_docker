@@ -7,7 +7,8 @@ from starlette.exceptions import HTTPException as StarletteHTTPException
 from starlette.middleware.sessions import SessionMiddleware
 
 from csrf import CSRF_ERROR_DETAIL, verify_csrf
-from db import load_session_user, templates
+from db import load_session_user, log, templates
+from field_crypto import FieldDecryptError, init_keyring
 from secret_files import read_secret
 from routes_admin import router as admin_router
 from routes_auth import router as auth_router
@@ -36,6 +37,8 @@ def _session_secret() -> str:
 
 
 SESSION_SECRET = _session_secret()
+# Fail at startup when the medical field key is missing, empty or malformed.
+init_keyring()
 
 _TOKEN_QUERY = re.compile(r"([?&]token=)[^&\s\"]+")
 
@@ -109,6 +112,17 @@ async def html_http_error(request: Request, exc: StarletteHTTPException):
     if exc.status_code == 403 and exc.detail == CSRF_ERROR_DETAIL:
         message = "Session expired, please refresh the page"
     return _error_page(request, exc.status_code, getattr(exc, "headers", None), message)
+
+
+@app.exception_handler(FieldDecryptError)
+async def medical_record_unreadable(request: Request, exc: FieldDecryptError):
+    # Only the reason code and path are logged: never the packet, text or key.
+    log.error("medical record could not be decrypted: reason=%s path=%s", exc.reason, request.url.path)
+    return _error_page(
+        request,
+        500,
+        message="A medical record could not be decrypted. Please contact the clinic administrator.",
+    )
 
 
 @app.exception_handler(RequestValidationError)

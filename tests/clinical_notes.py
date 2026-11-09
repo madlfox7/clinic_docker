@@ -3,6 +3,8 @@
 import subprocess
 from pathlib import Path
 
+from tests.field_key import sql_packet
+
 ROOT = Path(__file__).resolve().parents[1]
 
 NOTE_DOCTOR1_PATIENT_A = "note:doctor1-patientA"
@@ -41,13 +43,9 @@ def cleanup_cross_doctor_notes() -> None:
 				SELECT id FROM slots
 				WHERE starts_at IN (TIMESTAMP '2042-04-07 09:00', TIMESTAMP '2042-04-07 11:00')
 			)
-			UNION
-			SELECT appointment_id FROM visit_notes
-			WHERE body IN ('{NOTE_DOCTOR1_PATIENT_A}', '{NOTE_DOCTOR2_PATIENT_B}')
 		);
 		DELETE FROM visit_notes
-		WHERE body IN ('{NOTE_DOCTOR1_PATIENT_A}', '{NOTE_DOCTOR2_PATIENT_B}')
-		   OR appointment_id IN (
+		WHERE appointment_id IN (
 				SELECT id FROM appointments
 				WHERE slot_id IN (
 					SELECT id FROM slots
@@ -121,13 +119,13 @@ def insert_cross_doctor_notes() -> dict:
 		),
 		note_a AS (
 			INSERT INTO visit_notes (appointment_id, doctor_id, patient_user_id, body)
-			SELECT id, doctor_id, patient_user_id, '{NOTE_DOCTOR1_PATIENT_A}'
+			SELECT id, doctor_id, patient_user_id, {sql_packet("visit_notes", NOTE_DOCTOR1_PATIENT_A)}
 			FROM appt_a
 			RETURNING id, appointment_id
 		),
 		note_b AS (
 			INSERT INTO visit_notes (appointment_id, doctor_id, patient_user_id, body)
-			SELECT id, doctor_id, patient_user_id, '{NOTE_DOCTOR2_PATIENT_B}'
+			SELECT id, doctor_id, patient_user_id, {sql_packet("visit_notes", NOTE_DOCTOR2_PATIENT_B)}
 			FROM appt_b
 			RETURNING id, appointment_id
 		)

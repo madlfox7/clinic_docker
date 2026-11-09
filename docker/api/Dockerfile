@@ -11,4 +11,6 @@ COPY --chown=app:app db/init.sql /app/schema/init.sql
 
 EXPOSE 8000
 USER app
-CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000"]
+# Encrypt any medical text still stored as plaintext, then serve.
+# Both steps need /run/secrets/field_encryption_key, which only api mounts.
+CMD ["sh", "-c", "python -m migrate_medical_fields && exec uvicorn main:app --host 0.0.0.0 --port 8000"]

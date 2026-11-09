@@ -7,6 +7,7 @@ import httpx
 
 from tests.csrf_client import CsrfClient
 from tests.demo_secret import demo_password
+from tests.field_key import PROBE_PACKET, sql_packet
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -162,7 +163,7 @@ def test_doctor_cannot_write_records_for_other_or_cancelled_visits():
                         (appointment_id, doctor_id, patient_user_id, body)
                     VALUES (
                         other_appointment_id, doctor_id, patient_id,
-                        'wrong-appointment-doctor'
+                        __PROBE_PACKET__
                     );
                     RAISE EXCEPTION 'cross-appointment note insert unexpectedly succeeded';
                 EXCEPTION WHEN insufficient_privilege THEN
@@ -174,7 +175,7 @@ def test_doctor_cannot_write_records_for_other_or_cancelled_visits():
                         (appointment_id, doctor_id, patient_user_id, body)
                     VALUES (
                         cancelled_appointment_id, doctor_id, patient_id,
-                        'cancelled-appointment-prescription'
+                        __PROBE_PACKET__
                     );
                     RAISE EXCEPTION 'cancelled-appointment record insert unexpectedly succeeded';
                 EXCEPTION WHEN insufficient_privilege THEN
@@ -183,7 +184,7 @@ def test_doctor_cannot_write_records_for_other_or_cancelled_visits():
             END
             $$;
             ROLLBACK;
-            """,
+            """.replace("__PROBE_PACKET__", sql_literal(PROBE_PACKET)),
         ],
     )
 
@@ -282,28 +283,28 @@ def test_unfiltered_broken_selects_obey_role_rls():
             note_a AS (
                 INSERT INTO visit_notes (appointment_id, doctor_id, patient_user_id, body)
                 SELECT appointment_a.id, identities.doctor_a, identities.patient_a,
-                       'week8-rls-boundary-patient-a'
+                       __PATIENT_A__
                 FROM appointment_a CROSS JOIN identities
                 RETURNING id, appointment_id
             ),
             note_b AS (
                 INSERT INTO visit_notes (appointment_id, doctor_id, patient_user_id, body)
                 SELECT appointment_b.id, identities.doctor_b, identities.patient_b,
-                       'week8-rls-boundary-patient-b'
+                       __PATIENT_B__
                 FROM appointment_b CROSS JOIN identities
                 RETURNING id, appointment_id
             ),
             prescription_a AS (
                 INSERT INTO prescriptions (appointment_id, doctor_id, patient_user_id, body)
                 SELECT note_a.appointment_id, identities.doctor_a, identities.patient_a,
-                       'week8-rls-boundary-prescription-a'
+                       __PRESCRIPTION_A__
                 FROM note_a CROSS JOIN identities
                 RETURNING id
             ),
             prescription_b AS (
                 INSERT INTO prescriptions (appointment_id, doctor_id, patient_user_id, body)
                 SELECT note_b.appointment_id, identities.doctor_b, identities.patient_b,
-                       'week8-rls-boundary-prescription-b'
+                       __PRESCRIPTION_B__
                 FROM note_b CROSS JOIN identities
                 RETURNING id
             )
@@ -316,7 +317,17 @@ def test_unfiltered_broken_selects_obey_role_rls():
             FROM appointment_a CROSS JOIN appointment_b
             CROSS JOIN prescription_a CROSS JOIN prescription_b
             CROSS JOIN identities;
-            """,
+            """
+            .replace("__PATIENT_A__", sql_packet("visit_notes", "week8-rls-boundary-patient-a"))
+            .replace("__PATIENT_B__", sql_packet("visit_notes", "week8-rls-boundary-patient-b"))
+            .replace(
+                "__PRESCRIPTION_A__",
+                sql_packet("prescriptions", "week8-rls-boundary-prescription-a"),
+            )
+            .replace(
+                "__PRESCRIPTION_B__",
+                sql_packet("prescriptions", "week8-rls-boundary-prescription-b"),
+            ),
         ],
     )
     (

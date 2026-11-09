@@ -1,12 +1,20 @@
 import ast
 import json
 import pathlib
+import stat
 import subprocess
 
 from test_rls_boundary import compose_exec
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
-SECRET_FILES = ("postgres_password", "clinic_api_password", "session_secret", "demo_password")
+SECRET_FILES = (
+    "postgres_password",
+    "clinic_api_password",
+    "session_secret",
+    "demo_password",
+    "field_encryption_key",
+)
+FIELD_KEY_SECRETS = ("field_encryption_key", "field_encryption_previous_keys")
 FORBIDDEN_ENV = (
     "DATABASE_URL",
     "PGPASSWORD",
@@ -15,6 +23,7 @@ FORBIDDEN_ENV = (
     "SESSION_SECRET",
     "SMTP_PASSWORD",
     "DEMO_PASSWORD",
+    "FIELD_ENCRYPTION_KEY",
 )
 OLD_DEMO_PASSWORD = "password" + "123"
 # Lists of rejected weak values may name the old demo password; nothing else may.
@@ -143,3 +152,128 @@ print(json.dumps(result))
     result = json.loads(completed.stdout.strip().splitlines()[-1])
     assert result == {"uid": result["uid"], "mounted": True, "missing": "error", "empty": "error"}
     assert result["uid"] != 0
+
+
+def _field_key_values() -> list[str]:
+    line = (ROOT / "secrets" / "field_encryption_key").read_text(encoding="utf-8").strip()
+    key_id, _, key_hex = line.partition(":")
+    assert key_id and len(key_hex) == 64, "secrets/field_encryption_key is not '<key_id>:<hex>'"
+    return [line, key_hex]
+
+
+def test_field_key_is_mounted_only_on_api_and_never_leaks():
+    config = subprocess.run(
+        ["docker", "compose", "config", "--format", "json"],
+        cwd=ROOT, capture_output=True, text=True,
+    )
+    assert config.returncode == 0, config.stderr
+    services = json.loads(config.stdout)["services"]
+    for name, service in services.items():
+        mounted = {item["source"] for item in service.get("secrets") or []}
+        if name == "api":
+            assert set(FIELD_KEY_SECRETS) <= mounted
+        else:
+            assert not mounted & set(FIELD_KEY_SECRETS), name
+    assert "FIELD_ENCRYPTION" not in json.dumps(
+        {name: service.get("environment") for name, service in services.items()}
+    )
+
+    plain_config = subprocess.run(
+        ["docker", "compose", "config"], cwd=ROOT, capture_output=True, text=True
+    ).stdout
+    api_id = subprocess.run(
+        ["docker", "compose", "ps", "-q", "api"], cwd=ROOT, capture_output=True, text=True
+    ).stdout.strip()
+    inspect = subprocess.run(
+        ["docker", "inspect", api_id], cwd=ROOT, capture_output=True, text=True
+    ).stdout
+    logs = subprocess.run(
+        ["docker", "compose", "logs", "api", "db", "migrate", "seed"],
+        cwd=ROOT, capture_output=True, text=True,
+    ).stdout
+    env_files = "".join(
+        (ROOT / name).read_text(encoding="utf-8")
+        for name in (".env", ".env.example")
+        if (ROOT / name).exists()
+    )
+    for value in _field_key_values():
+        for label, text in (
+            ("compose config", plain_config),
+            ("docker inspect api", inspect),
+            ("logs", logs),
+            (".env files", env_files),
+        ):
+            assert value not in text, f"field key value found in {label}"
+
+    assert "field_encryption_key" in compose_exec("api", ["ls", "/run/secrets"])
+    assert "field_encryption" not in compose_exec("db", ["ls", "/run/secrets"])
+
+    for name in FIELD_KEY_SECRETS:
+        mode = (ROOT / "secrets" / name).stat().st_mode
+        assert not mode & (stat.S_IROTH | stat.S_IWOTH), f"secrets/{name} is world-accessible"
+
+
+def test_api_refuses_to_start_without_a_valid_field_key():
+    # Import main (the uvicorn app) with a private secrets dir: a missing, empty
+    # or malformed key stops startup, and an env variable is never used instead.
+    script = r"""
+import json, os, shutil, subprocess, sys, tempfile
+result = {"uid": os.getuid()}
+for case in ("missing", "empty", "malformed", "valid"):
+    with tempfile.TemporaryDirectory() as tmp:
+        for name in ("session_secret", "clinic_api_password", "smtp_password"):
+            shutil.copy(f"/run/secrets/{name}", tmp)
+        shutil.copy("/run/secrets/field_encryption_previous_keys", tmp)
+        if case == "empty":
+            open(os.path.join(tmp, "field_encryption_key"), "w").close()
+        elif case == "malformed":
+            with open(os.path.join(tmp, "field_encryption_key"), "w") as handle:
+                handle.write("v1:not-hex")
+        elif case == "valid":
+            shutil.copy("/run/secrets/field_encryption_key", tmp)
+        env = dict(os.environ, FIELD_ENCRYPTION_KEY="v9:" + "ab" * 32)
+        run = subprocess.run(
+            [sys.executable, "-c",
+             f"import secret_files; secret_files.SECRETS_DIR = {tmp!r}; import main"],
+            capture_output=True, text=True, env=env,
+        )
+        result[case] = {
+            "code": run.returncode,
+            "names_secret": "field_encryption_key" in run.stderr,
+        }
+print(json.dumps(result))
+"""
+    result = json.loads(compose_exec("api", ["python", "-"], input_text=script))
+    assert result["uid"] != 0
+    for case in ("missing", "empty", "malformed"):
+        assert result[case]["code"] != 0, case
+        assert result[case]["names_secret"], case
+    assert result["valid"]["code"] == 0, result["valid"]
+
+
+def test_field_key_reader_has_no_env_fallback():
+    source = (ROOT / "app" / "field_crypto.py").read_text(encoding="utf-8")
+    assert "environ" not in source and "getenv" not in source
+    tree = ast.parse(source)
+    func = next(
+        node for node in tree.body
+        if isinstance(node, ast.FunctionDef) and node.name == "load_keyring"
+    )
+    read_calls = [
+        node for node in ast.walk(func)
+        if isinstance(node, ast.Call) and getattr(node.func, "id", None) == "read_secret"
+    ]
+    assert len(read_calls) == 2
+
+
+def test_init_secrets_does_not_overwrite_field_key():
+    files = [ROOT / "secrets" / name for name in FIELD_KEY_SECRETS]
+    before = [path.read_bytes() for path in files]
+    run = subprocess.run(
+        ["./scripts/init_secrets.sh"], cwd=ROOT, capture_output=True, text=True
+    )
+    assert run.returncode == 0, run.stderr
+    assert [path.read_bytes() for path in files] == before
+    assert "keep    secrets/field_encryption_key" in run.stdout
+    for value in _field_key_values():
+        assert value not in run.stdout + run.stderr
