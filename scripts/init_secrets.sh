@@ -19,6 +19,12 @@ generate() {
 generate postgres_password
 generate clinic_api_password
 generate session_secret
+if [ -e secrets/demo_password ]; then
+  echo "keep    secrets/demo_password"
+else
+  generate demo_password
+  echo "        demo account password is in secrets/demo_password"
+fi
 
 if [ -e secrets/smtp_password ]; then
   echo "keep    secrets/smtp_password"
@@ -32,7 +38,7 @@ fi
 # access to the file itself. The directory stays private to the host user.
 chmod 700 secrets
 chmod 644 secrets/postgres_password secrets/clinic_api_password \
-  secrets/session_secret secrets/smtp_password
+  secrets/session_secret secrets/smtp_password secrets/demo_password
 
 # Older clones may still have unused secret variables in .env.
 # The app no longer reads them; strip the lines without printing values.

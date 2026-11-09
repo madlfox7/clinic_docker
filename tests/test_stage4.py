@@ -11,6 +11,7 @@ import httpx
 import pytest
 
 from tests.csrf_client import CsrfClient
+from tests.demo_secret import demo_password
 from tests.clinical_notes import (
 	NOTE_DOCTOR1_PATIENT_A,
 	NOTE_DOCTOR2_PATIENT_B,
@@ -22,7 +23,7 @@ ROOT = Path(__file__).resolve().parents[1]
 
 BASE = os.environ.get("CLINIC_TEST_BASE", "http://localhost:8080")
 MAILPIT = os.environ.get("CLINIC_MAILPIT", "http://127.0.0.1:8025")
-PASSWORD = "password123"
+PASSWORD = demo_password()
 
 PAT = "pat@clinic.local"
 PAT2 = "pat2@clinic.local"

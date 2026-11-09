@@ -101,6 +101,7 @@ services:
       PGDATABASE: ${POSTGRES_DB:-clinic}
     secrets:
       - clinic_api_password
+      - demo_password
     networks:
       - backend
     depends_on:
@@ -145,6 +146,8 @@ secrets:
     file: ./secrets/session_secret
   smtp_password:
     file: ./secrets/smtp_password
+  demo_password:
+    file: ./secrets/demo_password
 
 volumes:
   db_data:

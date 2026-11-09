@@ -11,7 +11,7 @@ import httpx
 
 ROOT = Path(__file__).resolve().parents[1]
 BASE = os.environ.get("CLINIC_TEST_BASE", "http://localhost:8080")
-PASSWORD = "password123"
+PASSWORD = (ROOT / "secrets" / "demo_password").read_text(encoding="utf-8").strip()
 ACCOUNTS = [
     ("pat@clinic.local", PASSWORD),
     ("pat2@clinic.local", PASSWORD),

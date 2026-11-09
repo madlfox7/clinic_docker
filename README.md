@@ -50,6 +50,8 @@ cp .env.example .env
 
 `.env` содержит только несекретные настройки. Пароли БД, ключ сессии и пароль SMTP лежат в `secrets/` (не коммитится) и попадают в контейнеры как Docker secrets в `/run/secrets/`. `scripts/init_secrets.sh` создаёт недостающие файлы, не перезаписывает существующие и удаляет из `.env` устаревшие строки `POSTGRES_PASSWORD`, `CLINIC_API_PASSWORD`, `SESSION_SECRET` и `SMTP_PASSWORD`. Если раньше пароли были в `.env`, после этого пересоздайте стек: `docker compose down -v && ./scripts/init_secrets.sh && docker compose up --build -d`. Подробнее: `docs/sec_doc.md`.
 
+Пароль демо-учёток (`admin`, `doc`, `doc2`, `pat`, `pat2`, `reg` @clinic.local) берётся только из `secrets/demo_password`: `seed` читает его как Docker secret и падает с ошибкой, если файла нет или он пуст. `init_secrets.sh` генерирует этот файл, если его нет, и не перезаписывает существующий, поэтому свой начальный пароль можно положить туда заранее. Известного демо-пароля в репозитории больше нет. Seed создаёт учётки только в пустой базе, поэтому в уже существующей базе остаётся старый демо-пароль, пока её не пересоздать: `docker compose down -v && ./scripts/init_secrets.sh && docker compose up --build -d`.
+
 http://127.0.0.1:8025.
 
  http://localhost:8080

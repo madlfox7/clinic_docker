@@ -6,6 +6,7 @@ from pathlib import Path
 import httpx
 
 from tests.csrf_client import CsrfClient
+from tests.demo_secret import demo_password
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -27,14 +28,19 @@ def compose_exec(service: str, command: list[str], *, input_text: str = "") -> s
     return completed.stdout.strip()
 
 
+def sql_literal(value: str) -> str:
+    return "'" + value.replace("'", "''") + "'"
+
+
 def test_clinic_api_authenticates_without_reading_password_hash():
     result = compose_exec(
         "db",
         [
             "psql", "-X", "-q", "-v", "ON_ERROR_STOP=1",
             "-U", "clinic", "-d", "clinic", "-At", "-F", "|",
-            "-c",
-            """
+            "-f", "-",
+        ],
+        input_text="""
             BEGIN;
             SET LOCAL ROLE clinic_api;
             DO $$
@@ -52,15 +58,14 @@ def test_clinic_api_authenticates_without_reading_password_hash():
                 )::text,
                 (SELECT role
                  FROM public.authenticate_user(
-                   'pat@clinic.local', 'password123', '127.0.0.1'
+                   'pat@clinic.local', __DEMO_PASSWORD__, '127.0.0.1'
                  )),
                 (SELECT count(*)
                  FROM public.authenticate_user(
                    'pat@clinic.local', 'wrong', '127.0.0.1'
                  ))
             ROLLBACK;
-            """,
-        ],
+            """.replace("__DEMO_PASSWORD__", sql_literal(demo_password())),
     )
     assert result == "false|patient|0"
 
@@ -721,7 +726,7 @@ print(json.dumps({
         with CsrfClient(base_url=TEST_BASE, follow_redirects=True, timeout=10.0) as client:
             login = client.post(
                 "/login",
-                data={"email": PATIENT_A, "password": "password123"},
+                data={"email": PATIENT_A, "password": demo_password()},
             )
             assert login.status_code == 200
             page = client.get(f"/doctors/{result['doctor_b_id']}/slots")

@@ -221,16 +221,16 @@ seed_work_schedule()
 
 Идемпотентно добавляет отсутствующих пользователей по email. Уже существующие записи не дублируются.
 
-Тестовые аккаунты:
+Тестовые аккаунты (пароль у всех один, из Docker secret `secrets/demo_password`):
 
-| Email | Password | Role |
-|---|---|---|
-| `admin@clinic.local` | `password123` | `admin` |
-| `doc@clinic.local` | `password123` | `doctor` |
-| `doc2@clinic.local` | `password123` | `doctor` |
-| `pat@clinic.local` | `password123` | `patient` |
-| `pat2@clinic.local` | `password123` | `patient` |
-| `reg@clinic.local` | `password123` | `registrar` |
+| Email | Role |
+|---|---|
+| `admin@clinic.local` | `admin` |
+| `doc@clinic.local` | `doctor` |
+| `doc2@clinic.local` | `doctor` |
+| `pat@clinic.local` | `patient` |
+| `pat2@clinic.local` | `patient` |
+| `reg@clinic.local` | `registrar` |
 
 ### `seed_clinic()`
 
@@ -485,7 +485,7 @@ Admin может выполнить отдельное действие `Cancel 
 ## 12. Сценарий ручной проверки
 
 1. Открыть `http://localhost:8080`.
-2. Войти как `pat@clinic.local` / `password123`.
+2. Войти как `pat@clinic.local` с паролем из `secrets/demo_password`.
 3. Открыть `Doctors`.
 4. Открыть слоты Anna.
 5. Забронировать Anna `2026-10-01 10:00-10:30`.

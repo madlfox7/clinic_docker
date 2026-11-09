@@ -131,13 +131,23 @@ def parse_strict_int(raw, min_value: int = PG_INT_MIN, max_value: int = PG_INT_M
 
 
 SEED_USERS = [
-    ("admin@clinic.local", "password123", "admin"),
-    ("doc@clinic.local", "password123", "doctor"),
-    ("doc2@clinic.local", "password123", "doctor"),
-    ("pat@clinic.local", "password123", "patient"),
-    ("pat2@clinic.local", "password123", "patient"),
-    ("reg@clinic.local", "password123", "registrar"),
+    ("admin@clinic.local", "admin"),
+    ("doc@clinic.local", "doctor"),
+    ("doc2@clinic.local", "doctor"),
+    ("pat@clinic.local", "patient"),
+    ("pat2@clinic.local", "patient"),
+    ("reg@clinic.local", "registrar"),
 ]
+
+
+def demo_password() -> str:
+    # One password for every demo account, only from the demo_password secret.
+    value = read_secret("demo_password")
+    if not value:
+        raise RuntimeError(
+            "Docker secret demo_password is empty; run scripts/init_secrets.sh"
+        )
+    return value
 
 
 def db():
@@ -269,6 +279,7 @@ def load_session_user(request):
 
 
 def seed_users():
+    password_hash = pwd.hash(demo_password())
     conn = db()
     try:
         with conn:
@@ -279,21 +290,21 @@ def seed_users():
                 )
                 row = cur.fetchone()
                 if row is None:
-                    admin_email, raw_password, _ = next(
-                        user for user in SEED_USERS if user[2] == "admin"
+                    admin_email = next(
+                        email for email, role in SEED_USERS if role == "admin"
                     )
                     cur.execute(
                         "SELECT public.bootstrap_seed_admin(%s, %s)",
-                        (admin_email, pwd.hash(raw_password)),
+                        (admin_email, password_hash),
                     )
 
-            for email, raw_password, role in SEED_USERS:
+            for email, role in SEED_USERS:
                 if role == "admin":
                     continue
                 with conn.cursor() as cur:
                     cur.execute(
                         "SELECT public.bootstrap_seed_user(%s, %s, %s)",
-                        (email, pwd.hash(raw_password), role),
+                        (email, password_hash, role),
                     )
     finally:
         conn.close()

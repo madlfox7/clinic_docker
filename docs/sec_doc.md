@@ -14,6 +14,7 @@
 | `clinic_api_password` | `migrate` задаёт этот пароль роли clinic_api, `api` и `seed` подключаются с ним |
 | `session_secret` | `api`, подпись сессионных cookie |
 | `smtp_password` | `api` (mailer); в dev с mailpit файл пустой |
+| `demo_password` | `seed`, один пароль для всех демо-учёток @clinic.local |
 
 В коде секрет читается через `read_secret(name)`. Функция берёт `/run/secrets/<name>` и падает, если файла нет. Запасного варианта через env нет. Хост, имя пользователя и имя базы не секретны и задаются через `PGHOST`, `PGUSER` и `PGDATABASE`.
 
@@ -26,6 +27,7 @@ docker compose up --build -d
 ```
 
 ## 4. Смена секретов
+- `demo_password` используется только при первом seed пустой базы. Если файла нет или он пуст, `seed` падает и пользователей не создаёт. `init_secrets.sh` не перезаписывает существующий файл. Известного демо-пароля в коде больше нет; в базе, созданной раньше, остаётся старый пароль, пока её не пересоздать (`docker compose down -v`, затем `./scripts/init_secrets.sh` и `docker compose up -d`).
 - Новые `session_secret` и `smtp_password` начинают действовать после `docker compose up -d --force-recreate api`.
 - `postgres_password` и `clinic_api_password` уже записаны в том БД. Если просто заменить файл, пароль в файле и в базе разойдутся. Есть два варианта:
   - пересоздать базу командой `docker compose down -v`, затем `./scripts/init_secrets.sh` и `docker compose up -d` (все данные удалятся);
