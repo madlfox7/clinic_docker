@@ -16,6 +16,8 @@
             <p class="mb-2 text-body-secondary">{{ d.specialty }}, {{ d.experience_years }} years of experience</p>
             {% if role in ("patient", "registrar", "admin") %}
               <a class="btn btn-primary btn-sm" href="{{ d.slots_url }}">{% if role == "admin" %}view slots{% else %}available slots{% endif %}</a>
+            {% elif role == "guest" %}
+              <a class="btn btn-primary btn-sm" href="/login?doctor={{ d.id }}">Book</a>
             {% endif %}
           </div>
         </div>

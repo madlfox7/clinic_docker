@@ -2,6 +2,9 @@
 import os
 import re
 from pathlib import Path
+from urllib.parse import urlencode
+
+import pytest
 
 from tests.csrf_client import CsrfClient
 from tests.demo_secret import demo_password
@@ -67,3 +70,139 @@ def test_week_grid_only_from_lg_and_day_list_below():
     assert '<div class="card d-none d-lg-block">' in html and "calendar-week" in html
     assert '<div class="d-lg-none">' in html
     assert "d-md-block" not in html.split("Week of", 1)[1]
+
+
+# --- guest "Book" -> login -> that doctor's slots (item 4) -------------------
+# Only ?doctor=<int> is supported. The server builds the slots path itself; a free-form
+# "next" is never read, and every bad value ends at the role's default page (/me).
+
+PAT = "pat@clinic.local"
+DOC = "doc@clinic.local"
+DOC2 = "doc2@clinic.local"
+REG = "reg@clinic.local"
+ADMIN = "admin@clinic.local"
+
+
+def _active_doctor_id():
+    with _client() as c:
+        match = re.search(r'href="/login\?doctor=(\d+)"', c.get("/doctors").text)
+    assert match, "guest doctor card has no Book link"
+    return match.group(1)
+
+
+def _login_with(email, fields=(), query=""):
+    with _client() as c:
+        c.get("/login" + query)
+        data = [("email", email), ("password", PASSWORD), ("csrf_token", c.csrf_token()), *fields]
+        # Raw urlencoded body so repeated fields (doctor=1&doctor=2) really are sent twice.
+        return c.post(
+            "/login" + query,
+            content=urlencode(data),
+            headers={"Content-Type": "application/x-www-form-urlencoded"},
+            csrf=False,
+        )
+
+
+def test_guest_book_leads_to_login_then_to_that_doctors_slots():
+    doctor_id = _active_doctor_id()
+    with _client() as c:
+        login_page = c.get(f"/login?doctor={doctor_id}")
+        assert login_page.status_code == 200
+        assert f'<input type="hidden" name="doctor" value="{doctor_id}">' in login_page.text
+        landed = c.post("/login", data={"email": PAT, "password": PASSWORD, "doctor": doctor_id})
+    assert landed.status_code == 200
+    assert landed.url.path == f"/doctors/{doctor_id}/slots"
+    assert "Slots:" in landed.text
+
+
+@pytest.mark.parametrize("value", [
+    "abc", "-1", "+1", "0", " 1", "1 ", "\u00b2", "\u0661", "1e3", "0x1",
+    "99999999999999999999", "2147483648", "1234567890", "",
+])
+def test_bad_doctor_values_end_at_the_default_page(value):
+    response = _login_with(PAT, [("doctor", value)])
+    assert response.status_code == 200
+    assert response.url.path == "/me"
+
+
+def test_nonexistent_doctor_ends_at_the_default_page():
+    response = _login_with(PAT, [("doctor", "999999999")])
+    assert response.status_code == 200 and response.url.path == "/me"
+
+
+def test_inactive_doctor_ends_at_the_default_page():
+    from tests.test_stage4 import psql
+
+    doctor_id = psql(f"SELECT d.id FROM doctors d JOIN users u ON u.id = d.user_id WHERE u.email = '{DOC2}'")
+    assert doctor_id.isdigit()
+    psql(f"UPDATE users SET blocked = TRUE WHERE email = '{DOC2}'")
+    try:
+        response = _login_with(PAT, [("doctor", doctor_id)])
+        assert response.status_code == 200 and response.url.path == "/me"
+    finally:
+        psql(f"UPDATE users SET blocked = FALSE WHERE email = '{DOC2}'")
+
+
+def test_duplicate_doctor_values_are_ignored():
+    doctor_id = _active_doctor_id()
+    response = _login_with(PAT, [("doctor", doctor_id), ("doctor", doctor_id)])
+    assert response.status_code == 200 and response.url.path == "/me"
+    response = _login_with(PAT, [("doctor", "1"), ("doctor", "2")])
+    assert response.status_code == 200 and response.url.path == "/me"
+
+
+@pytest.mark.parametrize("email", [DOC, REG, ADMIN])
+def test_staff_logins_ignore_the_doctor_value(email):
+    doctor_id = _active_doctor_id()
+    for value in (doctor_id, ""):
+        response = _login_with(email, [("doctor", value)])
+        assert response.status_code == 200 and response.url.path == "/me", (email, value)
+
+
+@pytest.mark.parametrize("target", [
+    "//evil.com", "https://evil.com", "/\\evil.com", "javascript:alert(1)", "/%2f%2fevil.com", "/doctors/1/slots",
+])
+def test_next_parameter_is_ignored(target):
+    from urllib.parse import quote
+
+    response = _login_with(PAT, [("next", target)], query="?next=" + quote(target, safe=""))
+    assert response.status_code == 200 and response.url.path == "/me"
+    assert all(r.headers.get("location", "/").startswith("/") and not r.headers.get("location", "/").startswith("//")
+               for r in response.history)
+    doctor_id = _active_doctor_id()
+    response = _login_with(PAT, [("doctor", doctor_id), ("next", target)])
+    assert response.url.path == f"/doctors/{doctor_id}/slots"
+
+
+def test_login_form_never_reflects_a_raw_doctor_value():
+    raw = '1"><b>x</b>'
+    with _client() as c:
+        page = c.get("/login", params={"doctor": raw})
+        assert 'name="doctor"' not in page.text and "<b>x</b>" not in page.text
+        failed = c.post("/login", data={"email": PAT, "password": "wrong-password-1", "doctor": raw})
+        assert failed.status_code == 401
+        assert 'name="doctor"' not in failed.text and "<b>x</b>" not in failed.text
+        failed = c.post("/login", data={"email": PAT, "password": "wrong-password-1", "doctor": "7"})
+        assert failed.status_code == 401
+        assert '<input type="hidden" name="doctor" value="7">' in failed.text
+
+
+def test_register_and_reset_links_do_not_carry_the_doctor():
+    with _client() as c:
+        page = c.get("/login?doctor=1").text
+    assert 'href="/register"' in page and 'href="/forgot-password"' in page
+    assert "doctor=" not in page.split("</form>", 1)[1]
+
+
+def test_blocked_patient_with_doctor_value_stays_logged_out():
+    from tests.test_stage4 import PAT2, psql
+
+    doctor_id = _active_doctor_id()
+    psql(f"UPDATE users SET blocked = TRUE WHERE email = '{PAT2}'")
+    try:
+        with _client() as c:
+            response = c.post("/login", data={"email": PAT2, "password": PASSWORD, "doctor": doctor_id})
+            assert response.status_code == 403 and "Account is blocked" in response.text
+            assert c.get(f"/doctors/{doctor_id}/slots").url.path == "/login"
+    finally:
+        psql(f"UPDATE users SET blocked = FALSE WHERE email = '{PAT2}'")

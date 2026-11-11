@@ -1,5 +1,6 @@
 import os
 import re
+from typing import List
 from urllib.parse import urlencode
 
 from psycopg2.errors import UniqueViolation
@@ -13,6 +14,7 @@ from fastapi.responses import RedirectResponse
 from db import (
     MAX_EMAIL_LENGTH,
     MAX_PASSWORD_LENGTH,
+    PG_INT_MAX,
     contains_nul,
     db_as_guest,
     db,
@@ -91,6 +93,7 @@ def _login_page(
     email=None,
     registered: bool = False,
     password_reset: bool = False,
+    doctor_id: int | None = None,
 ):
     return templates.TemplateResponse(
         "login.html",
@@ -101,9 +104,56 @@ def _login_page(
             "email": email,
             "registered": registered,
             "password_reset": password_reset,
+            # Only a validated integer ever reaches the form, never the raw value.
+            "doctor_id": doctor_id,
         },
         status_code=status_code,
     )
+
+
+LOGIN_DOCTOR_MAX_DIGITS = 9
+
+
+def _login_doctor_id(values) -> int | None:
+    """Doctor id from the guest "Book" button (?doctor=<id>), or None.
+
+    Exactly one value of 1-9 ASCII digits, positive and inside int4. Anything else,
+    including duplicates, is ignored. There is no free-form return URL.
+    """
+    if len(values) != 1:
+        return None
+    raw = values[0]
+    if (
+        not isinstance(raw, str)
+        or not 1 <= len(raw) <= LOGIN_DOCTOR_MAX_DIGITS
+        or not (raw.isascii() and raw.isdigit())
+    ):
+        return None
+    value = int(raw)
+    if not 1 <= value <= PG_INT_MAX:
+        return None
+    return value
+
+
+def _patient_landing_page(user_id: int, doctor_id: int | None) -> str:
+    """Where a patient lands after login: the chosen doctor's slots if that doctor is active."""
+    if doctor_id is None:
+        return "/me"
+    try:
+        conn = db_as({"id": user_id, "role": "patient"})
+        try:
+            with conn.cursor() as cur:
+                cur.execute("SELECT public.doctor_is_active(%s)", (doctor_id,))
+                active = bool(cur.fetchone()[0])
+            conn.commit()
+        finally:
+            conn.close()
+    except Exception:
+        log.exception("could not check the doctor chosen before login")
+        return "/me"
+    if not active:
+        return "/me"
+    return f"/doctors/{doctor_id}/slots"
 
 
 def _register_page(
@@ -216,6 +266,7 @@ def login_form(request: Request):
         None,
         registered=request.query_params.get("registered") == "1",
         password_reset=request.query_params.get("reset") == "1",
+        doctor_id=_login_doctor_id(request.query_params.getlist("doctor")),
     )
 
 
@@ -296,20 +347,26 @@ def register(
 
 
 @router.post("/login")
-def login(request: Request, email: str = Form(...), password: str = Form(...)):
+def login(
+    request: Request,
+    email: str = Form(...),
+    password: str = Form(...),
+    doctor: List[str] = Form(default=[]),
+):
     user, status = load_session_user(request)
     if status == "blocked":
         return _login_page(request, "Account is blocked", 403)
     if status == "ok":
         return _login_page(request, None, role=user["role"], email=user["email"])
+    doctor_id = _login_doctor_id(doctor)
     if contains_nul(email, password):
-        return _login_page(request, "NUL characters are not allowed.", 400)
+        return _login_page(request, "NUL characters are not allowed.", 400, doctor_id=doctor_id)
     normalized_email = _normalize_registration_email(email)
     if (
         normalized_email is None
         or not within_length(password, MAX_PASSWORD_LENGTH)
     ):
-        return _login_page(request, "Invalid email or password", 401)
+        return _login_page(request, "Invalid email or password", 401, doctor_id=doctor_id)
     client_source = request.headers.get("x-real-ip")
     if (
         not client_source
@@ -332,22 +389,26 @@ def login(request: Request, email: str = Form(...), password: str = Form(...)):
     finally:
         conn.close()
     if not row:
-        return _login_page(request, "Invalid email or password", 401)
+        return _login_page(request, "Invalid email or password", 401, doctor_id=doctor_id)
     if row[5]:
         response = _login_page(
             request,
             "Too many login attempts. Try again in 15 minutes.",
             429,
+            doctor_id=doctor_id,
         )
         response.headers["Retry-After"] = "900"
         return response
     if row[3]:
-        return _login_page(request, "Account is blocked", 403)
+        return _login_page(request, "Account is blocked", 403, doctor_id=doctor_id)
     request.session.clear()
     request.session["user_id"] = row[0]
     request.session["email"] = row[1]
     request.session["auth_version"] = row[4]
-    return RedirectResponse("/me", status_code=303)
+    target = "/me"
+    if row[2] == "patient":
+        target = _patient_landing_page(row[0], doctor_id)
+    return RedirectResponse(target, status_code=303)
 
 
 RESET_TOKEN_PATTERN = re.compile(r"^[0-9a-f]{64}$")

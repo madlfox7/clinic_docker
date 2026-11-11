@@ -15,8 +15,10 @@
 {% if error %}<div class="alert alert-danger" role="alert">{{ error }}</div>{% endif %}
 {% if registered %}<div class="alert alert-success">Account created. Please log in.</div>{% endif %}
 {% if password_reset %}<div class="alert alert-success">Password updated. Please log in.</div>{% endif %}
+{% if doctor_id %}<div class="alert alert-info">Log in as a patient to choose a time with the selected doctor.</div>{% endif %}
 <form method="post" action="/login">
   <input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}">
+  {% if doctor_id %}<input type="hidden" name="doctor" value="{{ doctor_id }}">{% endif %}
   <div class="mb-3"><label class="form-label w-100">Email: <input class="form-control" name="email" type="email" required></label></div>
   <div class="mb-3"><label class="form-label w-100">Password: <input class="form-control" name="password" type="password" required></label></div>
   <button class="btn btn-primary w-100" type="submit">Login</button>
