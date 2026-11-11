@@ -777,6 +777,10 @@ def my_appointments(request: Request):
             ),
             None,
         )
+    # Same read event as /my/records, once per page and only when bodies will be shown.
+    if any(item["notes"] or item["prescriptions"] for item in items):
+        record_audit_event(cur, "medical.records.view", "patient", user["id"])
+        conn.commit()
     cur.close()
     conn.close()
     for item in items:
