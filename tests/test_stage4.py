@@ -4455,7 +4455,7 @@ def test_logout_requires_post_with_csrf_token():
 		# The menu carries the POST form with the session token, not a link.
 		cabinet = c.get("/me").text
 		assert 'href="/logout"' not in cabinet
-		form = re.search(r'<form[^>]*method="post" action="/logout"><input type="hidden" name="csrf_token" value="([^"]+)">', cabinet)
+		form = re.search(r'<form[^>]*method="post" action="/logout"[^>]*><input type="hidden" name="csrf_token" value="([^"]+)">', cabinet)
 		assert form and form.group(1) == c.csrf_token()
 		copied = dict(c.cookies)
 		done = c.post("/logout", data={"csrf_token": form.group(1)})

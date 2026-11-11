@@ -7,7 +7,7 @@
 {% if email %}
 <p>You are already logged in as {{ email }}. Log out before using another account.</p>
 <div><a class="btn btn-primary" href="/me">Cabinet</a>
-<form class="inline-form" method="post" action="/logout">
+<form class="inline-form" method="post" action="/logout" data-confirm="Выйти из системы?">
   <input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}">
   <button class="btn btn-outline-secondary" type="submit">Logout</button>
 </form></div>

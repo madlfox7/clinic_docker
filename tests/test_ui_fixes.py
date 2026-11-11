@@ -1,6 +1,7 @@
 """Small UI fixes after the Bootstrap redesign."""
 import os
 import re
+from html.parser import HTMLParser
 from pathlib import Path
 from urllib.parse import urlencode
 
@@ -52,7 +53,7 @@ def test_admin_menu_uses_short_labels_and_keeps_every_link():
         assert re.search(rf'href="{href}"[^>]*>{label}</a>', desktop), label
     menu = desktop.split('<details class="cabinet-menu">', 1)[1].split("</details>", 1)[0]
     assert 'href="/me"' in menu and 'href="/admin/settings"' in menu
-    assert '<form class="nav-form" method="post" action="/logout"><input type="hidden" name="csrf_token" value="' in menu
+    assert '<form class="nav-form" method="post" action="/logout" data-confirm="Выйти из системы?"><input type="hidden" name="csrf_token" value="' in menu
     assert "Manage staff" not in desktop
 
 
@@ -206,3 +207,97 @@ def test_blocked_patient_with_doctor_value_stays_logged_out():
             assert c.get(f"/doctors/{doctor_id}/slots").url.path == "/login"
     finally:
         psql(f"UPDATE users SET blocked = FALSE WHERE email = '{PAT2}'")
+
+
+# --- logout confirmation -----------------------------------------------------
+# Every logout form (nav, admin <details>, mobile menu, already-logged-in login
+# page) asks before submitting. Cancel is handled in app.js via data-confirm.
+
+LOGOUT_CONFIRM = "Выйти из системы?"
+
+_ROLE_PAGES = {
+    PAT: ("/", "/doctors", "/me", "/my", "/my/records", "/login"),
+    DOC: ("/", "/me", "/doctor/appointments", "/doctor/patients", "/doctor/calendar", "/login"),
+    REG: ("/", "/me", "/registrar/appointments", "/registrar/patients", "/login"),
+    ADMIN: ("/", "/me", "/admin/users", "/admin/doctors", "/admin/services",
+            "/admin/schedule", "/admin/audit", "/admin/settings", "/login"),
+}
+
+
+class _LogoutForms(HTMLParser):
+    def __init__(self):
+        super().__init__()
+        self.forms = []
+        self._in_form = 0
+
+    def handle_starttag(self, tag, attrs):
+        attrs_dict = dict(attrs)
+        if tag == "form" and attrs_dict.get("action") == "/logout":
+            self.forms.append({
+                "attrs": attrs_dict,
+                "handlers": [name for name, _ in attrs if name.lower().startswith("on")],
+                "inline_script": False,
+            })
+            self._in_form += 1
+        elif self._in_form:
+            if tag == "form":
+                self._in_form += 1
+            if any(name.lower().startswith("on") for name, _ in attrs):
+                self.forms[-1]["handlers"].extend(
+                    name for name, _ in attrs if name.lower().startswith("on")
+                )
+            if tag == "script" and "src" not in attrs_dict:
+                self.forms[-1]["inline_script"] = True
+
+    def handle_endtag(self, tag):
+        if self._in_form and tag == "form":
+            self._in_form -= 1
+
+
+def _logout_forms(html):
+    parser = _LogoutForms()
+    parser.feed(html)
+    return parser.forms
+
+
+def test_templates_put_data_confirm_on_every_logout_form():
+    templates = ROOT / "app" / "templates"
+    found = 0
+    for path in templates.glob("*.html"):
+        text = path.read_text(encoding="utf-8")
+        for match in re.finditer(r'<form\b[^>]*action="/logout"[^>]*>', text):
+            found += 1
+            tag = match.group(0)
+            assert f'data-confirm="{LOGOUT_CONFIRM}"' in tag, path.name
+            assert not re.search(r"\son[a-z]+\s*=", tag, re.I), path.name
+    assert found == 2
+
+
+@pytest.mark.parametrize("email,pages", list(_ROLE_PAGES.items()))
+def test_logout_forms_ask_for_confirmation(email, pages):
+    with _client() as c:
+        assert "Cabinet" in c.post("/login", data={"email": email, "password": PASSWORD}).text
+        for path in pages:
+            page = c.get(path)
+            assert page.status_code == 200, (email, path, page.status_code)
+            forms = _logout_forms(page.text)
+            expected = 3 if path == "/login" else 2
+            assert len(forms) == expected, (email, path, len(forms))
+            for form in forms:
+                assert form["attrs"].get("method", "").lower() == "post"
+                assert form["attrs"].get("data-confirm") == LOGOUT_CONFIRM
+                assert form["handlers"] == []
+                assert not form["inline_script"]
+            assert not re.search(r"<script\b(?![^>]*\bsrc=)", page.text, re.I)
+            # Admin desktop: logout lives inside the cabinet <details>.
+            if email == ADMIN and path != "/login":
+                desktop = page.text.split('<nav class="d-none d-lg-block"', 1)[1].split("</nav>", 1)[0]
+                menu = desktop.split('<details class="cabinet-menu">', 1)[1].split("</details>", 1)[0]
+                menu_forms = _logout_forms(menu)
+                assert len(menu_forms) == 1
+                assert menu_forms[0]["attrs"].get("data-confirm") == LOGOUT_CONFIRM
+            # Mobile menu always carries its own logout form.
+            mobile = page.text.split('<details class="mobile-nav', 1)[1].split("</details>", 1)[0]
+            mobile_forms = _logout_forms(mobile)
+            assert len(mobile_forms) == 1
+            assert mobile_forms[0]["attrs"].get("data-confirm") == LOGOUT_CONFIRM
