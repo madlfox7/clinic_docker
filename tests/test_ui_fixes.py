@@ -58,3 +58,12 @@ def test_non_admin_menu_has_no_admin_links():
         assert "Cabinet" in c.post("/login", data={"email": "reg@clinic.local", "password": PASSWORD}).text
         html = c.get("/registrar/patients").text
     assert "/admin/" not in html and "cabinet-menu" not in html
+
+
+def test_week_grid_only_from_lg_and_day_list_below():
+    with _client() as c:
+        assert "Cabinet" in c.post("/login", data={"email": "reg@clinic.local", "password": PASSWORD}).text
+        html = c.get("/registrar/appointments?view=week").text
+    assert '<div class="card d-none d-lg-block">' in html and "calendar-week" in html
+    assert '<div class="d-lg-none">' in html
+    assert "d-md-block" not in html.split("Week of", 1)[1]

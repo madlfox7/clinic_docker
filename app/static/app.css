@@ -120,9 +120,9 @@ fieldset legend { font-size: 1rem; font-weight: 600; }
 .slot-list .btn { --bs-btn-padding-y: .15rem; --bs-btn-padding-x: .6rem; --bs-btn-font-size: .85rem; border-radius: 2rem; }
 .slot-time { font-weight: 600; }
 
-/* Calendar: wide table on tablets/desktops, day list on phones */
-.calendar-week td, .calendar-week th { min-width: 9rem; vertical-align: top; }
-.calendar-week th:first-child { min-width: 4.5rem; }
+/* Calendar: the week grid from lg up, a day list below lg */
+.calendar-week td, .calendar-week th { min-width: 7rem; vertical-align: top; }
+.calendar-week th:first-child { min-width: 4rem; }
 .calendar-event { border-left: 3px solid var(--bs-primary); padding-left: .4rem; margin-bottom: .4rem; font-size: .85rem; }
 .calendar-event.is-cancelled { border-left-color: #adb5bd; }
 
