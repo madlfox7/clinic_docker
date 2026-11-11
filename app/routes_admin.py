@@ -1029,7 +1029,7 @@ def _outside_hours_sql(alias="s"):
 def _scheduled_visit_rows(cur, where_sql, params):
     cur.execute(
         f"""
-        SELECT a.id, u.email, d.full_name, svc.name, a.starts_at, a.ends_at
+        SELECT a.id, u.email, d.full_name, svc.name, a.starts_at, a.ends_at, a.status
         FROM appointments a
         JOIN users u ON u.id = a.patient_user_id
         JOIN slots s ON s.id = a.slot_id
@@ -1049,6 +1049,7 @@ def _scheduled_visit_rows(cur, where_sql, params):
             "service_name": row[3],
             "starts_at": row[4],
             "ends_at": row[5],
+            "status": row[6],
         }
         for row in cur.fetchall()
     ]
