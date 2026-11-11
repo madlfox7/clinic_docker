@@ -1,8 +1,12 @@
 import ast
 import json
+import os
 import pathlib
+import shutil
 import stat
 import subprocess
+
+import pytest
 
 from test_rls_boundary import compose_exec
 
@@ -289,3 +293,38 @@ def test_migrate_keeps_api_password_out_of_argv():
     assert "\\set clinic_api_password `cat /run/secrets/clinic_api_password`" in sql
     assert "SET log_statement = 'none';" in sql
     assert "ALTER ROLE clinic_api PASSWORD :'clinic_api_password';" in sql
+
+
+SECRET_READERS = {
+    "postgres_password": ("db", "999"),
+    "clinic_api_password": ("api", "10001"),
+    "session_secret": ("api", "10001"),
+    "smtp_password": ("api", "10001"),
+    "demo_password": ("seed", "10001"),
+}
+
+
+def _compose_run(args):
+    return subprocess.run(["docker", "compose", *args], cwd=ROOT, capture_output=True, text=True, timeout=60)
+
+
+def test_secret_files_are_readable_only_by_their_container_user():
+    if shutil.which("getfacl") is None:
+        pytest.skip("no getfacl on this host: init_secrets.sh falls back to 644 with a warning")
+    for name, (service, uid) in SECRET_READERS.items():
+        path = ROOT / "secrets" / name
+        mode = path.stat().st_mode
+        assert not mode & (stat.S_IROTH | stat.S_IWOTH), f"secrets/{name} is world-accessible"
+        acl = subprocess.run(["getfacl", "-cpn", str(path)], capture_output=True, text=True).stdout
+        # Files handed to the container uid by the root fallback carry no ACL.
+        if path.stat().st_uid == os.getuid():
+            assert f"user:{uid}:r--" in acl.splitlines(), (name, acl)
+            assert "other::---" in acl.splitlines(), (name, acl)
+    for service in ("api", "db"):
+        names = [n for n, (s, _) in SECRET_READERS.items() if s == service]
+        user = "999" if service == "db" else "10001"
+        for name in names:
+            ok = _compose_run(["exec", "-T", "-u", user, service, "test", "-r", f"/run/secrets/{name}"])
+            assert ok.returncode == 0, f"{service} uid {user} cannot read {name}"
+            denied = _compose_run(["exec", "-T", "-u", "12345", service, "test", "-r", f"/run/secrets/{name}"])
+            assert denied.returncode != 0, f"uid 12345 can read {name} in {service}"

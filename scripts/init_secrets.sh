@@ -52,9 +52,34 @@ fi
 # Compose bind-mounts each file with host ownership and mode, so non-root
 # container users (api/seed run as uid 10001, postgres as uid 999) need read
 # access to the file itself. The directory stays private to the host user.
+# Each file is 600 for the host user plus a read ACL for the one container uid
+# that reads it (migrate runs as root in its container and needs no ACL).
+# chmod must come before setfacl: a later chmod would reset the ACL mask.
+# Fallback without ACL support: root hands the file to that uid (0400);
+# anyone else keeps 644 so the stack still starts, with a warning.
 chmod 700 secrets
-chmod 644 secrets/postgres_password secrets/clinic_api_password \
-  secrets/session_secret secrets/smtp_password secrets/demo_password
+for entry in postgres_password:999 clinic_api_password:10001 \
+  session_secret:10001 smtp_password:10001 demo_password:10001; do
+  secret_file="secrets/${entry%%:*}"
+  reader_uid="${entry##*:}"
+  if [ ! -O "$secret_file" ]; then
+    echo "note    $secret_file is not owned by you; permissions left as they are"
+    continue
+  fi
+  chmod 600 "$secret_file"
+  if command -v setfacl >/dev/null 2>&1 && setfacl -m "u:$reader_uid:r" "$secret_file" 2>/dev/null; then
+    continue
+  fi
+  if [ "$(id -u)" = 0 ]; then
+    chown "$reader_uid:$reader_uid" "$secret_file"
+    chmod 400 "$secret_file"
+    continue
+  fi
+  chmod 644 "$secret_file"
+  echo "warning $secret_file stays world-readable (644): no ACL support." >&2
+  echo "        Install the acl package and rerun, or: chmod 600 $secret_file && sudo setfacl -m u:$reader_uid:r $secret_file" >&2
+  echo "        or: sudo chown $reader_uid:$reader_uid $secret_file && sudo chmod 400 $secret_file" >&2
+done
 
 # The field keys must not be world-readable. Keep them 600 for the host user
 # and grant read access only to the api user (uid 10001) through an ACL.
