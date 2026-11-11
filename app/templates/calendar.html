@@ -199,7 +199,8 @@
   {% elif error == "request_range_too_long" %}<div class="alert alert-danger" role="alert">Time off cannot cover more than a year or end more than two years from today.</div>
   {% elif error == "request_comment_required" %}<div class="alert alert-danger" role="alert">Enter a comment for the request.</div>
   {% elif error == "request_comment_invalid" %}<div class="alert alert-danger" role="alert">Comment cannot contain a NUL character.</div>
-  {% elif error == "request_comment_too_long" %}<div class="alert alert-danger" role="alert">Comment must be no longer than 200 characters.</div>{% endif %}
+  {% elif error == "request_comment_too_long" %}<div class="alert alert-danger" role="alert">Comment must be no longer than 200 characters.</div>
+  {% elif error == "request_overlap" %}<div class="alert alert-danger" role="alert">You already have a pending time-off request that overlaps these dates.</div>{% endif %}
   <form class="row g-2 align-items-end" method="post" action="/doctor/time-off-requests">
   <input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}">
     <div class="col-sm-6 col-md-3"><label class="form-label w-100 mb-0">From <input class="form-control" type="date" name="starts_on" min="{{ min_request_date }}" max="{{ max_request_date }}" value="{{ selected_day.isoformat() }}" required></label></div>

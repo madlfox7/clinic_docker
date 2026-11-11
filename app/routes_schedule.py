@@ -583,16 +583,8 @@ def submit_time_off_request(
     if cur.fetchone() is not None:
         cur.close()
         conn.close()
-        return templates.TemplateResponse(
-            request,
-            "error.html",
-            {
-                "request": request,
-                "role": user["role"],
-                "title": "Bad request",
-                "message": "A pending time-off request already overlaps these dates.",
-            },
-            status_code=400,
+        return RedirectResponse(
+            f"{redirect_url}&error=request_overlap", status_code=303
         )
     cur.execute(
         """

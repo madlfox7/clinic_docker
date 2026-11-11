@@ -2363,10 +2363,17 @@ def test_doctor_pending_time_off_rejects_overlapping_dates():
 					"comment": "duplicate-exact-should-fail",
 				},
 			)
-			assert exact.status_code == 400
-			assert "Bad request" in exact.text
-			assert "overlaps these dates" in exact.text
-			assert "<h1>Bad request</h1>" in exact.text
+			assert exact.status_code == 200
+			assert str(exact.url).endswith(f"/doctor/calendar?day={base_start}&error=request_overlap")
+			assert exact.history and exact.history[0].status_code == 303
+			assert "already have a pending time-off request that overlaps these dates" in exact.text
+			assert "duplicate-exact-should-fail" not in exact.history[0].headers["location"]
+			assert psql(
+				f"""
+				SELECT count(*) FROM time_off_requests
+				WHERE doctor_id = {doctor_id} AND comment = 'duplicate-exact-should-fail'
+				"""
+			) == "0"
 
 			# Partial overlap: existing 250-252 vs new 251-253
 			partial_start = psql("SELECT CURRENT_DATE + 251")
@@ -2379,7 +2386,8 @@ def test_doctor_pending_time_off_rejects_overlapping_dates():
 					"comment": partial_comment,
 				},
 			)
-			assert partial.status_code == 400
+			assert "error=request_overlap" in str(partial.url)
+			assert partial.history and partial.history[0].status_code == 303
 			assert "overlaps these dates" in partial.text
 			assert psql(
 				f"""
