@@ -84,6 +84,8 @@ REVOKE ALL PRIVILEGES ON ALL SEQUENCES IN SCHEMA public FROM clinic_api;
 REVOKE SELECT (password_hash) ON public.users FROM clinic_api;
 GRANT SELECT (id, email, role, blocked, auth_version) ON public.users TO clinic_api;
 GRANT SELECT ON public.doctors TO clinic_api;
+-- load_session_user reads the idle timeout; address and phone stay closed.
+GRANT SELECT (id, session_idle_minutes) ON public.clinic_settings TO clinic_api;
 
 ALTER DEFAULT PRIVILEGES IN SCHEMA public
   REVOKE ALL ON TABLES FROM clinic_api;

@@ -11,6 +11,7 @@ from csrf import CSRF_ERROR_DETAIL, verify_csrf
 from db import load_session_user, log, templates
 from field_crypto import FieldDecryptError, init_keyring
 from secret_files import read_secret
+from session_config import ABSOLUTE_SECONDS, HTTPS_ONLY, SAME_SITE
 from static_assets import STATIC_DIR
 from routes_admin import router as admin_router
 from routes_auth import router as auth_router
@@ -73,7 +74,17 @@ for _logger_name in ("uvicorn.access", "uvicorn", "uvicorn.error"):
 
 
 app = FastAPI(dependencies=[Depends(verify_csrf)])
-app.add_middleware(SessionMiddleware, secret_key=SESSION_SECRET)
+# Cookie lifetime equals the absolute session limit; the server also checks
+# iat/seen in load_session_user. Cookie name stays "session".
+app.add_middleware(
+    SessionMiddleware,
+    secret_key=SESSION_SECRET,
+    session_cookie="session",
+    max_age=ABSOLUTE_SECONDS,
+    same_site=SAME_SITE,
+    https_only=HTTPS_ONLY,
+    path="/",
+)
 
 _ERROR_TEXT = {
     400: ("Bad request", "The request could not be processed."),

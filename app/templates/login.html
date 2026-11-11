@@ -13,6 +13,7 @@
 </form></div>
 {% else %}
 {% if error %}<div class="alert alert-danger" role="alert">{{ error }}</div>{% endif %}
+{% if expired %}<div class="alert alert-warning" role="alert">Your session has expired. Please sign in again.</div>{% endif %}
 {% if registered %}<div class="alert alert-success">Account created. Please log in.</div>{% endif %}
 {% if password_reset %}<div class="alert alert-success">Password updated. Please log in.</div>{% endif %}
 {% if doctor_id %}<div class="alert alert-info">Log in as a patient to choose a time with the selected doctor.</div>{% endif %}

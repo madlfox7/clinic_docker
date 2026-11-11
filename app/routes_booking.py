@@ -18,7 +18,7 @@ from db import (
 )
 from field_crypto import decrypt_body
 from mailer import deliver_appointment_emails
-from routes_auth import _normalize_registration_email, require_user
+from routes_auth import _login_doctor_id, _normalize_registration_email, require_user
 
 
 
@@ -44,7 +44,10 @@ def _overlap_redirect(doctor_id, service_id, patient_email_query=""):
 
 @router.get("/doctors/{doctor_id}/slots")
 def doctor_slots(request: Request, doctor_id: str):
-    user, denied = require_user(request, "patient", "registrar", "admin")
+    user, denied = require_user(
+        request, "patient", "registrar", "admin",
+        login_doctor_id=_login_doctor_id([doctor_id]),
+    )
     if denied:
         return denied
     role = user["role"]

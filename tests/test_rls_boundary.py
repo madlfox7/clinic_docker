@@ -17,9 +17,11 @@ ADMIN = "admin@clinic.local"
 TEST_BASE = os.environ.get("CLINIC_TEST_BASE", "http://localhost:8080")
 
 
-def compose_exec(service: str, command: list[str], *, input_text: str = "") -> str:
+def compose_exec_run(service: str, command: list[str], *, input_text: str = "",
+                     env: dict[str, str] | None = None) -> subprocess.CompletedProcess:
+    env_args = [arg for key, value in (env or {}).items() for arg in ("-e", f"{key}={value}")]
     completed = subprocess.run(
-        ["docker", "compose", "exec", "-T", service, *command],
+        ["docker", "compose", "exec", "-T", *env_args, service, *command],
         cwd=ROOT,
         input=input_text,
         capture_output=True,
@@ -27,6 +29,12 @@ def compose_exec(service: str, command: list[str], *, input_text: str = "") -> s
     )
     if service == "db":
         seal_pending()
+    return completed
+
+
+def compose_exec(service: str, command: list[str], *, input_text: str = "",
+                 env: dict[str, str] | None = None) -> str:
+    completed = compose_exec_run(service, command, input_text=input_text, env=env)
     assert completed.returncode == 0, completed.stderr or completed.stdout
     return completed.stdout.strip()
 

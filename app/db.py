@@ -1,14 +1,24 @@
 import logging
 import os
+import time
 import unicodedata
 from datetime import date
 
 import psycopg2
+import psycopg2.errors
 from fastapi.templating import Jinja2Templates
 from passlib.context import CryptContext
 
 from csrf import csrf_token
 from secret_files import read_secret
+from session_config import (
+    ABSOLUTE_SECONDS,
+    CLOCK_SKEW_SECONDS,
+    IDLE_FALLBACK_MINUTES,
+    IDLE_MAX,
+    IDLE_MIN,
+    SESSION_TOUCH_SECONDS,
+)
 from static_assets import static_url
 
 
@@ -226,12 +236,73 @@ def db_as_guest():
 
 
 #
+def _session_expired(request, user_id: int, role: str, reason: str) -> None:
+    """Journal one auth.session_expired event; a journal error never blocks the request."""
+    from client_ip import client_source
+
+    try:
+        conn = db_as({"id": user_id, "role": role})
+        try:
+            with conn:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        "SELECT public.record_session_expired(%s, %s)",
+                        (reason, client_source(request)),
+                    )
+        finally:
+            conn.close()
+    except Exception:
+        log.warning("session expiry audit failed")
+
+
+def _session_user_row(user_id: int):
+    """users row plus clinic_settings.session_idle_minutes in one query.
+
+    If the idle column cannot be read (migration not applied, grant missing),
+    fall back to the users-only query; the caller then uses the fallback idle.
+    """
+    conn = db()
+    try:
+        cur = conn.cursor()
+        try:
+            cur.execute(
+                """
+                SELECT u.id, u.email, u.role, u.blocked, u.auth_version,
+                       (SELECT cs.session_idle_minutes FROM clinic_settings cs WHERE cs.id = 1)
+                FROM users u WHERE u.id = %s
+                """,
+                (user_id,),
+            )
+            row = cur.fetchone()
+        except (psycopg2.errors.UndefinedColumn, psycopg2.errors.InsufficientPrivilege):
+            conn.rollback()
+            cur.execute(
+                "SELECT id, email, role, blocked, auth_version, NULL FROM users WHERE id=%s",
+                (user_id,),
+            )
+            row = cur.fetchone()
+        cur.close()
+    finally:
+        conn.close()
+    return row
+
+
+def _idle_seconds(raw) -> int:
+    if type(raw) is int and IDLE_MIN <= raw <= IDLE_MAX:
+        return raw * 60
+    log.warning("session idle setting unavailable, using %s", IDLE_FALLBACK_MINUTES)
+    return IDLE_FALLBACK_MINUTES * 60
+
+
 def load_session_user(request):
     """Re-read identity, role, blocked state and auth version from users.
 
-    The signed cookie carries only a user id and revocable auth version.
-    Returns (user, status): status is 'ok', 'anonymous', 'missing', or 'blocked'.
-    A missing, stale or blocked account clears the session.
+    The signed cookie carries only a user id, a revocable auth version and two
+    timestamps: iat (sign-in) and seen (last activity, refreshed at most once a
+    minute). Returns (user, status): status is 'ok', 'anonymous', 'missing',
+    'blocked' or 'expired'. A missing, stale, blocked or expired account clears
+    the session. Idle and absolute timeouts write auth.session_expired; a legacy
+    cookie without valid timestamps is cleared without an event.
     """
     raw_id = request.session.get("user_id")
     raw_auth_version = request.session.get("auth_version")
@@ -249,17 +320,18 @@ def load_session_user(request):
     if type(raw_auth_version) is not int or raw_auth_version < 0:
         request.session.clear()
         return None, "missing"
-    conn = db()
-    try:
-        cur = conn.cursor()
-        cur.execute(
-            "SELECT id, email, role, blocked, auth_version FROM users WHERE id=%s",
-            (raw_id,),
-        )
-        row = cur.fetchone()
-        cur.close()
-    finally:
-        conn.close()
+    now = int(time.time())
+    iat = request.session.get("iat")
+    seen = request.session.get("seen")
+    if (
+        type(iat) is not int
+        or type(seen) is not int
+        or iat > now + CLOCK_SKEW_SECONDS
+        or seen > now + CLOCK_SKEW_SECONDS
+    ):
+        request.session.clear()
+        return None, "expired"
+    row = _session_user_row(raw_id)
     if not row:
         request.session.clear()
         return None, "missing"
@@ -269,8 +341,19 @@ def load_session_user(request):
     if row[3]:
         request.session.clear()
         return None, "blocked"
+    reason = None
+    if now - iat > ABSOLUTE_SECONDS:
+        reason = "absolute_timeout"
+    elif now - seen > _idle_seconds(row[5]):
+        reason = "idle_timeout"
+    if reason is not None:
+        request.session.clear()
+        _session_expired(request, row[0], row[2], reason)
+        return None, "expired"
     request.session.pop("role", None)
-    request.session["email"] = row[1]
+    request.session.pop("email", None)
+    if now - seen >= SESSION_TOUCH_SECONDS:
+        request.session["seen"] = now
     return {
         "id": row[0],
         "email": row[1],

@@ -2114,6 +2114,10 @@ CREATE POLICY clinic_settings_admin_update ON public.clinic_settings
   FOR UPDATE TO app_admin
   USING (id = 1)
   WITH CHECK (id = 1);
+DROP POLICY IF EXISTS clinic_settings_clinic_api_select ON public.clinic_settings;
+CREATE POLICY clinic_settings_clinic_api_select ON public.clinic_settings
+  FOR SELECT TO clinic_api
+  USING (id = 1);
 
 DROP POLICY IF EXISTS services_active_select ON public.services;
 DROP POLICY IF EXISTS services_appointment_history_select ON public.services;
@@ -2344,6 +2348,99 @@ $function$;
 REVOKE ALL ON FUNCTION public.revoke_own_sessions() FROM PUBLIC;
 GRANT EXECUTE ON FUNCTION public.revoke_own_sessions()
   TO app_patient, app_doctor, app_registrar, app_admin;
+
+-- Idle or absolute session timeout of the current account. One event per
+-- account and reason in 15 minutes, so replaying an expired cookie adds nothing.
+CREATE OR REPLACE FUNCTION public.record_session_expired(
+  event_reason text,
+  event_source text
+)
+RETURNS void
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = pg_catalog, public, pg_temp
+AS $function$
+DECLARE
+  actor_id integer := NULLIF(current_setting('app.user_id', true), '')::integer;
+  actor_role text;
+BEGIN
+  IF actor_id IS NULL OR actor_id < 1
+     OR event_reason IS NULL
+     OR event_reason NOT IN ('idle_timeout', 'absolute_timeout') THEN
+    RETURN;
+  END IF;
+  SELECT u.role INTO actor_role FROM public.users AS u WHERE u.id = actor_id;
+  IF actor_role IS NULL
+     OR current_setting('role', true) IS DISTINCT FROM ('app_' || actor_role) THEN
+    RETURN;
+  END IF;
+  IF EXISTS (
+    SELECT 1 FROM public.audit_events
+    WHERE action = 'auth.session_expired'
+      AND actor_user_id = actor_id
+      AND reason = event_reason
+      AND created_at > CURRENT_TIMESTAMP - INTERVAL '15 minutes'
+  ) THEN
+    RETURN;
+  END IF;
+  PERFORM public.record_auth_event(
+    'auth.session_expired', actor_id, actor_role, event_reason, event_source
+  );
+END;
+$function$;
+
+REVOKE ALL ON FUNCTION public.record_session_expired(text, text) FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION public.record_session_expired(text, text)
+  TO app_patient, app_doctor, app_registrar, app_admin;
+
+-- The idle timeout changes only here: admin check, range check, update and
+-- journal entry with old and new value in one transaction. app_admin has no
+-- UPDATE grant on the column, so no change can skip the journal.
+CREATE OR REPLACE FUNCTION public.set_session_idle_minutes(new_minutes integer)
+RETURNS integer
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = pg_catalog, public, pg_temp
+AS $function$
+DECLARE
+  actor_id integer := NULLIF(current_setting('app.user_id', true), '')::integer;
+  current_minutes integer;
+BEGIN
+  IF current_setting('role', true) IS DISTINCT FROM 'app_admin'
+     OR NOT EXISTS (
+       SELECT 1 FROM public.users
+       WHERE id = actor_id AND role = 'admin' AND NOT blocked
+     ) THEN
+    RAISE EXCEPTION 'invalid admin context' USING ERRCODE = '42501';
+  END IF;
+  IF new_minutes IS NULL OR new_minutes NOT BETWEEN 5 AND 120 THEN
+    RAISE EXCEPTION 'session idle minutes must be between 5 and 120'
+      USING ERRCODE = '22023';
+  END IF;
+  SELECT session_idle_minutes INTO current_minutes
+  FROM public.clinic_settings
+  WHERE id = 1
+  FOR UPDATE;
+  IF NOT FOUND THEN
+    RAISE EXCEPTION 'clinic settings row is missing';
+  END IF;
+  IF current_minutes = new_minutes THEN
+    RETURN current_minutes;
+  END IF;
+  UPDATE public.clinic_settings SET session_idle_minutes = new_minutes WHERE id = 1;
+  INSERT INTO public.audit_events (
+    actor_user_id, actor_role, action, target_type, target_id, old_value, new_value
+  )
+  VALUES (
+    actor_id, 'admin', 'clinic.session_idle.update', 'clinic', 1,
+    current_minutes, new_minutes
+  );
+  RETURN new_minutes;
+END;
+$function$;
+
+REVOKE ALL ON FUNCTION public.set_session_idle_minutes(integer) FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION public.set_session_idle_minutes(integer) TO app_admin;
 
 -- Medical text encryption: the api encrypts plaintext rows left in an older
 -- volume, rewrites legacy fe1 packets (not bound to their row) as row-bound

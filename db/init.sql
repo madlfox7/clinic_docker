@@ -88,6 +88,24 @@ INSERT INTO clinic_settings (id, address, phone)
 VALUES (1, 'Educational stand', '000-00-00')
 ON CONFLICT (id) DO NOTHING;
 
+-- Idle session timeout in minutes, set by the admin (5-120, default 30).
+-- Changed only through public.set_session_idle_minutes, which journals it.
+ALTER TABLE clinic_settings
+  ADD COLUMN IF NOT EXISTS session_idle_minutes INTEGER NOT NULL DEFAULT 30;
+DO $$
+BEGIN
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_constraint
+    WHERE conname = 'clinic_settings_session_idle_check'
+      AND conrelid = 'public.clinic_settings'::regclass
+  ) THEN
+    ALTER TABLE public.clinic_settings
+      ADD CONSTRAINT clinic_settings_session_idle_check
+      CHECK (session_idle_minutes BETWEEN 5 AND 120);
+  END IF;
+END
+$$;
+
 
 CREATE TABLE IF NOT EXISTS doctors (
   id SERIAL PRIMARY KEY,
@@ -644,7 +662,8 @@ ALTER TABLE audit_events ADD CONSTRAINT audit_events_actor_check
 ALTER TABLE audit_events DROP CONSTRAINT IF EXISTS audit_events_reason_check;
 ALTER TABLE audit_events ADD CONSTRAINT audit_events_reason_check
   CHECK (reason IS NULL OR reason IN (
-    'bad_credentials', 'blocked', 'login', 'password_reset', 'email_change'
+    'bad_credentials', 'blocked', 'login', 'password_reset', 'email_change',
+    'idle_timeout', 'absolute_timeout'
   ));
 ALTER TABLE audit_events DROP CONSTRAINT IF EXISTS audit_events_source_check;
 ALTER TABLE audit_events ADD CONSTRAINT audit_events_source_check
@@ -653,3 +672,23 @@ ALTER TABLE audit_events ADD CONSTRAINT audit_events_source_check
 CREATE INDEX IF NOT EXISTS audit_events_rate_limited_idx
   ON audit_events (created_at)
   WHERE action = 'auth.rate_limited';
+
+-- Old and new value of a numeric setting change (only the session idle timeout).
+ALTER TABLE audit_events ADD COLUMN IF NOT EXISTS old_value INTEGER;
+ALTER TABLE audit_events ADD COLUMN IF NOT EXISTS new_value INTEGER;
+DO $$
+BEGIN
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_constraint
+    WHERE conname = 'audit_events_change_values_check'
+      AND conrelid = 'public.audit_events'::regclass
+  ) THEN
+    ALTER TABLE public.audit_events
+      ADD CONSTRAINT audit_events_change_values_check
+      CHECK (
+        (old_value IS NULL AND new_value IS NULL)
+        OR action = 'clinic.session_idle.update'
+      );
+  END IF;
+END
+$$;

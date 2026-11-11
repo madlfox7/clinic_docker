@@ -1,5 +1,6 @@
 import os
 import re
+import time
 from typing import List
 from urllib.parse import urlencode
 
@@ -26,6 +27,7 @@ from db import (
     templates,
     within_length,
 )
+from client_ip import client_source
 from mailer import send_account_message, send_password_changed, send_password_reset, smtp_ready
 
 router = APIRouter()
@@ -94,6 +96,7 @@ def _login_page(
     registered: bool = False,
     password_reset: bool = False,
     doctor_id: int | None = None,
+    expired: bool = False,
 ):
     return templates.TemplateResponse(
         request,
@@ -101,6 +104,7 @@ def _login_page(
         {
             "request": request,
             "error": error,
+            "expired": expired,
             "role": role,
             "email": email,
             "registered": registered,
@@ -217,11 +221,20 @@ def viewer(request: Request):
     return None
 
 
-def require_user(request: Request, *roles):
-    """Load id, role and blocked from users. Cookie role is ignored."""
+def require_user(request: Request, *roles, login_doctor_id: int | None = None):
+    """Load id, role and blocked from users. Cookie role is ignored.
+
+    An expired session goes to /login?expired=1; login_doctor_id (already
+    validated) keeps the patient's way back to the selected doctor.
+    """
     user, status = load_session_user(request)
     if status == "blocked":
         return None, _login_page(request, "Account is blocked", 403)
+    if status == "expired":
+        target = "/login?expired=1"
+        if login_doctor_id is not None:
+            target += f"&doctor={login_doctor_id}"
+        return None, RedirectResponse(target, status_code=303)
     if status != "ok":
         return None, RedirectResponse("/login", status_code=303)
     if roles and user["role"] not in roles:
@@ -271,6 +284,7 @@ def login_form(request: Request):
         registered=request.query_params.get("registered") == "1",
         password_reset=request.query_params.get("reset") == "1",
         doctor_id=_login_doctor_id(request.query_params.getlist("doctor")),
+        expired=request.query_params.get("expired") == "1",
     )
 
 
@@ -406,9 +420,11 @@ def login(
     if row[3]:
         return _login_page(request, "Account is blocked", 403, doctor_id=doctor_id)
     request.session.clear()
+    signed_in_at = int(time.time())
     request.session["user_id"] = row[0]
-    request.session["email"] = row[1]
     request.session["auth_version"] = row[4]
+    request.session["iat"] = signed_in_at
+    request.session["seen"] = signed_in_at
     target = "/me"
     if row[2] == "patient":
         target = _patient_landing_page(row[0], doctor_id)
@@ -416,17 +432,6 @@ def login(
 
 
 RESET_TOKEN_PATTERN = re.compile(r"^[0-9a-f]{64}$")
-
-
-def _client_source(request: Request) -> str:
-    client_source = request.headers.get("x-real-ip")
-    if (
-        not client_source
-        or contains_nul(client_source)
-        or not within_length(client_source, 128)
-    ):
-        return request.client.host if request.client else "unknown"
-    return client_source
 
 
 def _forgot_password_page(
@@ -532,7 +537,7 @@ def forgot_password(request: Request, email: str = Form(...)):
                 SELECT reset_token, rate_limited, outcome
                 FROM public.request_password_reset(%s, %s, FALSE)
                 """,
-                (normalized_email, _client_source(request)),
+                (normalized_email, client_source(request)),
             )
             row = cur.fetchone()
         conn.commit()

@@ -36,6 +36,7 @@ from db import (
     within_length,
 )
 from mailer import deliver_appointment_emails, smtp_ready
+from session_config import ABSOLUTE_HOURS, IDLE_MAX, IDLE_MIN
 from routes_auth import (
     _normalize_registration_email,
     deliver_password_reset,
@@ -70,7 +71,8 @@ def admin_audit(request: Request):
     cur.execute(
         """
         SELECT e.created_at, u.email, e.actor_role, e.action,
-               e.target_type, e.target_id, e.reason, e.source
+               e.target_type, e.target_id, e.reason, e.source,
+               e.old_value, e.new_value
         FROM audit_events e
         LEFT JOIN users u ON u.id = e.actor_user_id
         ORDER BY e.created_at DESC, e.id DESC
@@ -87,6 +89,8 @@ def admin_audit(request: Request):
             "target_id": row[5],
             "reason": row[6],
             "source": row[7],
+            "old_value": row[8],
+            "new_value": row[9],
         }
         for row in cur.fetchall()
     ]
@@ -909,7 +913,9 @@ def admin_settings(request: Request):
         return denied
     conn = db_as(admin_user)
     cur = conn.cursor()
-    cur.execute("SELECT address, phone FROM clinic_settings WHERE id = 1")
+    cur.execute(
+        "SELECT address, phone, session_idle_minutes FROM clinic_settings WHERE id = 1"
+    )
     row = cur.fetchone()
     cur.close()
     conn.close()
@@ -923,6 +929,10 @@ def admin_settings(request: Request):
             "role": admin_user["role"],
             "address": row[0],
             "phone": row[1],
+            "idle_minutes": row[2],
+            "idle_min": IDLE_MIN,
+            "idle_max": IDLE_MAX,
+            "absolute_hours": ABSOLUTE_HOURS,
             "saved": request.query_params.get("saved"),
             "error": request.query_params.get("error"),
         },
@@ -967,6 +977,28 @@ def update_admin_settings(
     finally:
         conn.close()
     return RedirectResponse("/admin/settings?saved=1", status_code=303)
+
+
+@router.post("/admin/settings/session")
+def update_session_settings(request: Request, idle_minutes: str = Form("")):
+    admin_user, denied = require_user(request, "admin")
+    if denied:
+        return denied
+    minutes = parse_strict_int(idle_minutes, IDLE_MIN, IDLE_MAX)
+    if minutes is None:
+        return RedirectResponse("/admin/settings?error=invalid_idle", status_code=303)
+    conn = db_as(admin_user)
+    try:
+        with conn:
+            with conn.cursor() as cur:
+                # The DEFINER function checks the admin, updates the value and
+                # journals old and new values in the same transaction.
+                cur.execute("SELECT public.set_session_idle_minutes(%s)", (minutes,))
+    except (psycopg2.errors.CheckViolation, psycopg2.errors.InvalidParameterValue):
+        return RedirectResponse("/admin/settings?error=invalid_idle", status_code=303)
+    finally:
+        conn.close()
+    return RedirectResponse("/admin/settings?saved=session", status_code=303)
 
 
 def _purge_slots_without_scheduled(cur, where_sql, params):
