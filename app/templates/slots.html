@@ -6,16 +6,20 @@
   <div class="card-body">
     <form class="row g-2 align-items-end" method="get" action="/doctors/{{ doctor.id }}/slots">
       <div class="col-md-8">
-        <label class="form-label mb-1">Service
-          <select class="form-select" name="service_id" required>
+        <label class="form-label d-block w-100 mb-1">Service
+          <select class="form-select w-100" name="service_id" id="service-select" aria-describedby="service-details" required>
             {% for service in services %}
-              <option value="{{ service.id }}"
+              <option value="{{ service.id }}" data-duration="{{ service.duration_minutes }}" data-buffer="{{ service.buffer_minutes }}"
                 {% if selected_service and service.id == selected_service.id %}selected{% endif %}>
-                {{ service.name }} — {{ service.duration_minutes }} min + {{ service.buffer_minutes }} min buffer
+                {{ service.name }} · {{ service.duration_minutes }} min
               </option>
             {% endfor %}
           </select>
         </label>
+        {% set shown_service = selected_service or (services[0] if services else none) %}
+        <div class="form-text" id="service-details" aria-live="polite">
+          {%- if shown_service %}Reserved time: {{ shown_service.duration_minutes }} min + {{ shown_service.buffer_minutes }} min buffer{% endif -%}
+        </div>
       </div>
       <div class="col-md-4">
         <button class="btn btn-primary w-100" type="submit">Show slots for this service</button>

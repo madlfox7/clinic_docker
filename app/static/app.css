@@ -20,7 +20,7 @@
 
 /* Bootstrap ships its form icons as data: URIs; CSP img-src is 'self' only,
    so the icons in use are replaced with same-origin SVG files. */
-.form-select { --bs-form-select-bg-img: url("/static/img/select-arrow.svg"); }
+.form-select { --bs-form-select-bg-img: url("/static/img/select-arrow.svg"); max-width: 100%; text-overflow: ellipsis; }
 .form-check-input:checked[type=checkbox] { --bs-form-check-bg-image: url("/static/img/check.svg"); }
 .form-check-input:checked[type=radio] { --bs-form-check-bg-image: url("/static/img/radio.svg"); }
 .form-check-input[type=checkbox]:indeterminate { --bs-form-check-bg-image: url("/static/img/indeterminate.svg"); }

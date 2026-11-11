@@ -50,6 +50,20 @@
     window.alert(box.dataset.popupMessage);
   });
 
+  // Booking form: show the chosen service's duration and buffer under the short option label.
+  const serviceSelect = document.getElementById("service-select");
+  const serviceDetails = document.getElementById("service-details");
+  if (serviceSelect && serviceDetails) {
+    serviceSelect.addEventListener("change", () => {
+      const option = serviceSelect.selectedOptions[0];
+      if (!option) return;
+      const duration = Number.parseInt(option.dataset.duration || "", 10);
+      const buffer = Number.parseInt(option.dataset.buffer || "", 10);
+      if (Number.isNaN(duration) || Number.isNaN(buffer)) return;
+      serviceDetails.textContent = `Reserved time: ${duration} min + ${buffer} min buffer`;
+    });
+  }
+
   // Admin schedule: weekday presets in the bulk work-hours form.
   const bulkWorkHoursForm = document.getElementById("bulk-work-hours-form");
   if (bulkWorkHoursForm) {
