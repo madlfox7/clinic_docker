@@ -1,22 +1,31 @@
 {% extends "base.html" %}
+{% block title %}Doctors{% endblock %}
 {% block content %}
-
-
 <h1>Doctors</h1>
 {% if role == "registrar" and selected_patient_email %}
-  <p>Select a doctor to book for {{ selected_patient_email }}.</p>
+  <div class="alert alert-info">Select a doctor to book for {{ selected_patient_email }}.</div>
 {% endif %}
-<ul>
+<div class="row g-3">
   {% for d in doctors %}
-    <li>
-      {{ d.full_name }} — {{ d.specialty }}, {{ d.experience_years }} years of experience
-      {% if role in ("patient", "registrar", "admin") %}
-        — <a href="{{ d.slots_url }}">{% if role == "admin" %}view slots{% else %}available slots{% endif %}</a>
-      {% endif %}
-    </li>
+    <div class="col-sm-6 col-lg-4">
+      <div class="card h-100">
+        <div class="card-body d-flex gap-3">
+          <span class="doctor-avatar" aria-hidden="true">{% for part in d.full_name.split()[:2] %}{{ part[:1]|upper }}{% endfor %}</span>
+          <div>
+            <h2 class="h5 mt-0 mb-1">{{ d.full_name }}</h2>
+            <p class="mb-2 text-body-secondary">{{ d.specialty }}, {{ d.experience_years }} years of experience</p>
+            {% if role in ("patient", "registrar", "admin") %}
+              <a class="btn btn-primary btn-sm" href="{{ d.slots_url }}">{% if role == "admin" %}view slots{% else %}available slots{% endif %}</a>
+            {% endif %}
+          </div>
+        </div>
+      </div>
+    </div>
+  {% else %}
+    <p>No doctors available.</p>
   {% endfor %}
-</ul>
+</div>
 {% if not role %}
-  <p>To book an appointment, <a href="/login">log in</a> as a patient.</p>
+  <p class="mt-3">To book an appointment, <a href="/login">log in</a> as a patient.</p>
 {% endif %}
 {% endblock %}

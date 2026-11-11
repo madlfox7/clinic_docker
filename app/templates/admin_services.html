@@ -1,89 +1,104 @@
 {% extends "base.html" %}
+{% block title %}Manage services{% endblock %}
 {% block content %}
 <h1>Manage services</h1>
-{% if created == "1" %}<p>Service created. Generate slots to make it bookable.</p>{% endif %}
-{% if updated == "1" %}<p>Service details updated. Existing slots keep their saved times; new durations apply to future slot generation.</p>{% endif %}
-{% if deleted == "1" %}<p>Unused service deleted.</p>{% endif %}
-{% if activation == "activated" %}<p>Service activated. Generate slots to make it bookable.</p>
-{% elif activation == "deactivated" %}<p>Service deactivated; its existing appointments and history are preserved.</p>{% endif %}
-{% if error == "invalid_service" %}<p>Enter a name of 2–100 characters, a duration of 5–480 minutes, and a buffer of 0–120 minutes.</p>
-{% elif error == "name_exists" %}<p>A service with this name already exists.</p>
-{% elif error == "service_not_found" %}<p>Service not found.</p>
-{% elif error == "invalid_doctor" %}<p>One or more selected doctors are unavailable.</p>
-{% elif error == "future_appointments" %}<p>Cannot remove doctors from this service while {{ request.query_params.get("count", "some") }} future scheduled appointment(s) remain. Keep the assignments or cancel those appointments first.</p>
-{% elif error == "service_in_use" %}<p>Only services with no generated slots can be deleted. Deactivate this service to stop future bookings.</p>{% endif %}
+{% if created == "1" %}<div class="alert alert-success">Service created. Generate slots to make it bookable.</div>{% endif %}
+{% if updated == "1" %}<div class="alert alert-success">Service details updated. Existing slots keep their saved times; new durations apply to future slot generation.</div>{% endif %}
+{% if deleted == "1" %}<div class="alert alert-success">Unused service deleted.</div>{% endif %}
+{% if activation == "activated" %}<div class="alert alert-success">Service activated. Generate slots to make it bookable.</div>
+{% elif activation == "deactivated" %}<div class="alert alert-success">Service deactivated; its existing appointments and history are preserved.</div>{% endif %}
+{% if error == "invalid_service" %}<div class="alert alert-danger" role="alert">Enter a name of 2–100 characters, a duration of 5–480 minutes, and a buffer of 0–120 minutes.</div>
+{% elif error == "name_exists" %}<div class="alert alert-danger" role="alert">A service with this name already exists.</div>
+{% elif error == "service_not_found" %}<div class="alert alert-danger" role="alert">Service not found.</div>
+{% elif error == "invalid_doctor" %}<div class="alert alert-danger" role="alert">One or more selected doctors are unavailable.</div>
+{% elif error == "future_appointments" %}<div class="alert alert-danger" role="alert">Cannot remove doctors from this service while {{ request.query_params.get("count", "some") }} future scheduled appointment(s) remain. Keep the assignments or cancel those appointments first.</div>
+{% elif error == "service_in_use" %}<div class="alert alert-danger" role="alert">Only services with no generated slots can be deleted. Deactivate this service to stop future bookings.</div>{% endif %}
 
-<section>
-  <h2>Add service</h2>
+<section class="card mb-3">
+  <div class="card-body">
+  <h2 class="mt-0">Add service</h2>
   <form method="post" action="/admin/services">
   <input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}">
-    <label>Name <input name="name" minlength="2" maxlength="100" required></label>
-    <label>Duration (minutes) <input name="duration_minutes" type="number" min="5" max="480" required></label>
-    <label>Buffer after service (minutes) <input name="buffer_minutes" type="number" min="0" max="120" value="0" required></label>
-    <fieldset>
+    <div class="row g-2 mb-2">
+    <div class="col-md-6"><label class="form-label w-100 mb-0">Name <input class="form-control" name="name" minlength="2" maxlength="100" required></label></div>
+    <div class="col-md-3"><label class="form-label w-100 mb-0">Duration (minutes) <input class="form-control" name="duration_minutes" type="number" min="5" max="480" required></label></div>
+    <div class="col-md-3"><label class="form-label w-100 mb-0">Buffer after service (minutes) <input class="form-control" name="buffer_minutes" type="number" min="0" max="120" value="0" required></label></div>
+    </div>
+    <fieldset class="mb-2">
       <legend>Doctors offering this service</legend>
+      <div class="check-grid">
       {% for doctor in doctors %}
-        <label><input type="checkbox" name="doctor_ids" value="{{ doctor.id }}"> {{ doctor.full_name }}</label>
+        <label class="form-check"><input class="form-check-input" type="checkbox" name="doctor_ids" value="{{ doctor.id }}"> {{ doctor.full_name }}</label>
       {% else %}
         <p>No doctors configured.</p>
       {% endfor %}
+      </div>
     </fieldset>
-    <button type="button" data-check-group="doctor_ids" data-check-action="all">Select all</button>
-    <button type="button" data-check-group="doctor_ids" data-check-action="none">Clear selection</button>
-    <button type="submit">Create service</button>
+    <button class="btn btn-outline-secondary btn-sm" type="button" data-check-group="doctor_ids" data-check-action="all">Select all</button>
+    <button class="btn btn-outline-secondary btn-sm" type="button" data-check-group="doctor_ids" data-check-action="none">Clear selection</button>
+    <button class="btn btn-primary" type="submit">Create service</button>
   </form>
+  </div>
 </section>
 
-<p>Only assigned doctors can generate slots or accept bookings for a service. Deactivate a service to stop new bookings; existing slots and visits are retained.</p>
+<p class="text-body-secondary">Only assigned doctors can generate slots or accept bookings for a service. Deactivate a service to stop new bookings; existing slots and visits are retained.</p>
 {% for service in services %}
-  <section>
-    <h2>{{ service.name }} — {{ "Active" if service.active else "Inactive" }}</h2>
+  <section class="card mb-3">
+    <div class="card-body">
+    <h2 class="mt-0">{{ service.name }} — {{ "Active" if service.active else "Inactive" }}</h2>
     <p>{{ service.slot_count }} generated slot(s)</p>
     <form method="post" action="/admin/services/{{ service.id }}">
   <input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}">
-      <label>Name <input name="name" value="{{ service.name }}" minlength="2" maxlength="100" required></label>
-      <label>Duration (minutes)
-        <input name="duration_minutes" type="number" min="5" max="480" value="{{ service.duration_minutes }}" required>
-      </label>
-      <label>Buffer after service (minutes)
-        <input name="buffer_minutes" type="number" min="0" max="120" value="{{ service.buffer_minutes }}" required>
-      </label>
-      <fieldset>
+      <div class="row g-2 mb-2">
+      <div class="col-md-6"><label class="form-label w-100 mb-0">Name <input class="form-control" name="name" value="{{ service.name }}" minlength="2" maxlength="100" required></label></div>
+      <div class="col-md-3"><label class="form-label w-100 mb-0">Duration (minutes)
+        <input class="form-control" name="duration_minutes" type="number" min="5" max="480" value="{{ service.duration_minutes }}" required>
+      </label></div>
+      <div class="col-md-3"><label class="form-label w-100 mb-0">Buffer after service (minutes)
+        <input class="form-control" name="buffer_minutes" type="number" min="0" max="120" value="{{ service.buffer_minutes }}" required>
+      </label></div>
+      </div>
+      <fieldset class="mb-2">
         <legend>Doctors offering this service</legend>
+        <div class="check-grid">
         {% for doctor in doctors %}
-          <label>
-            <input type="checkbox" name="doctor_ids" value="{{ doctor.id }}"
+          <label class="form-check">
+            <input class="form-check-input" type="checkbox" name="doctor_ids" value="{{ doctor.id }}"
               {% if doctor.id in service.doctor_ids %}checked{% endif %}>
             {{ doctor.full_name }}
           </label>
         {% else %}
           <p>No doctors configured.</p>
         {% endfor %}
+        </div>
       </fieldset>
-      <button type="button" data-check-group="doctor_ids" data-check-action="all">Select all</button>
-      <button type="button" data-check-group="doctor_ids" data-check-action="none">Clear selection</button>
-      <button type="submit">Save service</button>
+      <button class="btn btn-outline-secondary btn-sm" type="button" data-check-group="doctor_ids" data-check-action="all">Select all</button>
+      <button class="btn btn-outline-secondary btn-sm" type="button" data-check-group="doctor_ids" data-check-action="none">Clear selection</button>
+      <button class="btn btn-primary" type="submit">Save service</button>
     </form>
+    <div class="mt-2">
     {% if service.active %}
-      <form method="post" action="/admin/services/{{ service.id }}/deactivate">
+      <form class="inline-form" method="post" action="/admin/services/{{ service.id }}/deactivate">
   <input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}">
-        <button type="submit">Deactivate service</button>
+        <button class="btn btn-outline-warning btn-sm" type="submit">Deactivate service</button>
       </form>
     {% else %}
-      <form method="post" action="/admin/services/{{ service.id }}/activate">
+      <form class="inline-form" method="post" action="/admin/services/{{ service.id }}/activate">
   <input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}">
-        <button type="submit">Activate service</button>
+        <button class="btn btn-outline-success btn-sm" type="submit">Activate service</button>
       </form>
     {% endif %}
     {% if service.slot_count == 0 %}
-      <form method="post" action="/admin/services/{{ service.id }}/delete"
-        onsubmit="return confirm('Permanently delete this unused service?')">
+      <form class="inline-form" method="post" action="/admin/services/{{ service.id }}/delete"
+        data-confirm="Permanently delete this unused service?">
   <input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}">
-        <button type="submit">Delete unused service</button>
+        <button class="btn btn-outline-danger btn-sm" type="submit">Delete unused service</button>
       </form>
     {% else %}
-      <p>Cannot delete a service with generated slots; deactivate it instead.</p>
+      <p class="text-body-secondary mb-0">Cannot delete a service with generated slots; deactivate it instead.</p>
     {% endif %}
+    </div>
+    </div>
   </section>
 {% else %}
   <p>No services configured.</p>

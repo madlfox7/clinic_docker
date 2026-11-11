@@ -1,9 +1,11 @@
 {% extends "base.html" %}
+{% block title %}Audit log{% endblock %}
 {% block content %}
-
 <h1>Audit log</h1>
-<p>Latest 100 access and change events. Medical note and prescription text is never included.</p>
-<table>
+<p class="text-body-secondary">Latest 100 access and change events. Medical note and prescription text is never included.</p>
+<div class="card">
+<div class="table-responsive">
+<table class="table table-striped table-sm align-middle mb-0">
   <thead>
     <tr><th>Time</th><th>Actor</th><th>Role</th><th>Action</th><th>Target</th></tr>
   </thead>
@@ -13,7 +15,7 @@
         <td>{{ event.created_at }}</td>
         <td>{{ event.actor_email }}</td>
         <td>{{ event.actor_role }}</td>
-        <td>{{ event.action }}</td>
+        <td><code>{{ event.action }}</code></td>
         <td>{{ event.target_type }}{% if event.target_id is not none %} #{{ event.target_id }}{% endif %}</td>
       </tr>
     {% else %}
@@ -21,4 +23,6 @@
     {% endfor %}
   </tbody>
 </table>
+</div>
+</div>
 {% endblock %}

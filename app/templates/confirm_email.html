@@ -1,21 +1,26 @@
 {% extends "base.html" %}
+{% block title %}Confirm email change{% endblock %}
 {% block content %}
+<div class="card auth-card">
+  <div class="card-body p-4">
 <h1>Confirm email change</h1>
 {% if error == "invalid" %}
-  <p>This confirmation link is invalid or has expired.</p>
+  <div class="alert alert-danger" role="alert">This confirmation link is invalid or has expired.</div>
 {% elif error == "confirmed_old" %}
-  <p>The current address is confirmed. The new address still needs to confirm its own link.</p>
+  <div class="alert alert-info">The current address is confirmed. The new address still needs to confirm its own link.</div>
 {% elif error == "confirmed_new" %}
-  <p>The new address is confirmed. The current address still needs to confirm its own link.</p>
+  <div class="alert alert-info">The new address is confirmed. The current address still needs to confirm its own link.</div>
 {% elif error == "taken" %}
-  <p>That email is no longer available.</p>
+  <div class="alert alert-danger" role="alert">That email is no longer available.</div>
 {% else %}
   <p>Confirm this step of the email change. Both addresses must confirm before the account changes.</p>
   <form method="post" action="/confirm-email">
   <input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}">
     <input type="hidden" name="token" value="{{ token }}">
-    <button type="submit">Confirm</button>
+    <button class="btn btn-primary w-100" type="submit">Confirm</button>
   </form>
 {% endif %}
-<p><a href="/login">Back to login</a></p>
+<p class="mt-3 mb-0"><a href="/login">Back to login</a></p>
+  </div>
+</div>
 {% endblock %}

@@ -1,57 +1,62 @@
 {% extends "base.html" %}
+{% block title %}Manage doctors{% endblock %}
 {% block content %}
 <h1>Manage doctors</h1>
-{% if created == "1" %}<p>Doctor account created. A setup link was sent to their email.</p>{% endif %}
-{% if password_link == "1" %}<p>Reset link sent.</p>{% endif %}
-{% if error == "password_link_failed" %}<p>The reset email could not be sent. Try again later.</p>
-{% elif error == "password_link_not_allowed" %}<p>A reset link can be sent only to another active account.</p>
-{% elif error == "password_link_rate_limited" %}<p>Too many password reset attempts. Try again later.</p>
-{% elif error == "last_admin" %}<p>The last remaining administrator can only be reset from the server.</p>{% endif %}
-{% if updated == "1" %}<p>Doctor details updated.</p>{% endif %}
+{% if created == "1" %}<div class="alert alert-success">Doctor account created. A setup link was sent to their email.</div>{% endif %}
+{% if password_link == "1" %}<div class="alert alert-success">Reset link sent.</div>{% endif %}
+{% if error == "password_link_failed" %}<div class="alert alert-danger" role="alert">The reset email could not be sent. Try again later.</div>
+{% elif error == "password_link_not_allowed" %}<div class="alert alert-danger" role="alert">A reset link can be sent only to another active account.</div>
+{% elif error == "password_link_rate_limited" %}<div class="alert alert-danger" role="alert">Too many password reset attempts. Try again later.</div>
+{% elif error == "last_admin" %}<div class="alert alert-danger" role="alert">The last remaining administrator can only be reset from the server.</div>{% endif %}
+{% if updated == "1" %}<div class="alert alert-success">Doctor details updated.</div>{% endif %}
 {% if activation == "deactivated" %}
-  <p>Doctor deactivated. Existing appointments were not cancelled.</p>
+  <div class="alert alert-warning">
+  <p class="mb-0">Doctor deactivated. Existing appointments were not cancelled.</p>
   {% if future_appointments %}
-    <p><strong>{{ future_appointments }} future scheduled appointment(s) remain on the calendar and need follow-up.</strong></p>
+    <p class="mb-0 mt-1"><strong>{{ future_appointments }} future scheduled appointment(s) remain on the calendar and need follow-up.</strong></p>
   {% endif %}
-{% elif activation == "activated" %}<p>Doctor reactivated.</p>{% endif %}
-{% if error == "doctor_not_found" %}<p>Doctor not found.</p>
-{% elif error == "email_exists" %}<p>An account with this email already exists.</p>
-{% elif error == "invalid_email" %}<p>Enter a valid email address.</p>
-{% elif error == "invalid_details" %}<p>Enter a name and specialty of 2–100 characters, and experience from 0 to 70 years.</p>{% endif %}
-<p><a href="/admin/doctors/new">Create doctor</a> | <a href="/admin/users">Manage user accounts</a></p>
+  </div>
+{% elif activation == "activated" %}<div class="alert alert-success">Doctor reactivated.</div>{% endif %}
+{% if error == "doctor_not_found" %}<div class="alert alert-danger" role="alert">Doctor not found.</div>
+{% elif error == "email_exists" %}<div class="alert alert-danger" role="alert">An account with this email already exists.</div>
+{% elif error == "invalid_email" %}<div class="alert alert-danger" role="alert">Enter a valid email address.</div>
+{% elif error == "invalid_details" %}<div class="alert alert-danger" role="alert">Enter a name and specialty of 2–100 characters, and experience from 0 to 70 years.</div>{% endif %}
+<p><a class="btn btn-primary btn-sm" href="/admin/doctors/new">Create doctor</a> <a class="btn btn-outline-primary btn-sm" href="/admin/users">Manage user accounts</a></p>
 {% for doctor in doctors %}
-  <section>
-    <h2>{{ doctor.full_name }} — {{ "Inactive" if doctor.blocked else "Active" }}</h2>
-    <p>{{ doctor.email }}</p>
+  <section class="card mb-3">
+    <div class="card-body">
+    <h2 class="mt-0">{{ doctor.full_name }} — {{ "Inactive" if doctor.blocked else "Active" }}</h2>
+    <p class="mb-1">{{ doctor.email }}</p>
     <p>{{ doctor.future_appointments }} future scheduled appointment(s)</p>
-    <form method="post" action="/admin/doctors/{{ doctor.id }}">
+    <form class="row g-2 align-items-end mb-2" method="post" action="/admin/doctors/{{ doctor.id }}">
   <input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}">
-      <label>Name <input name="full_name" value="{{ doctor.full_name }}" minlength="2" maxlength="100" required></label>
-      <label>Specialty <input name="specialty" value="{{ doctor.specialty }}" minlength="2" maxlength="100" required></label>
-      <label>Experience (years)
-        <input name="experience_years" type="number" min="0" max="70" value="{{ doctor.experience_years }}" required>
-      </label>
-      <button type="submit">Save details</button>
+      <div class="col-md-4"><label class="form-label w-100 mb-0">Name <input class="form-control" name="full_name" value="{{ doctor.full_name }}" minlength="2" maxlength="100" required></label></div>
+      <div class="col-md-4"><label class="form-label w-100 mb-0">Specialty <input class="form-control" name="specialty" value="{{ doctor.specialty }}" minlength="2" maxlength="100" required></label></div>
+      <div class="col-md-2"><label class="form-label w-100 mb-0">Experience (years)
+        <input class="form-control" name="experience_years" type="number" min="0" max="70" value="{{ doctor.experience_years }}" required>
+      </label></div>
+      <div class="col-md-2"><button class="btn btn-primary w-100" type="submit">Save details</button></div>
     </form>
     {% if not doctor.blocked %}
-      <form method="post" action="/admin/users/{{ doctor.user_id }}/reset-link">
+      <form class="inline-form" method="post" action="/admin/users/{{ doctor.user_id }}/reset-link">
   <input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}">
         <input type="hidden" name="next_page" value="doctors">
-        <button type="submit">Send reset link</button>
+        <button class="btn btn-outline-secondary btn-sm" type="submit">Send reset link</button>
       </form>
     {% endif %}
     {% if doctor.blocked %}
-      <form method="post" action="/admin/doctors/{{ doctor.id }}/activate">
+      <form class="inline-form" method="post" action="/admin/doctors/{{ doctor.id }}/activate">
   <input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}">
-        <button type="submit">Reactivate doctor</button>
+        <button class="btn btn-outline-success btn-sm" type="submit">Reactivate doctor</button>
       </form>
     {% else %}
-      <form method="post" action="/admin/doctors/{{ doctor.id }}/deactivate"
-        onsubmit="return confirm('Deactivate this doctor? {{ doctor.future_appointments }} future appointment(s) will remain scheduled and will not be cancelled.')">
+      <form class="inline-form" method="post" action="/admin/doctors/{{ doctor.id }}/deactivate"
+        data-confirm="Deactivate this doctor? {{ doctor.future_appointments }} future appointment(s) will remain scheduled and will not be cancelled.">
   <input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}">
-        <button type="submit">Deactivate doctor</button>
+        <button class="btn btn-outline-danger btn-sm" type="submit">Deactivate doctor</button>
       </form>
     {% endif %}
+    </div>
   </section>
 {% else %}
   <p>No doctors found.</p>

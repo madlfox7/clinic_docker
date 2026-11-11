@@ -1,15 +1,14 @@
 {% extends "base.html" %}
+{% block title %}My appointments{% endblock %}
 {% block content %}
-
-
-
 <h1>My appointments</h1>
 {% if request.query_params.get("error") == "record_unavailable" %}
-  <p>Medical record is not available for this appointment.</p>
+  <div class="alert alert-warning">Medical record is not available for this appointment.</div>
 {% endif %}
-<ul>
+{% if items %}
+<ul class="clinic-list">
   {% for a in items %}
-    <li {% if a.status == "cancelled" %}style="color: gray"{% endif %}>
+    <li{% if a.status == "cancelled" %} class="is-cancelled"{% endif %}>
       {{ a.patient_email }} — {{ a.service_name }} —
       {{ a.starts_at.strftime("%Y-%m-%d %H:%M") }}-{{ a.ends_at.strftime("%H:%M") }}
       ({{ a.status }}{% if a.patient_blocked %}, account blocked{% endif %})
@@ -17,5 +16,6 @@
     </li>
   {% endfor %}
 </ul>
-{% if not items %}<p>No appointments yet.</p>{% endif %}
+{% endif %}
+{% if not items %}<div class="alert alert-secondary">No appointments yet.</div>{% endif %}
 {% endblock %}

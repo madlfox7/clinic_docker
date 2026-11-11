@@ -2,67 +2,69 @@
 <html lang="en">
 <head>
   <meta charset="utf-8">
-  <title>Clinic</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{% block title %}Clinic{% endblock %} · Clinic</title>
+  <link rel="icon" href="{{ static_url('img/logo.svg') }}" type="image/svg+xml">
+  <link rel="stylesheet" href="{{ static_url('vendor/bootstrap/bootstrap.min.css') }}">
+  <link rel="stylesheet" href="{{ static_url('app.css') }}">
+  <script src="{{ static_url('app.js') }}" defer></script>
 </head>
 <body>
-  <p>
-    <!-- nav -->
-    <a href="/">Home</a>
-    | <a href="/doctors">Doctors</a>
-    {% if role == "patient" %}
-      | <a href="/my">My appointments</a>
-      | <a href="/my/records">My medical records</a>
-    {% endif %}
-    {% if role == "doctor" %}
-      | <a href="/doctor/appointments">My appointments</a>
-      | <a href="/doctor/patients">My patients</a>
-      | <a href="/doctor/calendar">My calendar</a>
-    {% endif %}
-    {% if role == "registrar" %}
-      | <a href="/registrar/appointments">Appointments calendar</a>
-      | <a href="/registrar/patients">Patients</a>
-    {% endif %}
-    {% if role == "admin" %}
-      | <a href="/admin/users">Manage staff</a>
-      | <a href="/admin/doctors">Manage doctors</a>
-      | <a href="/admin/services">Manage services</a>
-      | <a href="/admin/settings">Clinic settings</a>
-      | <a href="/admin/schedule">Schedule</a>
-      | <a href="/admin/audit">Audit log</a>
-    {% endif %}
-    {% if role in ("patient", "doctor", "registrar", "admin") %}
-      | <a href="/me">Cabinet</a>
-      | <a href="/logout">Logout</a>
-    {% else %}
-      | <a href="/login">Login</a>
-      | <a href="/register">Register</a>
-    {% endif %}
-  </p>
-  <hr>
+  {%- set nav_items = [("/", "Home"), ("/doctors", "Doctors")] %}
+  {%- if role == "patient" %}
+    {%- set nav_items = nav_items + [("/my", "My appointments"), ("/my/records", "My medical records")] %}
+  {%- endif %}
+  {%- if role == "doctor" %}
+    {%- set nav_items = nav_items + [("/doctor/appointments", "My appointments"), ("/doctor/patients", "My patients"), ("/doctor/calendar", "My calendar")] %}
+  {%- endif %}
+  {%- if role == "registrar" %}
+    {%- set nav_items = nav_items + [("/registrar/appointments", "Appointments calendar"), ("/registrar/patients", "Patients")] %}
+  {%- endif %}
+  {%- if role == "admin" %}
+    {%- set nav_items = nav_items + [("/admin/users", "Manage staff"), ("/admin/doctors", "Manage doctors"), ("/admin/services", "Manage services"), ("/admin/settings", "Clinic settings"), ("/admin/schedule", "Schedule"), ("/admin/audit", "Audit log")] %}
+  {%- endif %}
+  {%- if role in ("patient", "doctor", "registrar", "admin") %}
+    {%- set nav_items = nav_items + [("/me", "Cabinet"), ("/logout", "Logout")] %}
+  {%- else %}
+    {%- set nav_items = nav_items + [("/login", "Login"), ("/register", "Register")] %}
+  {%- endif %}
+  {#- The active item is the longest nav path that matches the current path. #}
+  {%- set current_path = request.url.path %}
+  {%- set nav_state = namespace(active="") %}
+  {%- for href, label in nav_items %}
+    {%- if current_path == href or (href != "/" and current_path.startswith(href ~ "/")) %}
+      {%- if href|length > nav_state.active|length %}{% set nav_state.active = href %}{% endif %}
+    {%- endif %}
+  {%- endfor %}
+  {%- macro nav_links(extra_class) %}
+    <ul class="nav site-nav {{ extra_class }}">
+      {%- for href, label in nav_items %}
+      <li class="nav-item"><a class="nav-link{% if href == nav_state.active %} active{% endif %}" href="{{ href }}"{% if href == nav_state.active %} aria-current="page"{% endif %}>{{ label }}</a></li>
+      {%- endfor %}
+    </ul>
+  {%- endmacro %}
+  <header class="site-header">
+    <div class="container py-2">
+      <div class="d-flex align-items-center justify-content-between flex-wrap gap-2">
+        <a class="brand" href="/"><img src="{{ static_url('img/logo.svg') }}" alt="" width="32" height="32"><span>Clinic</span></a>
+        <nav class="d-none d-lg-block" aria-label="Main">{{ nav_links("justify-content-end") }}</nav>
+        <details class="mobile-nav d-lg-none w-100">
+          <summary><img src="{{ static_url('img/menu.svg') }}" alt="" width="24" height="24"><span>Menu</span></summary>
+          <nav aria-label="Main">{{ nav_links("flex-column") }}</nav>
+        </details>
+      </div>
+    </div>
+  </header>
+  <main class="container py-4">
   {% block content %}{% endblock %}
-  <script>
-    document.querySelectorAll("[data-check-group]").forEach((button) => {
-      button.addEventListener("click", () => {
-        const form = button.closest("form");
-        if (!form) return;
-        const checked = button.dataset.checkAction === "all";
-        form.querySelectorAll(`input[type="checkbox"][name="${button.dataset.checkGroup}"]`).forEach((box) => {
-          box.checked = checked;
-        });
-      });
-    });
-    document.querySelectorAll("form[data-confirm-selected]").forEach((form) => {
-      form.addEventListener("submit", (event) => {
-        const name = form.dataset.confirmSelected;
-        const count = form.querySelectorAll(`input[type="checkbox"][name="${name}"]:checked`).length;
-        if (!count) {
-          event.preventDefault();
-          return;
-        }
-        const message = (form.dataset.confirmMessage || "Continue for {n} selected?").split("{n}").join(String(count));
-        if (!window.confirm(message)) event.preventDefault();
-      });
-    });
-  </script>
+  </main>
+  <footer class="site-footer mt-4">
+    <div class="container py-3 d-flex flex-wrap justify-content-between gap-2">
+      <span>Clinic · online appointment booking</span>
+      {% if clinic_address or clinic_phone %}
+        <span>{% if clinic_address %}{{ clinic_address }}{% endif %}{% if clinic_address and clinic_phone %} · {% endif %}{% if clinic_phone %}{{ clinic_phone }}{% endif %}</span>
+      {% endif %}
+    </div>
+  </footer>
 </body>
 </html>

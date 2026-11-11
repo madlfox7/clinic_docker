@@ -1,77 +1,67 @@
 {% extends "base.html" %}
+{% block title %}Manage staff{% endblock %}
 {% block content %}
-
-
-
 <h1>Manage staff</h1>
-{% if created == "1" %}<p>Staff account created. A setup link was sent to their email.</p>{% endif %}
-{% if password_link == "1" %}<p>Reset link sent.</p>{% endif %}
-{% if error == "invalid_email" %}<p>Enter a valid email address.</p>
-{% elif error == "email_exists" %}<p>An account with this email already exists.</p>
-{% elif error == "invalid_role" %}<p>Choose registrar or admin.</p>
-{% elif error == "password_required" %}<p><strong>Confirm with your password to create an administrator. No account was created and no email was sent.</strong></p>
-{% elif error == "password_denied" %}<p><strong>Current password is incorrect. No administrator was created and no email was sent.</strong></p>
-{% elif error == "invalid_password" %}<p>Choose a non-default password.</p>
-{% elif error == "password_mismatch" %}<p>Passwords do not match.</p>
-{% elif error == "user_not_found" %}<p>User not found.</p>
-{% elif error == "self_block" %}<p>You cannot block or unblock your own administrator account.</p>
-{% elif error == "password_reset_not_allowed" %}<p>Passwords cannot be set from this page. Send a reset link instead.</p>
-{% elif error == "password_link_self" %}<p>You cannot send a reset link to your own administrator account.</p>
-{% elif error == "last_admin" %}<p>The last remaining administrator can only be reset from the server.</p>
-{% elif error == "password_link_not_allowed" %}<p>A reset link can be sent only to another active account.</p>
-{% elif error == "password_link_failed" %}<p>The reset email could not be sent. Try again later.</p>
-{% elif error == "password_link_rate_limited" %}<p>Too many password reset attempts. Try again later.</p>{% endif %}
+{% if created == "1" %}<div class="alert alert-success">Staff account created. A setup link was sent to their email.</div>{% endif %}
+{% if password_link == "1" %}<div class="alert alert-success">Reset link sent.</div>{% endif %}
+{% if error == "invalid_email" %}<div class="alert alert-danger" role="alert">Enter a valid email address.</div>
+{% elif error == "email_exists" %}<div class="alert alert-danger" role="alert">An account with this email already exists.</div>
+{% elif error == "invalid_role" %}<div class="alert alert-danger" role="alert">Choose registrar or admin.</div>
+{% elif error == "password_required" %}<div class="alert alert-danger" role="alert"><strong>Confirm with your password to create an administrator. No account was created and no email was sent.</strong></div>
+{% elif error == "password_denied" %}<div class="alert alert-danger" role="alert"><strong>Current password is incorrect. No administrator was created and no email was sent.</strong></div>
+{% elif error == "invalid_password" %}<div class="alert alert-danger" role="alert">Choose a non-default password.</div>
+{% elif error == "password_mismatch" %}<div class="alert alert-danger" role="alert">Passwords do not match.</div>
+{% elif error == "user_not_found" %}<div class="alert alert-danger" role="alert">User not found.</div>
+{% elif error == "self_block" %}<div class="alert alert-danger" role="alert">You cannot block or unblock your own administrator account.</div>
+{% elif error == "password_reset_not_allowed" %}<div class="alert alert-danger" role="alert">Passwords cannot be set from this page. Send a reset link instead.</div>
+{% elif error == "password_link_self" %}<div class="alert alert-danger" role="alert">You cannot send a reset link to your own administrator account.</div>
+{% elif error == "last_admin" %}<div class="alert alert-danger" role="alert">The last remaining administrator can only be reset from the server.</div>
+{% elif error == "password_link_not_allowed" %}<div class="alert alert-danger" role="alert">A reset link can be sent only to another active account.</div>
+{% elif error == "password_link_failed" %}<div class="alert alert-danger" role="alert">The reset email could not be sent. Try again later.</div>
+{% elif error == "password_link_rate_limited" %}<div class="alert alert-danger" role="alert">Too many password reset attempts. Try again later.</div>{% endif %}
 {% if future_cancelled is not none %}
-  <p>Cancelled {{ future_cancelled }} future appointment(s).</p>
+  <div class="alert alert-success">Cancelled {{ future_cancelled }} future appointment(s).</div>
 {% endif %}
-<p><a href="/admin/doctors">Manage doctors</a> | <a href="/admin/settings">Clinic settings</a></p>
-<section>
-  <h2>Create registrar or administrator</h2>
+<p><a class="btn btn-outline-primary btn-sm" href="/admin/doctors">Manage doctors</a> <a class="btn btn-outline-primary btn-sm" href="/admin/settings">Clinic settings</a></p>
+<section class="card mb-3">
+  <div class="card-body">
+  <h2 class="mt-0">Create registrar or administrator</h2>
   <form method="post" action="/admin/users">
   <input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}">
-    <label>Email <input name="email" type="email" maxlength="254" value="{{ staff_email }}" required></label>
-    <label>Role
-      <select name="role" id="staff-role" required>
+    <div class="row g-2 mb-2">
+    <div class="col-md-8"><label class="form-label w-100 mb-0">Email <input class="form-control" name="email" type="email" maxlength="254" value="{{ staff_email }}" required></label></div>
+    <div class="col-md-4"><label class="form-label w-100 mb-0">Role
+      <select class="form-select" name="role" id="staff-role" required>
         <option value="registrar" {% if staff_role != "admin" %}selected{% endif %}>Registrar</option>
         <option value="admin" {% if staff_role == "admin" %}selected{% endif %}>Administrator</option>
       </select>
-    </label>
-    <div id="admin-confirm" {% if staff_role != "admin" %}hidden{% endif %}>
+    </label></div>
+    </div>
+    <div id="admin-confirm" class="alert alert-warning" {% if staff_role != "admin" %}hidden{% endif %}>
       <p><strong>Warning:</strong> this creates another administrator who can manage the clinic. Confirm with your own password. Their password is not set here.</p>
       {% if error == "password_required" or error == "password_denied" %}
         <p><strong>The password was not accepted. Nothing was created and no email was sent.</strong></p>
       {% endif %}
-      <label>Confirm with your password
-        <input name="current_password" type="password" maxlength="72" autocomplete="current-password">
+      <label class="form-label w-100 mb-0">Confirm with your password
+        <input class="form-control" name="current_password" type="password" maxlength="72" autocomplete="current-password">
       </label>
     </div>
-    <p>A setup link is sent only after the account is created. A wrong password does not send that email.</p>
-    <script>
-      const staffRole = document.getElementById("staff-role");
-      const adminConfirm = document.getElementById("admin-confirm");
-      const adminPassword = adminConfirm.querySelector("input");
-      function syncAdminConfirm() {
-        const creatingAdmin = staffRole.value === "admin";
-        adminConfirm.hidden = !creatingAdmin;
-        adminPassword.required = creatingAdmin;
-        if (!creatingAdmin) adminPassword.value = "";
-      }
-      staffRole.addEventListener("change", syncAdminConfirm);
-      syncAdminConfirm();
-    </script>
-    <button type="submit">Create staff account</button>
+    <p class="text-body-secondary">A setup link is sent only after the account is created. A wrong password does not send that email.</p>
+    <button class="btn btn-primary" type="submit">Create staff account</button>
   </form>
+  </div>
 </section>
 <section>
   <h2>Staff accounts</h2>
-  <ul>
+  <ul class="clinic-list">
     {% for user in staff_users %}
       <li>
         {{ user.email }} — {{ user.role }} — {{ "Blocked" if user.blocked else "Active" }}
+        <div class="mt-1">
         {% if user.role == "registrar" or (user.role == "admin" and user.id != current_admin_id) %}
-          <form method="post" action="/admin/users/{{ user.id }}/reset-link">
+          <form class="inline-form" method="post" action="/admin/users/{{ user.id }}/reset-link">
   <input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}">
-            <button type="submit">Send reset link</button>
+            <button class="btn btn-outline-secondary btn-sm" type="submit">Send reset link</button>
           </form>
         {% elif user.role == "admin" %}
           <strong>Your own administrator account cannot be reset from this page.</strong>
@@ -80,18 +70,19 @@
           {% if user.id == current_admin_id %}
             <strong>Your own administrator account cannot be blocked.</strong>
           {% elif user.blocked %}
-            <form method="post" action="/admin/users/{{ user.id }}/unblock" style="display:inline">
+            <form class="inline-form" method="post" action="/admin/users/{{ user.id }}/unblock">
   <input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}">
-              <button type="submit">Unblock administrator</button>
+              <button class="btn btn-outline-success btn-sm" type="submit">Unblock administrator</button>
             </form>
           {% else %}
-            <form method="post" action="/admin/users/{{ user.id }}/block" style="display:inline"
-              onsubmit="return confirm('Block this administrator?')">
+            <form class="inline-form" method="post" action="/admin/users/{{ user.id }}/block"
+              data-confirm="Block this administrator?">
   <input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}">
-              <button type="submit">Block administrator</button>
+              <button class="btn btn-outline-danger btn-sm" type="submit">Block administrator</button>
             </form>
           {% endif %}
         {% endif %}
+        </div>
       </li>
     {% else %}
       <li>No administrator or registrar accounts.</li>
@@ -100,35 +91,35 @@
 </section>
 <section>
   <h2>Patients</h2>
-<ul>
+<ul class="clinic-list">
   {% for user in users %}
     <li>
       {{ user.email }}
-      <span>Blocked: {{ "Yes" if user.blocked else "No" }}</span>
-      <span>Future scheduled appointments: {{ user.future_scheduled }}</span>
+      <span class="badge text-bg-light">Blocked: {{ "Yes" if user.blocked else "No" }}</span>
+      <span class="badge text-bg-light">Future scheduled appointments: {{ user.future_scheduled }}</span>
       {% if user.blocked %}
-        <strong>Blocked</strong>
-        <form method="post" action="/admin/users/{{ user.id }}/unblock" style="display:inline">
+        <strong class="text-danger">Blocked</strong>
+        <form class="inline-form" method="post" action="/admin/users/{{ user.id }}/unblock">
   <input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}">
-          <button type="submit">Unblock</button>
+          <button class="btn btn-outline-success btn-sm" type="submit">Unblock</button>
         </form>
       {% else %}
-        <strong>Active</strong>
-        <form method="post" action="/admin/users/{{ user.id }}/block" style="display:inline">
+        <strong class="text-success">Active</strong>
+        <form class="inline-form" method="post" action="/admin/users/{{ user.id }}/block">
   <input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}">
-          <button type="submit">Block</button>
+          <button class="btn btn-outline-danger btn-sm" type="submit">Block</button>
         </form>
       {% endif %}
       {% if not user.blocked %}
-        <form method="post" action="/admin/users/{{ user.id }}/reset-link" style="display:inline">
+        <form class="inline-form" method="post" action="/admin/users/{{ user.id }}/reset-link">
   <input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}">
-          <button type="submit">Send reset link</button>
+          <button class="btn btn-outline-secondary btn-sm" type="submit">Send reset link</button>
         </form>
       {% endif %}
       {% if user.future_scheduled > 0 %}
-        <form method="post" action="/admin/users/{{ user.id }}/cancel-future-appointments" style="display:inline" onsubmit="return confirm('Cancel all future appointments for this patient?')">
+        <form class="inline-form" method="post" action="/admin/users/{{ user.id }}/cancel-future-appointments" data-confirm="Cancel all future appointments for this patient?">
   <input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}">
-          <button type="submit">Cancel future appointments</button>
+          <button class="btn btn-outline-danger btn-sm" type="submit">Cancel future appointments</button>
         </form>
       {% endif %}
     </li>

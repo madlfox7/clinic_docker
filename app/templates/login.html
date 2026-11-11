@@ -1,22 +1,25 @@
 {% extends "base.html" %}
+{% block title %}Login{% endblock %}
 {% block content %}
-
-
+<div class="card auth-card">
+  <div class="card-body p-4">
 <h1>Login</h1>
 {% if email %}
 <p>You are already logged in as {{ email }}. Log out before using another account.</p>
-<p><a href="/me">Cabinet</a> | <a href="/logout">Logout</a></p>
+<p><a class="btn btn-primary" href="/me">Cabinet</a> <a class="btn btn-outline-secondary" href="/logout">Logout</a></p>
 {% else %}
-{% if error %}<p>{{ error }}</p>{% endif %}
-{% if registered %}<p>Account created. Please log in.</p>{% endif %}
-{% if password_reset %}<p>Password updated. Please log in.</p>{% endif %}
+{% if error %}<div class="alert alert-danger" role="alert">{{ error }}</div>{% endif %}
+{% if registered %}<div class="alert alert-success">Account created. Please log in.</div>{% endif %}
+{% if password_reset %}<div class="alert alert-success">Password updated. Please log in.</div>{% endif %}
 <form method="post" action="/login">
   <input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}">
-  <p>Email: <input name="email" type="email" required></p>
-  <p>Password: <input name="password" type="password" required></p>
-  <button type="submit">Login</button>
+  <div class="mb-3"><label class="form-label w-100">Email: <input class="form-control" name="email" type="email" required></label></div>
+  <div class="mb-3"><label class="form-label w-100">Password: <input class="form-control" name="password" type="password" required></label></div>
+  <button class="btn btn-primary w-100" type="submit">Login</button>
 </form>
-<p><a href="/register">Create a patient account</a></p>
-<p><a href="/forgot-password">Forgot password?</a></p>
+<p class="mt-3 mb-1"><a href="/register">Create a patient account</a></p>
+<p class="mb-0"><a href="/forgot-password">Forgot password?</a></p>
 {% endif %}
+  </div>
+</div>
 {% endblock %}

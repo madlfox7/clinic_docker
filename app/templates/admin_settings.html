@@ -1,14 +1,17 @@
 {% extends "base.html" %}
+{% block title %}Clinic settings{% endblock %}
 {% block content %}
 <h1>Clinic settings</h1>
-{% if saved == "1" %}<p>Clinic settings saved.</p>{% endif %}
-{% if error == "invalid_address" %}<p>Address can be empty, but not longer than 300 characters or contain control characters.</p>
-{% elif error == "invalid_text" %}<p>Text fields cannot contain a NUL character.</p>
-{% elif error == "invalid_phone" %}<p>Enter a phone number using digits, spaces, and +()- only.</p>{% endif %}
+{% if saved == "1" %}<div class="alert alert-success">Clinic settings saved.</div>{% endif %}
+{% if error == "invalid_address" %}<div class="alert alert-danger" role="alert">Address can be empty, but not longer than 300 characters or contain control characters.</div>
+{% elif error == "invalid_text" %}<div class="alert alert-danger" role="alert">Text fields cannot contain a NUL character.</div>
+{% elif error == "invalid_phone" %}<div class="alert alert-danger" role="alert">Enter a phone number using digits, spaces, and +()- only.</div>{% endif %}
+<div class="card auth-card ms-0"><div class="card-body">
 <form method="post" action="/admin/settings">
   <input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}">
-  <label>Address <input name="address" value="{{ address }}" maxlength="300"></label>
-  <label>Phone <input name="phone" value="{{ phone }}" maxlength="40" pattern="[0-9+() \-]{5,40}" title="Digits, spaces, and +()- only" required></label>
-  <button type="submit">Save settings</button>
+  <div class="mb-3"><label class="form-label w-100">Address <input class="form-control" name="address" value="{{ address }}" maxlength="300"></label></div>
+  <div class="mb-3"><label class="form-label w-100">Phone <input class="form-control" name="phone" value="{{ phone }}" maxlength="40" pattern="[0-9+() \-]{5,40}" title="Digits, spaces, and +()- only" required></label></div>
+  <button class="btn btn-primary" type="submit">Save settings</button>
 </form>
+</div></div>
 {% endblock %}

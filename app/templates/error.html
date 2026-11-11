@@ -1,6 +1,11 @@
 {% extends "base.html" %}
+{% block title %}{{ title }}{% endblock %}
 {% block content %}
+<div class="card auth-card">
+  <div class="card-body p-4">
 <h1>{{ title }}</h1>
 <p>{{ message }}</p>
-<p><a href="/">Back to home</a></p>
+<a class="btn btn-outline-primary" href="/">Back to home</a>
+  </div>
+</div>
 {% endblock %}

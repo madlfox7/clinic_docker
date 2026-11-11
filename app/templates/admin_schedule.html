@@ -1,49 +1,45 @@
 {% extends "base.html" %}
+{% block title %}Schedule management{% endblock %}
 {% block content %}
-
-
 <h1>Schedule management</h1>
-<p><a href="/admin/users">Manage staff</a></p>
+<p><a class="btn btn-outline-primary btn-sm" href="/admin/users">Manage staff</a></p>
 
-<!-- Success checks & msgs -->
 {% if saved == "work-hours-bulk" %}
-<p>Work hours saved for the selected days. Free slots outside the new hours are not removed until 
-  you apply the schedule.</p>{% endif %}
+<div class="alert alert-success">Work hours saved for the selected days. Free slots outside the new hours are not removed until 
+  you apply the schedule.</div>{% endif %}
 {% if saved == "time-off" %}
-<p>Time off saved.</p>{% endif %}
+<div class="alert alert-success">Time off saved.</div>{% endif %}
 {% if saved == "holiday" %}
-<p>Holiday saved.</p>{% endif %}
+<div class="alert alert-success">Holiday saved.</div>{% endif %}
 {% if time_off_request_decision == "approved" %}
-<p>Time-off request approved; the period was added to the doctor schedule.</p>{% endif %}
+<div class="alert alert-success">Time-off request approved; the period was added to the doctor schedule.</div>{% endif %}
 {% if time_off_request_decision == "rejected" %}
-<p>Time-off request rejected.</p>{% endif %}
+<div class="alert alert-success">Time-off request rejected.</div>{% endif %}
 {% if saved == "apply-hours" %}
-<p>Applied schedule. Removed {{ hours_report.removed_slots if hours_report else 0 }} free slots outside work hours
+<div class="alert alert-success">Applied schedule. Removed {{ hours_report.removed_slots if hours_report else 0 }} free slots outside work hours
    for {{ hours_report.doctor_count if hours_report else 0 }} doctor(s).
-   Scheduled visits were not cancelled.</p>{% endif %}
+   Scheduled visits were not cancelled.</div>{% endif %}
 {% if visit_cancelled == "1" %}
-<p>Appointment cancelled. The closed date remains unavailable.</p>{% endif %}
+<div class="alert alert-success">Appointment cancelled. The closed date remains unavailable.</div>{% endif %}
 {% if generated is not none %}
-<p>Created {{ generated }} slots, skipped {{ skipped }}.</p>{% endif %}
+<div class="alert alert-success">Created {{ generated }} slots, skipped {{ skipped }}.</div>{% endif %}
 {% if closure_report %}
-
-
-
-  <p>Removed {{ closure_report.removed_slots }} free slots in the closed period. 
-    Scheduled visits were not cancelled.</p>
+  <div class="alert alert-success">Removed {{ closure_report.removed_slots }} free slots in the closed period. 
+    Scheduled visits were not cancelled.</div>
 {% endif %}
-<section>
-  <h2>Upcoming appointments</h2>
+<section class="card mb-3">
+  <div class="card-body">
+  <h2 class="mt-0">Upcoming appointments</h2>
   {% if upcoming_visits %}
-    <ul>
+    <ul class="clinic-list">
       {% for visit in upcoming_visits %}
         <li>
           {{ visit.patient_email }} — {{ visit.doctor_name }} —
           {{ visit.service_name }} —
           {{ visit.starts_at.strftime("%Y-%m-%d %H:%M") }}–{{ visit.ends_at.strftime("%H:%M") }}
-          <form method="post" action="/appointments/{{ visit.appointment_id }}/cancel" style="display:inline">
+          <form class="inline-form" method="post" action="/appointments/{{ visit.appointment_id }}/cancel" data-confirm="Cancel this appointment?">
   <input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}">
-            <button type="submit">Cancel this appointment</button>
+            <button class="btn btn-outline-danger btn-sm" type="submit">Cancel this appointment</button>
           </form>
         </li>
       {% endfor %}
@@ -51,20 +47,22 @@
   {% else %}
     <p>No upcoming scheduled appointments.</p>
   {% endif %}
+  </div>
 </section>
-<section>
-  <h2>Needs manual cancellation</h2>
+<section class="card mb-3">
+  <div class="card-body">
+  <h2 class="mt-0">Needs manual cancellation</h2>
   <p>Closed days do not cancel scheduled visits. Cancel each one below.</p>
   {% if manual_cancel_visits %}
-    <ul>
+    <ul class="clinic-list">
       {% for visit in manual_cancel_visits %}
         <li>
           {{ visit.patient_email }} — {{ visit.doctor_name }} —
           {{ visit.service_name }} —
           {{ visit.starts_at.strftime("%Y-%m-%d %H:%M") }}–{{ visit.ends_at.strftime("%H:%M") }}
-          <form method="post" action="/appointments/{{ visit.appointment_id }}/cancel" style="display:inline">
+          <form class="inline-form" method="post" action="/appointments/{{ visit.appointment_id }}/cancel" data-confirm="Cancel this appointment?">
   <input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}">
-            <button type="submit">Cancel appointment</button>
+            <button class="btn btn-outline-danger btn-sm" type="submit">Cancel appointment</button>
           </form>
         </li>
       {% endfor %}
@@ -72,20 +70,22 @@
   {% else %}
     <p>No scheduled visits on a closed day.</p>
   {% endif %}
+  </div>
 </section>
-<section>
-  <h2>Outside work hours</h2>
+<section class="card mb-3">
+  <div class="card-body">
+  <h2 class="mt-0">Outside work hours</h2>
   <p>Scheduled visits outside the current work window stay until staff cancel them.</p>
   {% if outside_hours_visits %}
-    <ul>
+    <ul class="clinic-list">
       {% for visit in outside_hours_visits %}
         <li>
           {{ visit.patient_email }} — {{ visit.doctor_name }} —
           {{ visit.service_name }} —
           {{ visit.starts_at.strftime("%Y-%m-%d %H:%M") }}–{{ visit.ends_at.strftime("%H:%M") }}
-          <form method="post" action="/appointments/{{ visit.appointment_id }}/cancel" style="display:inline">
+          <form class="inline-form" method="post" action="/appointments/{{ visit.appointment_id }}/cancel" data-confirm="Cancel this appointment?">
   <input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}">
-            <button type="submit">Cancel appointment</button>
+            <button class="btn btn-outline-danger btn-sm" type="submit">Cancel appointment</button>
           </form>
         </li>
       {% endfor %}
@@ -94,34 +94,35 @@
     <p>No scheduled visits outside work hours.</p>
   {% endif %}
 
-  <!-- error msgs -->
+  </div>
 </section>
-{% if error == "range_order" %}<p>End date must not be before start date.</p>
-{% elif error == "range_in_past" %}<p>Slot generation cannot start in the past.</p>
-{% elif error == "range_too_long" %}<p>Choose a range of no more than 90 calendar days.</p>
-{% elif error == "range_too_far" %}<p>Slots cannot be generated more than two years ahead.</p>
-{% elif error == "invalid_work_hours" %}<p>Choose valid working hours.</p>
-{% elif error == "invalid_time_off" %}<p>End date must not be before start date.</p>
-{% elif error == "time_off_past" %}<p>Time off cannot start in the past.</p>
-{% elif error == "time_off_too_long" %}<p>Time off cannot cover more than a year or end more than two years from today.</p>
-{% elif error == "holiday_too_far" %}<p>A holiday cannot be more than two years ahead.</p>
-{% elif error == "holiday_in_past" %}<p>A holiday cannot be in the past.</p>
-{% elif error == "holiday_name_required" %}<p>Enter a holiday name.</p>
-{% elif error == "holiday_name_invalid" %}<p>Enter a holiday name of 2–100 characters without control characters.</p>
-{% elif error == "doctor_not_found" %}<p>Doctor not found.</p>
-{% elif error == "no_doctors_selected" %}<p>Select at least one doctor.</p>
-{% elif error == "no_weekdays" %}<p>Select at least one weekday.</p>
-{% elif error == "invalid_id" %}<p>Enter a valid whole number.</p>
-{% elif error == "text_too_long" %}<p>That text is too long.</p>
-{% elif error == "no_active_services" %}<p>Create or activate a service before generating slots.</p>{% endif %}
-{% if error == "no_assigned_services" %}<p>Assign at least one active service to this doctor before generating slots.</p>{% endif %}
-{% if error == "invalid_time_off_request" %}<p>Invalid time-off request decision.</p>
-{% elif error == "time_off_request_not_pending" %}<p>This request has already been decided or is unavailable.</p>{% endif %}
+{% if error == "range_order" %}<div class="alert alert-danger" role="alert">End date must not be before start date.</div>
+{% elif error == "range_in_past" %}<div class="alert alert-danger" role="alert">Slot generation cannot start in the past.</div>
+{% elif error == "range_too_long" %}<div class="alert alert-danger" role="alert">Choose a range of no more than 90 calendar days.</div>
+{% elif error == "range_too_far" %}<div class="alert alert-danger" role="alert">Slots cannot be generated more than two years ahead.</div>
+{% elif error == "invalid_work_hours" %}<div class="alert alert-danger" role="alert">Choose valid working hours.</div>
+{% elif error == "invalid_time_off" %}<div class="alert alert-danger" role="alert">End date must not be before start date.</div>
+{% elif error == "time_off_past" %}<div class="alert alert-danger" role="alert">Time off cannot start in the past.</div>
+{% elif error == "time_off_too_long" %}<div class="alert alert-danger" role="alert">Time off cannot cover more than a year or end more than two years from today.</div>
+{% elif error == "holiday_too_far" %}<div class="alert alert-danger" role="alert">A holiday cannot be more than two years ahead.</div>
+{% elif error == "holiday_in_past" %}<div class="alert alert-danger" role="alert">A holiday cannot be in the past.</div>
+{% elif error == "holiday_name_required" %}<div class="alert alert-danger" role="alert">Enter a holiday name.</div>
+{% elif error == "holiday_name_invalid" %}<div class="alert alert-danger" role="alert">Enter a holiday name of 2–100 characters without control characters.</div>
+{% elif error == "doctor_not_found" %}<div class="alert alert-danger" role="alert">Doctor not found.</div>
+{% elif error == "no_doctors_selected" %}<div class="alert alert-danger" role="alert">Select at least one doctor.</div>
+{% elif error == "no_weekdays" %}<div class="alert alert-danger" role="alert">Select at least one weekday.</div>
+{% elif error == "invalid_id" %}<div class="alert alert-danger" role="alert">Enter a valid whole number.</div>
+{% elif error == "text_too_long" %}<div class="alert alert-danger" role="alert">That text is too long.</div>
+{% elif error == "no_active_services" %}<div class="alert alert-danger" role="alert">Create or activate a service before generating slots.</div>{% endif %}
+{% if error == "no_assigned_services" %}<div class="alert alert-danger" role="alert">Assign at least one active service to this doctor before generating slots.</div>{% endif %}
+{% if error == "invalid_time_off_request" %}<div class="alert alert-danger" role="alert">Invalid time-off request decision.</div>
+{% elif error == "time_off_request_not_pending" %}<div class="alert alert-danger" role="alert">This request has already been decided or is unavailable.</div>{% endif %}
 
 
-<!-- graphic -->
 <h2>Weekly work hours</h2>
-<table>
+<div class="card mb-3 d-none d-md-block">
+<div class="table-responsive">
+<table class="table table-striped table-sm align-middle mb-0">
   <thead><tr><th>Doctor</th><th>Weekday</th><th>Start</th><th>End</th><th>Slot minutes</th></tr></thead>
   <tbody>
   {% for item in work_hours %}
@@ -137,76 +138,96 @@
   {% endfor %}
   </tbody>
 </table>
+</div>
+</div>
+{# Phones: work hours as a list by weekday. #}
+<div class="d-md-none mb-3">
+  {% for name in weekdays %}
+    {% set day_index = loop.index0 %}
+    {% set day_hours = work_hours|selectattr("weekday", "equalto", day_index)|list %}
+    {% if day_hours %}
+      <h3 class="mt-2">{{ name }}</h3>
+      <ul class="clinic-list">
+        {% for item in day_hours %}
+          <li>{{ item.doctor_name }} — {{ item.start_time.strftime("%H:%M") }}–{{ item.end_time.strftime("%H:%M") }} ({{ item.slot_minutes }} min)</li>
+        {% endfor %}
+      </ul>
+    {% endif %}
+  {% endfor %}
+  {% if not work_hours %}<p>No work hours configured.</p>{% endif %}
+</div>
+<div class="card mb-3"><div class="card-body">
+<h3 class="mt-0">Set work hours</h3>
 <form id="bulk-work-hours-form" method="post" action="/admin/work-hours-bulk"
   data-confirm-selected="doctor_ids"
   data-confirm-message="Save these hours for {n} doctors?">
   <input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}">
-  <p><strong>Warning:</strong> Current hours are not preloaded. Saving replaces the existing hours for each selected weekday with the same values below. Review the schedule above before saving.</p>
-  <fieldset>
+  <div class="alert alert-warning"><strong>Warning:</strong> Current hours are not preloaded. Saving replaces the existing hours for each selected weekday with the same values below. Review the schedule above before saving.</div>
+  <fieldset class="mb-2">
     <legend>Doctors</legend>
+    <div class="check-grid">
     {% for doctor in doctors %}
-      <label><input type="checkbox" name="doctor_ids" value="{{ doctor.id }}"> {{ doctor.full_name }}</label>
+      <label class="form-check"><input class="form-check-input" type="checkbox" name="doctor_ids" value="{{ doctor.id }}"> {{ doctor.full_name }}</label>
     {% else %}
       <p>No active doctors.</p>
     {% endfor %}
+    </div>
   </fieldset>
-  <button type="button" data-check-group="doctor_ids" data-check-action="all">Select all</button>
-  <button type="button" data-check-group="doctor_ids" data-check-action="none">Clear selection</button>
-  <p>Quick day selection</p>
-  <div>
-    <button type="button" data-weekday-preset="0,1,2,3,4">Weekdays (Mon–Fri)</button>
-    <button type="button" data-weekday-preset="5,6">Weekends (Sat–Sun)</button>
-    <button type="button" data-weekday-preset="0,1,2,3,4,5,6">All days</button>
-    <button type="button" data-weekday-preset="">Clear selection</button>
+  <button class="btn btn-outline-secondary btn-sm" type="button" data-check-group="doctor_ids" data-check-action="all">Select all</button>
+  <button class="btn btn-outline-secondary btn-sm" type="button" data-check-group="doctor_ids" data-check-action="none">Clear selection</button>
+  <p class="mt-3 mb-1">Quick day selection</p>
+  <div class="d-flex flex-wrap gap-1 mb-2">
+    <button class="btn btn-outline-secondary btn-sm" type="button" data-weekday-preset="0,1,2,3,4">Weekdays (Mon–Fri)</button>
+    <button class="btn btn-outline-secondary btn-sm" type="button" data-weekday-preset="5,6">Weekends (Sat–Sun)</button>
+    <button class="btn btn-outline-secondary btn-sm" type="button" data-weekday-preset="0,1,2,3,4,5,6">All days</button>
+    <button class="btn btn-outline-secondary btn-sm" type="button" data-weekday-preset="">Clear selection</button>
   </div>
-  <p>Or choose individual days:</p>
+  <p class="mb-1">Or choose individual days:</p>
+  <div class="check-grid mb-2">
   {% for name in weekdays %}
-    <label>
-      <input type="checkbox" name="weekdays" value="{{ loop.index0 }}"
+    <label class="form-check">
+      <input class="form-check-input" type="checkbox" name="weekdays" value="{{ loop.index0 }}"
         {% if loop.index0 < 5 %}checked{% endif %}>
       {{ name }}
     </label>
   {% endfor %}
-  <label>Start <input name="start_time" type="time" value="09:00" required></label>
-  <label>End <input name="end_time" type="time" value="18:00" required></label>
-  <label>Minimum start interval (minutes) <input name="slot_minutes" type="number" min="5" max="240" value="30" required></label>
-  <button type="submit">Save hours for selected days</button>
+  </div>
+  <div class="row g-2 align-items-end">
+  <div class="col-sm-4 col-md-3"><label class="form-label w-100 mb-0">Start <input class="form-control" name="start_time" type="time" value="09:00" required></label></div>
+  <div class="col-sm-4 col-md-3"><label class="form-label w-100 mb-0">End <input class="form-control" name="end_time" type="time" value="18:00" required></label></div>
+  <div class="col-sm-4 col-md-3"><label class="form-label w-100 mb-0">Minimum start interval (minutes) <input class="form-control" name="slot_minutes" type="number" min="5" max="240" value="30" required></label></div>
+  <div class="col-md-3"><button class="btn btn-primary w-100" type="submit">Save hours for selected days</button></div>
+  </div>
 </form>
-<script>
-  const bulkWorkHoursForm = document.getElementById("bulk-work-hours-form");
-  if (bulkWorkHoursForm) {
-    const weekdayCheckboxes = bulkWorkHoursForm.querySelectorAll('input[name="weekdays"]');
-    bulkWorkHoursForm.querySelectorAll("[data-weekday-preset]").forEach((button) => {
-      button.addEventListener("click", () => {
-        const selectedDays = button.dataset.weekdayPreset.split(",").filter(Boolean);
-        weekdayCheckboxes.forEach((checkbox) => {
-          checkbox.checked = selectedDays.includes(checkbox.value);
-        });
-      });
-    });
-  }
-</script>
+</div></div>
 
+<div class="card mb-3"><div class="card-body">
+<h3 class="mt-0">Apply work hours</h3>
 <form method="post" action="/admin/schedule/apply-hours"
   data-confirm-selected="doctor_ids"
   data-confirm-message="Remove free slots outside working hours for {n} doctors?">
   <input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}">
-  <fieldset>
+  <fieldset class="mb-2">
     <legend>Doctors</legend>
+    <div class="check-grid">
     {% for doctor in doctors %}
-      <label><input type="checkbox" name="doctor_ids" value="{{ doctor.id }}"> {{ doctor.full_name }}</label>
+      <label class="form-check"><input class="form-check-input" type="checkbox" name="doctor_ids" value="{{ doctor.id }}"> {{ doctor.full_name }}</label>
     {% else %}
       <p>No active doctors.</p>
     {% endfor %}
+    </div>
   </fieldset>
-  <button type="button" data-check-group="doctor_ids" data-check-action="all">Select all</button>
-  <button type="button" data-check-group="doctor_ids" data-check-action="none">Clear selection</button>
-  <button type="submit">Remove free slots outside working hours for selected doctors</button>
+  <button class="btn btn-outline-secondary btn-sm" type="button" data-check-group="doctor_ids" data-check-action="all">Select all</button>
+  <button class="btn btn-outline-secondary btn-sm" type="button" data-check-group="doctor_ids" data-check-action="none">Clear selection</button>
+  <button class="btn btn-outline-danger" type="submit">Remove free slots outside working hours for selected doctors</button>
 </form>
+</div></div>
 
 <h2>Time off</h2>
 <h3>Doctor requests</h3>
-<table>
+<div class="card mb-3">
+<div class="table-responsive">
+<table class="table table-striped align-middle mb-0">
   <thead><tr><th>Doctor</th><th>Dates</th><th>Comment</th><th>Status</th><th>Requested</th><th>Decision</th></tr></thead>
   <tbody>
   {% for item in time_off_requests %}
@@ -214,19 +235,19 @@
       <td>{{ item.doctor_name }} ({{ item.doctor_email }})</td>
       <td>{{ item.starts_on }}–{{ item.ends_on }}</td>
       <td>{{ item.comment }}</td>
-      <td>{{ item.status }}</td>
+      <td><span class="badge {% if item.status == 'pending' %}text-bg-warning{% elif item.status == 'approved' %}text-bg-success{% else %}text-bg-secondary{% endif %}">{{ item.status }}</span></td>
       <td>{{ item.created_at.strftime("%Y-%m-%d %H:%M") }}</td>
       <td>
         {% if item.status == "pending" %}
-          <form method="post" action="/admin/time-off-requests/{{ item.id }}/decision" style="display:inline">
+          <form class="inline-form" method="post" action="/admin/time-off-requests/{{ item.id }}/decision">
   <input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}">
             <input type="hidden" name="decision" value="approve">
-            <button type="submit">Approve</button>
+            <button class="btn btn-success btn-sm" type="submit">Approve</button>
           </form>
-          <form method="post" action="/admin/time-off-requests/{{ item.id }}/decision" style="display:inline">
+          <form class="inline-form" method="post" action="/admin/time-off-requests/{{ item.id }}/decision">
   <input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}">
             <input type="hidden" name="decision" value="reject">
-            <button type="submit">Reject</button>
+            <button class="btn btn-outline-danger btn-sm" type="submit">Reject</button>
           </form>
         {% endif %}
       </td>
@@ -236,50 +257,61 @@
   {% endfor %}
   </tbody>
 </table>
-<ul>
+</div>
+</div>
+<h3>Configured time off</h3>
+<ul class="clinic-list">
   {% for item in time_off %}
     <li>{{ item.doctor_name }} — {{ item.starts_on }} to {{ item.ends_on }}</li>
   {% else %}
     <li>No time off configured.</li>
   {% endfor %}
 </ul>
+<div class="card mb-3"><div class="card-body">
 <form method="post" action="/admin/time-off"
   data-confirm-selected="doctor_ids"
   data-confirm-message="Add this time off for {n} doctors?">
   <input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}">
-  <fieldset>
+  <fieldset class="mb-2">
     <legend>Doctors</legend>
+    <div class="check-grid">
     {% for doctor in doctors %}
-      <label><input type="checkbox" name="doctor_ids" value="{{ doctor.id }}"> {{ doctor.full_name }}</label>
+      <label class="form-check"><input class="form-check-input" type="checkbox" name="doctor_ids" value="{{ doctor.id }}"> {{ doctor.full_name }}</label>
     {% else %}
       <p>No active doctors.</p>
     {% endfor %}
+    </div>
   </fieldset>
-  <button type="button" data-check-group="doctor_ids" data-check-action="all">Select all</button>
-  <button type="button" data-check-group="doctor_ids" data-check-action="none">Clear selection</button>
-  <label>From <input name="starts_on" type="date" min="{{ min_schedule_date }}" max="{{ max_schedule_date }}" required></label>
-  <label>Through <input name="ends_on" type="date" min="{{ min_schedule_date }}" max="{{ max_schedule_date }}" required></label>
-  <button type="submit">Add time off</button>
+  <button class="btn btn-outline-secondary btn-sm" type="button" data-check-group="doctor_ids" data-check-action="all">Select all</button>
+  <button class="btn btn-outline-secondary btn-sm" type="button" data-check-group="doctor_ids" data-check-action="none">Clear selection</button>
+  <div class="row g-2 align-items-end mt-1">
+  <div class="col-sm-4"><label class="form-label w-100 mb-0">From <input class="form-control" name="starts_on" type="date" min="{{ min_schedule_date }}" max="{{ max_schedule_date }}" required></label></div>
+  <div class="col-sm-4"><label class="form-label w-100 mb-0">Through <input class="form-control" name="ends_on" type="date" min="{{ min_schedule_date }}" max="{{ max_schedule_date }}" required></label></div>
+  <div class="col-sm-4"><button class="btn btn-primary w-100" type="submit">Add time off</button></div>
+  </div>
 </form>
+</div></div>
 
 <h2>Holidays</h2>
-<ul>
+<ul class="clinic-list">
   {% for holiday in holidays %}<li>{{ holiday.day }} — {{ holiday.name }}</li>
   {% else %}<li>No holidays configured.</li>{% endfor %}
 </ul>
-<form method="post" action="/admin/holidays">
+<div class="card mb-3"><div class="card-body">
+<form class="row g-2 align-items-end" method="post" action="/admin/holidays">
   <input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}">
-  <label>Date <input name="holiday_day" type="date" max="{{ max_schedule_date }}" required></label>
-  <label>Name <input name="name" type="text" minlength="2" maxlength="100" required></label>
-  <button type="submit">Save holiday</button>
+  <div class="col-sm-4"><label class="form-label w-100 mb-0">Date <input class="form-control" name="holiday_day" type="date" max="{{ max_schedule_date }}" required></label></div>
+  <div class="col-sm-4"><label class="form-label w-100 mb-0">Name <input class="form-control" name="name" type="text" minlength="2" maxlength="100" required></label></div>
+  <div class="col-sm-4"><button class="btn btn-primary w-100" type="submit">Save holiday</button></div>
 </form>
+</div></div>
 
 <h2>Generate slots</h2>
-<p>Seed slots for 1–3 October are separate from this generator and are not rebuilt here.</p>
-<p>Monday is weekday 0. Slots are generated for each active service; each reserves its duration plus buffer.
+<p class="text-body-secondary">Seed slots for 1–3 October are separate from this generator and are not rebuilt here.</p>
+<p class="text-body-secondary">Monday is weekday 0. Slots are generated for each active service; each reserves its duration plus buffer.
    Start spacing is the greater of that total and the minimum work-hour interval. Existing slots, holidays,
    time off and past intervals are skipped. Manage services in <a href="/admin/services">service settings</a>.</p>
-<ul>
+<ul class="clinic-list">
   {% for service in active_services %}
     <li>{{ service.name }} — {{ service.duration_minutes }} minutes + {{ service.buffer_minutes }} minute buffer</li>
   {% else %}
@@ -287,33 +319,40 @@
   {% endfor %}
 </ul>
 {% if generation_warnings %}
-  <p><strong>Some services do not fit within the doctor's working window, so no slot will be generated for them on those days:</strong></p>
-  <ul>
+  <div class="alert alert-warning"><strong>Some services do not fit within the doctor's working window, so no slot will be generated for them on those days:</strong>
+  <ul class="mb-0">
     {% for warning in generation_warnings %}
       <li>{{ warning.doctor_name }} — {{ weekdays[warning.weekday] }} — {{ warning.service_name }}:
         {{ warning.total_minutes }} minutes including buffer; work window is {{ warning.work_window_minutes }} minutes.</li>
     {% endfor %}
   </ul>
+  </div>
 {% endif %}
+<div class="card mb-3"><div class="card-body">
 <form id="generate-slots-form" method="post" action="/admin/schedule/generate"
   data-confirm-selected="doctor_ids"
   data-confirm-message="Generate slots for {n} doctors?">
   <input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}">
-  <fieldset>
+  <fieldset class="mb-2">
     <legend>Doctors</legend>
+    <div class="check-grid">
     {% for doctor in doctors %}
-      <label>
-        <input type="checkbox" name="doctor_ids" value="{{ doctor.id }}">
+      <label class="form-check">
+        <input class="form-check-input" type="checkbox" name="doctor_ids" value="{{ doctor.id }}">
         {{ doctor.full_name }}
       </label>
     {% else %}
       <p>No active doctors.</p>
     {% endfor %}
+    </div>
   </fieldset>
-  <button type="button" data-check-group="doctor_ids" data-check-action="all">Select all</button>
-  <button type="button" data-check-group="doctor_ids" data-check-action="none">Clear selection</button>
-  <label>From <input name="from_date" type="date" min="{{ min_schedule_date }}" max="{{ max_generation_date }}" value="{{ default_from_date }}" required></label>
-  <label>To <input name="to_date" type="date" min="{{ min_schedule_date }}" max="{{ max_generation_date }}" value="{{ default_to_date }}" required></label>
-  <button type="submit">Generate for selected doctors</button>
+  <button class="btn btn-outline-secondary btn-sm" type="button" data-check-group="doctor_ids" data-check-action="all">Select all</button>
+  <button class="btn btn-outline-secondary btn-sm" type="button" data-check-group="doctor_ids" data-check-action="none">Clear selection</button>
+  <div class="row g-2 align-items-end mt-1">
+  <div class="col-sm-4"><label class="form-label w-100 mb-0">From <input class="form-control" name="from_date" type="date" min="{{ min_schedule_date }}" max="{{ max_generation_date }}" value="{{ default_from_date }}" required></label></div>
+  <div class="col-sm-4"><label class="form-label w-100 mb-0">To <input class="form-control" name="to_date" type="date" min="{{ min_schedule_date }}" max="{{ max_generation_date }}" value="{{ default_to_date }}" required></label></div>
+  <div class="col-sm-4"><button class="btn btn-primary w-100" type="submit">Generate for selected doctors</button></div>
+  </div>
 </form>
+</div></div>
 {% endblock %}

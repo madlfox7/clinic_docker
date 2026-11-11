@@ -1,39 +1,46 @@
 {% extends "base.html" %}
+{% block title %}Slots: {{ doctor.full_name }}{% endblock %}
 {% block content %}
-
-
 <h1>Slots: {{ doctor.full_name }}</h1>
-<form method="get" action="/doctors/{{ doctor.id }}/slots">
-  <label>Service
-    <select name="service_id" required>
-      {% for service in services %}
-        <option value="{{ service.id }}"
-          {% if selected_service and service.id == selected_service.id %}selected{% endif %}>
-          {{ service.name }} — {{ service.duration_minutes }} min + {{ service.buffer_minutes }} min buffer
-        </option>
-      {% endfor %}
-    </select>
-  </label>
-  <button type="submit">Show slots for this service</button>
-</form>
+<div class="card mb-3">
+  <div class="card-body">
+    <form class="row g-2 align-items-end" method="get" action="/doctors/{{ doctor.id }}/slots">
+      <div class="col-md-8">
+        <label class="form-label mb-1">Service
+          <select class="form-select" name="service_id" required>
+            {% for service in services %}
+              <option value="{{ service.id }}"
+                {% if selected_service and service.id == selected_service.id %}selected{% endif %}>
+                {{ service.name }} — {{ service.duration_minutes }} min + {{ service.buffer_minutes }} min buffer
+              </option>
+            {% endfor %}
+          </select>
+        </label>
+      </div>
+      <div class="col-md-4">
+        <button class="btn btn-primary w-100" type="submit">Show slots for this service</button>
+      </div>
+    </form>
+  </div>
+</div>
 {% if service_error %}
-  <p><strong>This service is not currently available for this doctor. Choose another service.</strong></p>
+  <div class="alert alert-warning"><strong>This service is not currently available for this doctor. Choose another service.</strong></div>
 {% elif selected_service %}
-  <p>
+  <p class="text-body-secondary">
     Selected service: {{ selected_service.name }}.
     Reserved time includes {{ selected_service.duration_minutes }} minutes for the service
     and {{ selected_service.buffer_minutes }} minutes for the buffer.
   </p>
 {% elif not services %}
-  <p>No active services are currently assigned to this doctor.</p>
+  <div class="alert alert-secondary">No active services are currently assigned to this doctor.</div>
 {% endif %}
 {% if role == "registrar" %}
-  <section id="registrar-patient-picker"
-    data-selected-email="{{ selected_patient.email if selected_patient else '' }}"
+  <section id="registrar-patient-picker" class="card mb-3"
     data-selected-blocked="{{ 'true' if selected_patient and selected_patient.blocked else 'false' }}">
-    <h2>Choose patient</h2>
-    <label>Search by email
-      <input id="registrar-patient-search" type="search" autocomplete="off"
+    <div class="card-body">
+    <h2 class="h5 mt-0">Choose patient</h2>
+    <label class="form-label">Search by email
+      <input class="form-control" id="registrar-patient-search" type="search" autocomplete="off"
         placeholder="Type part of an email" value="{{ selected_patient.email if selected_patient else '' }}">
     </label>
     <p id="registrar-patient-selection" aria-live="polite">
@@ -44,82 +51,81 @@
         Search for a patient and select an active account before booking.
       {% endif %}
     </p>
-    <ul id="registrar-patient-results" aria-live="polite"></ul>
+    <ul id="registrar-patient-results" class="patient-results" aria-live="polite"></ul>
+    </div>
   </section>
 {% endif %}
 {% if error == "overlap" %}
-
-<!-- Booking checks & error msgs -->
-  <script>
-    window.alert("Your appointment times overlap.");
-  </script>
-  <p><strong>Booking failed.</strong> Your appointment times overlap.</p>
+  <div class="alert alert-danger" role="alert" data-popup-message="Your appointment times overlap.">
+  <p class="mb-1"><strong>Booking failed.</strong> Your appointment times overlap.</p>
   {% if conflict %}
-    <p>Existing appointment: {{ conflict.doctor_name }} — {{ conflict.starts_at }} - {{ conflict.ends_at }}.</p>
-    <p>Cause: appointment times overlap.</p>
+    <p class="mb-1">Existing appointment: {{ conflict.doctor_name }} — {{ conflict.starts_at }} - {{ conflict.ends_at }}.</p>
+    <p class="mb-0">Cause: appointment times overlap.</p>
   {% endif %}
+  </div>
 {% elif error == "unavailable" %}
-
-
-  <script>
-    window.alert("This slot is no longer available. Please choose another slot.");
-  </script>
-  <p><strong>Booking failed.</strong> This slot is no longer available. Please choose another slot.</p>
-  <p>Cause: another patient booked this slot first.</p>
+  <div class="alert alert-danger" role="alert" data-popup-message="This slot is no longer available. Please choose another slot.">
+  <p class="mb-1"><strong>Booking failed.</strong> This slot is no longer available. Please choose another slot.</p>
+  <p class="mb-0">Cause: another patient booked this slot first.</p>
+  </div>
 {% elif error == "service_unavailable" %}
-  <p><strong>Booking failed.</strong> This service is inactive or not assigned to this doctor.</p>
+  <div class="alert alert-danger" role="alert"><strong>Booking failed.</strong> This service is inactive or not assigned to this doctor.</div>
 {% elif error == "service_mismatch" %}
-  <p><strong>Booking failed.</strong> The selected service does not match this slot.</p>
+  <div class="alert alert-danger" role="alert"><strong>Booking failed.</strong> The selected service does not match this slot.</div>
 {% elif error == "patient_not_found" %}
-  <p><strong>Booking failed.</strong> Patient account was not found.</p>
+  <div class="alert alert-danger" role="alert"><strong>Booking failed.</strong> Patient account was not found.</div>
 {% elif error == "patient_blocked" %}
-  <p><strong>Booking failed.</strong> This patient account is blocked.</p>
+  <div class="alert alert-danger" role="alert"><strong>Booking failed.</strong> This patient account is blocked.</div>
 {% elif error == "patient_required" %}
-  <p><strong>Booking failed.</strong> Enter a patient email first.</p>
+  <div class="alert alert-danger" role="alert"><strong>Booking failed.</strong> Enter a patient email first.</div>
 {% elif error == "closed" %}
-  <p><strong>Booking failed.</strong> The clinic is closed for this date.</p>
+  <div class="alert alert-danger" role="alert"><strong>Booking failed.</strong> The clinic is closed for this date.</div>
 {% elif error == "past" %}
-  <p><strong>Booking failed.</strong> This slot is in the past.</p>
+  <div class="alert alert-danger" role="alert"><strong>Booking failed.</strong> This slot is in the past.</div>
 {% elif error == "could_not_book" %}
-  <p><strong>Booking failed.</strong> The appointment could not be booked. Try again or contact the clinic.</p>
+  <div class="alert alert-danger" role="alert"><strong>Booking failed.</strong> The appointment could not be booked. Try again or contact the clinic.</div>
 {% elif booking_confirmation %}
-  <h2>Appointment confirmed</h2>
-  <p>Appointment booked successfully.</p>
-  <dl>
-    <dt>Doctor</dt><dd>{{ booking_confirmation.doctor_name }}</dd>
-    <dt>Patient</dt><dd>{{ booking_confirmation.patient_email }}</dd>
-    <dt>Service</dt><dd>{{ booking_confirmation.service_name }}</dd>
-    <dt>Date and time</dt>
-    <dd>{{ booking_confirmation.starts_at.strftime("%A, %Y-%m-%d %H:%M") }}–{{ booking_confirmation.ends_at.strftime("%H:%M") }}</dd>
-    <dt>Service duration</dt>
-    <dd>{{ booking_confirmation.duration_minutes }} min{% if booking_confirmation.buffer_minutes %} + {{ booking_confirmation.buffer_minutes }} min buffer{% endif %}</dd>
-  </dl>
+  <div class="card border-success mb-3">
+    <div class="card-body">
+    <h2 class="h5 mt-0 text-success">Appointment confirmed</h2>
+    <p>Appointment booked successfully.</p>
+    <dl class="row mb-0">
+      <dt class="col-sm-3">Doctor</dt><dd class="col-sm-9">{{ booking_confirmation.doctor_name }}</dd>
+      <dt class="col-sm-3">Patient</dt><dd class="col-sm-9">{{ booking_confirmation.patient_email }}</dd>
+      <dt class="col-sm-3">Service</dt><dd class="col-sm-9">{{ booking_confirmation.service_name }}</dd>
+      <dt class="col-sm-3">Date and time</dt>
+      <dd class="col-sm-9">{{ booking_confirmation.starts_at.strftime("%A, %Y-%m-%d %H:%M") }}–{{ booking_confirmation.ends_at.strftime("%H:%M") }}</dd>
+      <dt class="col-sm-3">Service duration</dt>
+      <dd class="col-sm-9">{{ booking_confirmation.duration_minutes }} min{% if booking_confirmation.buffer_minutes %} + {{ booking_confirmation.buffer_minutes }} min buffer{% endif %}</dd>
+    </dl>
+    </div>
+  </div>
 {% endif %}
-{% if cancelled == "1" %}<p>Appointment cancelled.</p>{% endif %}
-{% if cancel_error == "past" %}<p>Past appointments cannot be cancelled.</p>
-{% elif cancel_error == "1" %}<p>Appointment could not be cancelled; it may already be cancelled.</p>{% endif %}
+{% if cancelled == "1" %}<div class="alert alert-success">Appointment cancelled.</div>{% endif %}
+{% if cancel_error == "past" %}<div class="alert alert-warning">Past appointments cannot be cancelled.</div>
+{% elif cancel_error == "1" %}<div class="alert alert-warning">Appointment could not be cancelled; it may already be cancelled.</div>{% endif %}
 {% for day in days %}
   <h2>{{ day.label }}</h2>
-  <ul>
+  <ul class="slot-list">
   {% for s in day.slots %}
-    <li>
-      {{ s.starts_at.strftime("%H:%M") }}–{{ s.ends_at.strftime("%H:%M") }}
-      ({{ s.duration_minutes }} min service{% if s.buffer_minutes %} + {{ s.buffer_minutes }} min buffer{% endif %})
+    <li class="{% if s.mine %}slot-mine{% elif s.taken or s.past or s.closed %}slot-off{% else %}slot-free{% endif %}">
+      <span class="slot-time">{{ s.starts_at.strftime("%H:%M") }}–{{ s.ends_at.strftime("%H:%M") }}</span>
+      <small>({{ s.duration_minutes }} min service{% if s.buffer_minutes %} + {{ s.buffer_minutes }} min buffer{% endif %})</small>
       {% if s.mine %}
         Your appointment — <a href="/my">open my appointments</a>
         {% if s.closed %}<strong>Clinic closed — staff action required.</strong>{% endif %}
       {% elif s.taken %}
         {% if role == "registrar" %}
-          Booked
+          <span class="badge text-bg-secondary">Booked</span>
           {% if s.closed %}<strong>Clinic closed — staff action required.</strong>{% endif %}
           {% if not s.past %}
-            <form method="post" action="/appointments/{{ s.appointment_id }}/cancel" style="display:inline">
+            <form method="post" action="/appointments/{{ s.appointment_id }}/cancel" data-confirm="Cancel this appointment?">
   <input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}">
-              <button type="submit" onclick="return confirm('Cancel this appointment?')">Cancel appointment</button>
+              <button class="btn btn-outline-danger" type="submit">Cancel appointment</button>
             </form>
           {% endif %}
         {% elif role == "admin" %}
-          Booked
+          <span class="badge text-bg-secondary">Booked</span>
           {% if s.closed %}<strong>Clinic closed — staff action required.</strong>{% endif %}
         {% else %}
           Unavailable{% if s.closed %} — clinic closed{% endif %}
@@ -135,18 +141,18 @@
           <input type="hidden" name="service_id" value="{{ selected_service.id }}">
           <input type="hidden" name="patient_email"
             value="{{ selected_patient.email if selected_patient else '' }}">
-          <button type="submit" data-registrar-book
+          <button class="btn btn-primary" type="submit" data-registrar-book
             {% if not selected_patient or selected_patient.blocked %}disabled{% endif %}>
             Book for patient
           </button>
           </form>
         {% elif role == "admin" %}
-          Available
+          <span class="badge text-bg-success">Available</span>
         {% else %}
-          <form method="post" action="/slots/{{ s.id }}/book" style="display:inline">
+          <form method="post" action="/slots/{{ s.id }}/book">
   <input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}">
             <input type="hidden" name="service_id" value="{{ selected_service.id }}">
-            <button type="submit">Book appointment</button>
+            <button class="btn btn-primary" type="submit">Book appointment</button>
           </form>
         {% endif %}
       {% endif %}
@@ -154,85 +160,4 @@
   {% endfor %}
   </ul>
 {% endfor %}
-{% if role == "registrar" %}
-<script>
-  const patientPicker = document.getElementById("registrar-patient-picker");
-  const patientSearch = document.getElementById("registrar-patient-search");
-  const patientResults = document.getElementById("registrar-patient-results");
-  const patientSelection = document.getElementById("registrar-patient-selection");
-  const bookingButtons = document.querySelectorAll("[data-registrar-book]");
-  let searchTimer;
-  let searchRequestId = 0;
-
-  function setSelectedPatient(email, blocked) {
-    patientPicker.dataset.selectedEmail = email || "";
-    patientPicker.dataset.selectedBlocked = blocked ? "true" : "false";
-    document.querySelectorAll('input[name="patient_email"]').forEach((input) => {
-      input.value = email || "";
-    });
-    bookingButtons.forEach((button) => {
-      button.disabled = !email || blocked;
-    });
-    patientSelection.textContent = email
-      ? `Selected: ${email} — ${blocked ? "Blocked; booking is disabled." : "Active."}`
-      : "Search for a patient and select an active account before booking.";
-  }
-
-  function showSearchMessage(message) {
-    patientResults.replaceChildren();
-    const item = document.createElement("li");
-    item.textContent = message;
-    patientResults.append(item);
-  }
-
-  setSelectedPatient(
-    patientPicker.dataset.selectedEmail,
-    patientPicker.dataset.selectedBlocked === "true"
-  );
-
-  patientSearch.addEventListener("input", () => {
-    const query = patientSearch.value.trim();
-    setSelectedPatient("", false);
-    patientResults.replaceChildren();
-    const requestId = ++searchRequestId;
-    window.clearTimeout(searchTimer);
-    if (query.length < 2) return;
-
-    searchTimer = window.setTimeout(async () => {
-      try {
-        const response = await fetch(
-          `/registrar/patients/search?q=${encodeURIComponent(query)}`,
-          { headers: { Accept: "application/json" } }
-        );
-        if (!response.ok) throw new Error("Patient search failed.");
-        const patients = await response.json();
-        if (requestId !== searchRequestId) return;
-        if (!patients.length) {
-          showSearchMessage("No patients found.");
-          return;
-        }
-        patientResults.replaceChildren();
-        patients.forEach((patient) => {
-          const item = document.createElement("li");
-          const button = document.createElement("button");
-          button.type = "button";
-          button.textContent = `${patient.email} — ${patient.blocked ? "Blocked" : "Active"}`;
-          button.disabled = patient.blocked;
-          button.addEventListener("click", () => {
-            patientSearch.value = patient.email;
-            patientResults.replaceChildren();
-            setSelectedPatient(patient.email, patient.blocked);
-          });
-          item.append(button);
-          patientResults.append(item);
-        });
-      } catch (error) {
-        if (requestId === searchRequestId) {
-          showSearchMessage("Could not search patients. Try again.");
-        }
-      }
-    }, 250);
-  });
-</script>
-{% endif %}
 {% endblock %}

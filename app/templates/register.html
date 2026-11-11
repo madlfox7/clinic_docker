@@ -1,14 +1,18 @@
 {% extends "base.html" %}
+{% block title %}Patient registration{% endblock %}
 {% block content %}
-
+<div class="card auth-card">
+  <div class="card-body p-4">
 <h1>Patient registration</h1>
-{% if error %}<p>{{ error }}</p>{% endif %}
+{% if error %}<div class="alert alert-danger" role="alert">{{ error }}</div>{% endif %}
 <form method="post" action="/register">
   <input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}">
-  <p>Email: <input name="email" type="email" maxlength="254" value="{{ email }}" required></p>
-  <p>Password: <input name="password" type="password" minlength="8" maxlength="72" required></p>
-  <p>Confirm password: <input name="confirm_password" type="password" minlength="8" maxlength="72" required></p>
-  <button type="submit">Create patient account</button>
+  <div class="mb-3"><label class="form-label w-100">Email: <input class="form-control" name="email" type="email" maxlength="254" value="{{ email }}" required></label></div>
+  <div class="mb-3"><label class="form-label w-100">Password: <input class="form-control" name="password" type="password" minlength="8" maxlength="72" required></label></div>
+  <div class="mb-3"><label class="form-label w-100">Confirm password: <input class="form-control" name="confirm_password" type="password" minlength="8" maxlength="72" required></label></div>
+  <button class="btn btn-primary w-100" type="submit">Create patient account</button>
 </form>
-<p><a href="/login">Back to login</a></p>
+<p class="mt-3 mb-0"><a href="/login">Back to login</a></p>
+  </div>
+</div>
 {% endblock %}

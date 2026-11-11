@@ -1,16 +1,30 @@
 {% extends "base.html" %}
+{% block title %}Cabinet{% endblock %}
 {% block content %}
-
-
 <h1>Cabinet</h1>
-<p>You are logged in as: {{ email }}</p>
-<p>Role: {{ role }}</p>
+<div class="card mb-3">
+  <div class="card-body">
+<p class="mb-1">You are logged in as: {{ email }}</p>
+<p class="mb-2">Role: {{ role }}</p>
 {% if role == "patient" %}
   <p>Welcome. This dashboard shows only your upcoming visits and links to your records and booking.</p>
-  <p><a href="/doctors">Find a doctor and choose a service</a> | <a href="/my">All my appointments</a> | <a href="/my/records">My medical records</a></p>
+  <p class="mb-0"><a class="btn btn-primary btn-sm" href="/doctors">Find a doctor and choose a service</a> <a class="btn btn-outline-primary btn-sm" href="/my">All my appointments</a> <a class="btn btn-outline-primary btn-sm" href="/my/records">My medical records</a></p>
+{% elif role == "doctor" %}
+  <p>Doctor: here will be only your patients.</p>
+  <p class="mb-0"><a class="btn btn-outline-primary btn-sm" href="/doctor/appointments">My appointments</a> <a class="btn btn-outline-primary btn-sm" href="/doctor/calendar">My calendar</a></p>
+{% elif role == "registrar" %}
+  <p>Registrar: here will be the general schedule.</p>
+  <p class="mb-0"><a class="btn btn-outline-primary btn-sm" href="/doctors">Doctors</a> <a class="btn btn-outline-primary btn-sm" href="/registrar/appointments">Appointments by day</a> <a class="btn btn-outline-primary btn-sm" href="/registrar/patients">Patients</a></p>
+{% elif role == "admin" %}
+  <p>Admin: users and logs. Medical texts are not available.</p>
+  <p class="mb-0"><a class="btn btn-outline-primary btn-sm" href="/admin/users">Manage staff</a> <a class="btn btn-outline-primary btn-sm" href="/admin/schedule">Manage schedule</a> <a class="btn btn-outline-primary btn-sm" href="/admin/audit">Audit log</a></p>
+{% endif %}
+  </div>
+</div>
 
+{% if role == "patient" %}
   <h2>Upcoming visits</h2>
-  <ul>
+  <ul class="clinic-list">
     {% for visit in upcoming_visits %}
       <li>
         {{ visit.starts_at.strftime("%Y-%m-%d %H:%M") }}–{{ visit.ends_at.strftime("%H:%M") }} —
@@ -20,64 +34,68 @@
       <li>No upcoming scheduled visits.</li>
     {% endfor %}
   </ul>
-
-{% elif role == "doctor" %}
-  <p>Doctor: here will be only your patients.</p>
-  <p><a href="/doctor/appointments">My appointments</a> | <a href="/doctor/calendar">My calendar</a></p>
-{% elif role == "registrar" %}
-  <p>Registrar: here will be the general schedule.</p>
-  <p><a href="/doctors">Doctors</a> | <a href="/registrar/appointments">Appointments by day</a> | <a href="/registrar/patients">Patients</a></p>
-{% elif role == "admin" %}
-  <p>Admin: users and logs. Medical texts are not available.</p>
-  <p><a href="/admin/users">Manage staff</a> | <a href="/admin/schedule">Manage schedule</a> | <a href="/admin/audit">Audit log</a></p>
 {% endif %}
 
-<h2>Email notifications</h2>
-{% if notifications_saved == "1" %}<p>Email notification setting saved.</p>{% endif %}
-{% if notifications_error == "1" %}<p>Could not save the email notification setting.</p>{% endif %}
+<div class="row g-3">
+<div class="col-lg-4">
+<div class="card h-100"><div class="card-body">
+<h2 class="mt-0">Email notifications</h2>
+{% if notifications_saved == "1" %}<div class="alert alert-success">Email notification setting saved.</div>{% endif %}
+{% if notifications_error == "1" %}<div class="alert alert-danger" role="alert">Could not save the email notification setting.</div>{% endif %}
 <form method="post" action="/me/notifications">
   <input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}">
-  <label>
-    <input type="checkbox" name="email_notifications" value="1" {% if email_notifications %}checked{% endif %}>
+  <label class="form-check mb-2">
+    <input class="form-check-input" type="checkbox" name="email_notifications" value="1" {% if email_notifications %}checked{% endif %}>
     Receive appointment emails
   </label>
-  <button type="submit">Save</button>
+  <button class="btn btn-primary" type="submit">Save</button>
 </form>
-<p>Password and email-change messages are always sent.</p>
+<p class="text-body-secondary mt-2 mb-0">Password and email-change messages are always sent.</p>
+</div></div>
+</div>
 
-<h2>Change email</h2>
-{% if email_change == "sent" %}<p>Confirmation links were sent to the current and new addresses. Both must be confirmed.</p>{% endif %}
-{% if email_error == "invalid" %}<p>Enter a valid email address.</p>
-{% elif email_error == "same" %}<p>That is already this account's email.</p>
-{% elif email_error == "taken" %}<p>An account with this email already exists.</p>
-{% elif email_error == "failed" %}<p>The confirmation email could not be sent. Try again later.</p>
-{% elif email_error == "rate_limited" %}<p>Too many email change attempts. Try again later.</p>{% endif %}
+<div class="col-lg-4">
+<div class="card h-100"><div class="card-body">
+<h2 class="mt-0">Change email</h2>
+{% if email_change == "sent" %}<div class="alert alert-success">Confirmation links were sent to the current and new addresses. Both must be confirmed.</div>{% endif %}
+{% if email_error == "invalid" %}<div class="alert alert-danger" role="alert">Enter a valid email address.</div>
+{% elif email_error == "same" %}<div class="alert alert-danger" role="alert">That is already this account's email.</div>
+{% elif email_error == "taken" %}<div class="alert alert-danger" role="alert">An account with this email already exists.</div>
+{% elif email_error == "failed" %}<div class="alert alert-danger" role="alert">The confirmation email could not be sent. Try again later.</div>
+{% elif email_error == "rate_limited" %}<div class="alert alert-danger" role="alert">Too many email change attempts. Try again later.</div>{% endif %}
 <form method="post" action="/me/email">
   <input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}">
-  <label>New email <input name="new_email" type="email" maxlength="254" required></label>
-  <button type="submit">Send confirmation links</button>
+  <div class="mb-3"><label class="form-label w-100">New email <input class="form-control" name="new_email" type="email" maxlength="254" required></label></div>
+  <button class="btn btn-primary" type="submit">Send confirmation links</button>
 </form>
+</div></div>
+</div>
 
-<h2>Change password</h2>
-{% if password_changed == "1" %}<p>Password changed successfully.</p>{% endif %}
-{% if password_error == "current" %}<p>Current password is incorrect.</p>
-{% elif password_error == "invalid" %}<p>Choose a non-default password.</p>
-{% elif password_error == "edge_space" %}<p>Password must not start or end with a space.</p>
-{% elif password_error == "mismatch" %}<p>New password and confirmation do not match.</p>
-{% elif password_error == "same" %}<p>Choose a password different from your current one.</p>
-{% elif password_error == "stale" %}<p>Your password changed during this request. Please retry.</p>
-{% elif password_error == "unavailable" %}<p>Password change is unavailable for this account.</p>{% endif %}
+<div class="col-lg-4">
+<div class="card h-100"><div class="card-body">
+<h2 class="mt-0">Change password</h2>
+{% if password_changed == "1" %}<div class="alert alert-success">Password changed successfully.</div>{% endif %}
+{% if password_error == "current" %}<div class="alert alert-danger" role="alert">Current password is incorrect.</div>
+{% elif password_error == "invalid" %}<div class="alert alert-danger" role="alert">Choose a non-default password.</div>
+{% elif password_error == "edge_space" %}<div class="alert alert-danger" role="alert">Password must not start or end with a space.</div>
+{% elif password_error == "mismatch" %}<div class="alert alert-danger" role="alert">New password and confirmation do not match.</div>
+{% elif password_error == "same" %}<div class="alert alert-danger" role="alert">Choose a password different from your current one.</div>
+{% elif password_error == "stale" %}<div class="alert alert-danger" role="alert">Your password changed during this request. Please retry.</div>
+{% elif password_error == "unavailable" %}<div class="alert alert-danger" role="alert">Password change is unavailable for this account.</div>{% endif %}
 <form method="post" action="/me/password">
   <input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}">
-  <label>Current password
-    <input type="password" name="current_password" autocomplete="current-password" required>
-  </label>
-  <label>New password
-    <input type="password" name="new_password" minlength="8" maxlength="72" autocomplete="new-password" required>
-  </label>
-  <label>Confirm new password
-    <input type="password" name="confirm_password" minlength="8" maxlength="72" autocomplete="new-password" required>
-  </label>
-  <button type="submit">Change password</button>
+  <div class="mb-2"><label class="form-label w-100">Current password
+    <input class="form-control" type="password" name="current_password" autocomplete="current-password" required>
+  </label></div>
+  <div class="mb-2"><label class="form-label w-100">New password
+    <input class="form-control" type="password" name="new_password" minlength="8" maxlength="72" autocomplete="new-password" required>
+  </label></div>
+  <div class="mb-3"><label class="form-label w-100">Confirm new password
+    <input class="form-control" type="password" name="confirm_password" minlength="8" maxlength="72" autocomplete="new-password" required>
+  </label></div>
+  <button class="btn btn-primary" type="submit">Change password</button>
 </form>
+</div></div>
+</div>
+</div>
 {% endblock %}

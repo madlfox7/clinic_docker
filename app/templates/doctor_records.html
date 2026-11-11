@@ -1,32 +1,38 @@
 {% extends "base.html" %}
+{% block title %}Clinical records{% endblock %}
 {% block content %}
-
 <h1>Clinical records</h1>
-<p>{{ appointment.patient_email }} — {{ appointment.doctor_name }}</p>
-<p>{{ appointment.starts_at.strftime("%Y-%m-%d %H:%M") }}–{{ appointment.ends_at.strftime("%H:%M") }}</p>
+<div class="card mb-3">
+  <div class="card-body">
+<p class="mb-1">{{ appointment.patient_email }} — {{ appointment.doctor_name }}</p>
+<p class="mb-1">{{ appointment.starts_at.strftime("%Y-%m-%d %H:%M") }}–{{ appointment.ends_at.strftime("%H:%M") }}</p>
 <p>Status: {{ appointment.status }}</p>
-<p><a href="/doctor/appointments">Back to my appointments</a></p>
-
-{% if completed == "1" %}<p>Appointment marked as completed.</p>{% endif %}
+<a class="btn btn-outline-primary btn-sm" href="/doctor/appointments">Back to my appointments</a>
 {% if can_complete %}
-<form method="post" action="/doctor/appointments/{{ appointment.id }}/complete" onsubmit="return confirm('Mark this appointment as completed?');">
+<form class="inline-form" method="post" action="/doctor/appointments/{{ appointment.id }}/complete" data-confirm="Mark this appointment as completed?">
   <input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}">
-  <button type="submit">Mark as completed</button>
+  <button class="btn btn-success btn-sm" type="submit">Mark as completed</button>
 </form>
 {% endif %}
+  </div>
+</div>
 
-{% if saved == "note" %}<p>Clinical note saved.</p>{% endif %}
-{% if saved == "prescription" %}<p>Prescription saved.</p>{% endif %}
-{% if error == "empty" %}<p>Enter text before saving.</p>
-{% elif error == "invalid_text" %}<p>Record text cannot contain a NUL character.</p>
-{% elif error == "too_long" %}<p>Record text is too long.</p>
-{% elif error == "invalid_type" %}<p>Choose a valid record type.</p>
-{% elif error == "record_unavailable" %}<p>This appointment cannot be edited (it may be cancelled).</p>
-{% elif error == "complete_unavailable" %}<p>This appointment cannot be marked as completed.</p>{% endif %}
+{% if completed == "1" %}<div class="alert alert-success">Appointment marked as completed.</div>{% endif %}
+{% if saved == "note" %}<div class="alert alert-success">Clinical note saved.</div>{% endif %}
+{% if saved == "prescription" %}<div class="alert alert-success">Prescription saved.</div>{% endif %}
+{% if error == "empty" %}<div class="alert alert-danger" role="alert">Enter text before saving.</div>
+{% elif error == "invalid_text" %}<div class="alert alert-danger" role="alert">Record text cannot contain a NUL character.</div>
+{% elif error == "too_long" %}<div class="alert alert-danger" role="alert">Record text is too long.</div>
+{% elif error == "invalid_type" %}<div class="alert alert-danger" role="alert">Choose a valid record type.</div>
+{% elif error == "record_unavailable" %}<div class="alert alert-danger" role="alert">This appointment cannot be edited (it may be cancelled).</div>
+{% elif error == "complete_unavailable" %}<div class="alert alert-danger" role="alert">This appointment cannot be marked as completed.</div>{% endif %}
 
-<h2>Clinical notes</h2>
+<div class="row g-3">
+<div class="col-lg-6">
+<div class="card h-100"><div class="card-body">
+<h2 class="mt-0">Clinical notes</h2>
 {% if notes %}
-<ul>
+<ul class="clinic-list">
   {% for note in notes %}
     <li><pre>{{ note.body }}</pre></li>
   {% endfor %}
@@ -38,17 +44,21 @@
 <form method="post" action="/doctor/appointments/{{ appointment.id }}/records">
   <input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}">
   <input type="hidden" name="record_type" value="note">
-  <label>Report / diagnosis
-    <textarea name="body" rows="6" maxlength="4000" required></textarea>
-  </label>
-  <button type="submit">Save note</button>
+  <div class="mb-2"><label>Report / diagnosis
+    <textarea class="form-control" name="body" rows="6" maxlength="4000" required></textarea>
+  </label></div>
+  <button class="btn btn-primary" type="submit">Save note</button>
 </form>
 {% else %}
-<p>This cancelled appointment is read-only.</p>
+<p class="text-body-secondary">This cancelled appointment is read-only.</p>
 {% endif %}
+</div></div>
+</div>
 
-<h2>Prescriptions</h2>
-<ul>
+<div class="col-lg-6">
+<div class="card h-100"><div class="card-body">
+<h2 class="mt-0">Prescriptions</h2>
+<ul class="clinic-list">
   {% for prescription in prescriptions %}
     <li>{{ prescription }}</li>
   {% else %}
@@ -59,10 +69,13 @@
 <form method="post" action="/doctor/appointments/{{ appointment.id }}/records">
   <input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}">
   <input type="hidden" name="record_type" value="prescription">
-  <label>Prescription
-    <textarea name="body" rows="4" maxlength="4000" required></textarea>
-  </label>
-  <button type="submit">Add prescription</button>
+  <div class="mb-2"><label>Prescription
+    <textarea class="form-control" name="body" rows="4" maxlength="4000" required></textarea>
+  </label></div>
+  <button class="btn btn-primary" type="submit">Add prescription</button>
 </form>
 {% endif %}
+</div></div>
+</div>
+</div>
 {% endblock %}

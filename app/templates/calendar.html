@@ -1,62 +1,69 @@
 {% extends "base.html" %}
+{% block title %}{{ calendar_title }}{% endblock %}
 {% block content %}
 
 <h1>{{ calendar_title }}</h1>
 {% if role == "doctor" %}
-  <p>This calendar is read-only. You can view availability and visits, but cannot book or edit schedules.</p>
+  <p class="text-body-secondary">This calendar is read-only. You can view availability and visits, but cannot book or edit schedules.</p>
 {% endif %}
 
 {% if errors %}
   {% for error in errors %}
-    {% if error == "invalid_day" %}<p>Invalid date; showing today.</p>
-    {% elif error == "day_out_of_range" %}<p>Date must be between years 1900 and 2100; showing today.</p>
-    {% elif error == "invalid_view" %}<p>Invalid calendar view; showing day view.</p>
-    {% elif error == "invalid_doctor" %}<p>Invalid doctor; showing all doctors.</p>{% endif %}
+    {% if error == "invalid_day" %}<div class="alert alert-warning">Invalid date; showing today.</div>
+    {% elif error == "day_out_of_range" %}<div class="alert alert-warning">Date must be between years 1900 and 2100; showing today.</div>
+    {% elif error == "invalid_view" %}<div class="alert alert-warning">Invalid calendar view; showing day view.</div>
+    {% elif error == "invalid_doctor" %}<div class="alert alert-warning">Invalid doctor; showing all doctors.</div>{% endif %}
   {% endfor %}
 {% endif %}
 
-<form method="get" action="{{ calendar_path }}">
-  <label>View
-    <select name="view">
+<div class="card mb-3"><div class="card-body">
+<form class="row g-2 align-items-end" method="get" action="{{ calendar_path }}">
+  <div class="col-sm-4 col-md-2"><label class="form-label w-100 mb-0">View
+    <select class="form-select" name="view">
       <option value="day" {% if view == "day" %}selected{% endif %}>Day</option>
       <option value="week" {% if view == "week" %}selected{% endif %}>Week</option>
     </select>
-  </label>
-  <label>Date <input type="date" name="day" value="{{ selected_day.isoformat() }}" required></label>
+  </label></div>
+  <div class="col-sm-8 col-md-3"><label class="form-label w-100 mb-0">Date <input class="form-control" type="date" name="day" value="{{ selected_day.isoformat() }}" required></label></div>
   {% if role == "registrar" %}
-    <label>Doctor
-      <select name="doctor_id">
+    <div class="col-md-4"><label class="form-label w-100 mb-0">Doctor
+      <select class="form-select" name="doctor_id">
         <option value="">All doctors</option>
         {% for item in doctors %}
           <option value="{{ item.id }}" {% if doctor_id == item.id %}selected{% endif %}>{{ item.full_name }}</option>
         {% endfor %}
       </select>
-    </label>
+    </label></div>
   {% endif %}
-  <button type="submit">Show calendar</button>
+  <div class="col-md-3"><button class="btn btn-primary w-100" type="submit">Show calendar</button></div>
 </form>
+</div></div>
 
-<p>
-  <a href="{{ navigation.previous_url }}">←</a>
-  | <a href="{{ navigation.today_url }}">Today</a>
-  | <a href="{{ navigation.next_url }}">→</a>
-  | <a href="{{ navigation.day_view_url }}">Day</a>
-  | <a href="{{ navigation.week_view_url }}">Week</a>
-</p>
+<div class="d-flex flex-wrap gap-2 mb-3">
+  <div class="btn-group" role="group" aria-label="Move">
+    <a class="btn btn-outline-primary btn-sm" href="{{ navigation.previous_url }}" aria-label="Previous">←</a>
+    <a class="btn btn-outline-primary btn-sm" href="{{ navigation.today_url }}">Today</a>
+    <a class="btn btn-outline-primary btn-sm" href="{{ navigation.next_url }}" aria-label="Next">→</a>
+  </div>
+  <div class="btn-group" role="group" aria-label="View">
+    <a class="btn btn-sm {% if view == 'day' %}btn-primary{% else %}btn-outline-primary{% endif %}" href="{{ navigation.day_view_url }}">Day</a>
+    <a class="btn btn-sm {% if view == 'week' %}btn-primary{% else %}btn-outline-primary{% endif %}" href="{{ navigation.week_view_url }}">Week</a>
+  </div>
+</div>
 
 {% if view == "day" %}
   {% set calendar_day = days[0] %}
   <h2>{{ calendar_day.day.strftime("%A, %Y-%m-%d") }}</h2>
   {% if calendar_day.closed_reasons %}
-    <p><strong>Closed: {{ calendar_day.closed_reasons|join(", ") }}.</strong></p>
+    <div class="alert alert-secondary is-closed"><strong>Closed: {{ calendar_day.closed_reasons|join(", ") }}.</strong></div>
   {% endif %}
 
   {% if role == "doctor" %}
-    <ul>
+    <ul class="clinic-list">
       {% for time in time_rows %}
         {% for event in calendar_day.cells.get(time, []) %}
           {% if event.status == "cancelled" %}
-            <li style="color: gray">
+            <li class="is-cancelled">
               {{ event.starts_at.strftime("%H:%M") }}–{{ event.ends_at.strftime("%H:%M") }} —
               {{ event.service_name }} — {{ event.patient_email or "Patient" }} — cancelled
               {% if event.closed_reasons %}<strong> — Closed</strong>{% endif %}
@@ -78,12 +85,14 @@
       {% endfor %}
     </ul>
   {% else %}
-    <table>
+    <div class="card d-none d-md-block">
+    <div class="table-responsive">
+    <table class="table table-striped align-middle mb-0">
       <thead><tr><th>Time</th><th>Doctor</th><th>Service</th><th>Patient email</th><th>Status</th></tr></thead>
       <tbody>
         {% for time in time_rows %}
           {% for event in calendar_day.cells.get(time, []) %}
-            <tr {% if event.status == "cancelled" %}style="color: gray"{% endif %}>
+            <tr{% if event.status == "cancelled" %} class="is-cancelled"{% endif %}>
               <td>{{ event.starts_at.strftime("%H:%M") }}–{{ event.ends_at.strftime("%H:%M") }}</td>
               <td>{{ event.doctor_name }}</td>
               <td>{{ event.service_name }}</td>
@@ -96,15 +105,33 @@
         {% endfor %}
       </tbody>
     </table>
+    </div>
+    </div>
+    <ul class="clinic-list d-md-none">
+      {% for time in time_rows %}
+        {% for event in calendar_day.cells.get(time, []) %}
+          <li{% if event.status == "cancelled" %} class="is-cancelled"{% endif %}>
+            <span class="slot-time">{{ event.starts_at.strftime("%H:%M") }}–{{ event.ends_at.strftime("%H:%M") }}</span>
+            — {{ event.doctor_name }} — {{ event.service_name }}
+            {% if event.patient_email %}— {{ event.patient_email }}{% endif %}
+            — {{ event.status }}
+          </li>
+        {% endfor %}
+      {% else %}
+        <li>No appointments for this day.</li>
+      {% endfor %}
+    </ul>
   {% endif %}
 {% else %}
   <h2>Week of {{ days[0].day.strftime("%Y-%m-%d") }}</h2>
-  <table>
+  <div class="card d-none d-md-block">
+  <div class="table-responsive">
+  <table class="table table-bordered calendar-week mb-0">
     <thead>
       <tr>
         <th>Time</th>
         {% for calendar_day in days %}
-          <th {% if calendar_day.closed %}style="background: #ddd; color: #666"{% endif %}>
+          <th{% if calendar_day.closed %} class="is-closed"{% endif %}>
             {{ calendar_day.day.strftime("%a %Y-%m-%d") }}
             {% if calendar_day.closed_reasons %}
               <br><small>{{ calendar_day.closed_reasons|join(", ") }}</small>
@@ -118,9 +145,9 @@
         <tr>
           <th>{{ time }}</th>
           {% for calendar_day in days %}
-            <td {% if calendar_day.closed %}style="background: #eee; color: #666"{% endif %}>
+            <td{% if calendar_day.closed %} class="is-closed"{% endif %}>
               {% for event in calendar_day.cells.get(time, []) %}
-                <div {% if event.status == "cancelled" %}style="color: gray"{% endif %}>
+                <div class="calendar-event{% if event.status == 'cancelled' %} is-cancelled{% endif %}">
                   {{ event.starts_at.strftime("%H:%M") }}–{{ event.ends_at.strftime("%H:%M") }}
                   {% if role == "registrar" %}<br>{{ event.doctor_name }}{% endif %}
                   <br>{{ event.service_name }}
@@ -137,27 +164,52 @@
       {% endfor %}
     </tbody>
   </table>
+  </div>
+  </div>
+  {# Phones: the same week as a list by day instead of a wide table. #}
+  <div class="d-md-none">
+    {% for calendar_day in days %}
+      <h3 class="mt-3{% if calendar_day.closed %} is-closed px-2 py-1 rounded{% endif %}">{{ calendar_day.day.strftime("%a %Y-%m-%d") }}{% if calendar_day.closed_reasons %} <small>— {{ calendar_day.closed_reasons|join(", ") }}</small>{% endif %}</h3>
+      <ul class="clinic-list">
+        {% for time in time_rows %}
+          {% for event in calendar_day.cells.get(time, []) %}
+            <li{% if event.status == "cancelled" %} class="is-cancelled"{% endif %}>
+              <span class="slot-time">{{ event.starts_at.strftime("%H:%M") }}–{{ event.ends_at.strftime("%H:%M") }}</span>
+              {% if role == "registrar" %}— {{ event.doctor_name }}{% endif %}
+              — {{ event.service_name }}
+              {% if event.patient_email %}— {{ event.patient_email }}{% endif %}
+              — {{ event.status }}
+              {% if event.closed_reasons %} — {{ event.closed_reasons|join(", ") }}{% endif %}
+            </li>
+          {% endfor %}
+        {% endfor %}
+        {% if not calendar_day.cells %}<li>No events.</li>{% endif %}
+      </ul>
+    {% endfor %}
+  </div>
 {% endif %}
 
 {% if role == "doctor" %}
-  <h2>Request time off</h2>
-  {% if request_submitted == "1" %}<p>Time-off request submitted for admin review.</p>{% endif %}
-  {% if error == "request_date_past" %}<p>Start date cannot be in the past.</p>
-  {% elif error == "invalid_request_range" %}<p>End date must not be before start date.</p>
-  {% elif error == "request_range_too_long" %}<p>Time off cannot cover more than a year or end more than two years from today.</p>
-  {% elif error == "request_comment_required" %}<p>Enter a comment for the request.</p>
-  {% elif error == "request_comment_invalid" %}<p>Comment cannot contain a NUL character.</p>
-  {% elif error == "request_comment_too_long" %}<p>Comment must be no longer than 200 characters.</p>{% endif %}
-  <form method="post" action="/doctor/time-off-requests">
+  <div class="card mt-4"><div class="card-body">
+  <h2 class="mt-0">Request time off</h2>
+  {% if request_submitted == "1" %}<div class="alert alert-success">Time-off request submitted for admin review.</div>{% endif %}
+  {% if error == "request_date_past" %}<div class="alert alert-danger" role="alert">Start date cannot be in the past.</div>
+  {% elif error == "invalid_request_range" %}<div class="alert alert-danger" role="alert">End date must not be before start date.</div>
+  {% elif error == "request_range_too_long" %}<div class="alert alert-danger" role="alert">Time off cannot cover more than a year or end more than two years from today.</div>
+  {% elif error == "request_comment_required" %}<div class="alert alert-danger" role="alert">Enter a comment for the request.</div>
+  {% elif error == "request_comment_invalid" %}<div class="alert alert-danger" role="alert">Comment cannot contain a NUL character.</div>
+  {% elif error == "request_comment_too_long" %}<div class="alert alert-danger" role="alert">Comment must be no longer than 200 characters.</div>{% endif %}
+  <form class="row g-2 align-items-end" method="post" action="/doctor/time-off-requests">
   <input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}">
-    <label>From <input type="date" name="starts_on" min="{{ min_request_date }}" max="{{ max_request_date }}" value="{{ selected_day.isoformat() }}" required></label>
-    <label>Through <input type="date" name="ends_on" min="{{ min_request_date }}" max="{{ max_request_date }}" value="{{ selected_day.isoformat() }}" required></label>
-    <label>Comment <textarea name="comment" minlength="1" maxlength="200" required></textarea></label>
-    <button type="submit">Submit for admin approval</button>
+    <div class="col-sm-6 col-md-3"><label class="form-label w-100 mb-0">From <input class="form-control" type="date" name="starts_on" min="{{ min_request_date }}" max="{{ max_request_date }}" value="{{ selected_day.isoformat() }}" required></label></div>
+    <div class="col-sm-6 col-md-3"><label class="form-label w-100 mb-0">Through <input class="form-control" type="date" name="ends_on" min="{{ min_request_date }}" max="{{ max_request_date }}" value="{{ selected_day.isoformat() }}" required></label></div>
+    <div class="col-md-6"><label class="form-label w-100 mb-0">Comment <textarea class="form-control" name="comment" rows="1" minlength="1" maxlength="200" required></textarea></label></div>
+    <div class="col-12"><button class="btn btn-primary" type="submit">Submit for admin approval</button></div>
   </form>
+  </div></div>
 
   <h2>My time-off requests</h2>
-  <ul>
+  <ul class="clinic-list">
     {% for item in requests %}
       <li>
         {{ item.starts_on }}–{{ item.ends_on }} — {{ item.status }} —

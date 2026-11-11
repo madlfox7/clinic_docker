@@ -1,10 +1,38 @@
 {% extends "base.html" %}
+{% block title %}Home{% endblock %}
 {% block content %}
-
-
-<h1>Clinic</h1>
-<p>Address: {{ clinic_address }}. Phone: {{ clinic_phone }}</p>
-<p>Hours: Monday-Friday, 9:00 AM-5:00 PM (demo hours)</p>
-<p>Guests can only see general information. Booking is available after login.</p>
-<p><a href="/doctors">Doctor list</a></p>
+<section class="hero mb-4">
+  <h1>Clinic</h1>
+  <p class="lead mb-1">Book a doctor online.</p>
+  <p>Address: {{ clinic_address }}. Phone: {{ clinic_phone }}</p>
+  <p>Hours: Monday-Friday, 9:00 AM-5:00 PM (demo hours)</p>
+  <a class="btn btn-light btn-lg" href="/doctors">Doctor list</a>
+</section>
+<div class="row g-3">
+  <div class="col-md-4">
+    <div class="card h-100"><div class="card-body">
+      <h2 class="h5 mt-0">Our doctors</h2>
+      <p class="card-text">See each doctor's specialty and experience, then choose a service and a free time.</p>
+      <a class="btn btn-outline-primary btn-sm" href="/doctors">View doctors</a>
+    </div></div>
+  </div>
+  <div class="col-md-4">
+    <div class="card h-100"><div class="card-body">
+      <h2 class="h5 mt-0">Online booking</h2>
+      <p class="card-text">Guests can only see general information. Booking is available after login.</p>
+      {% if role in ("patient", "doctor", "registrar", "admin") %}
+        <a class="btn btn-outline-primary btn-sm" href="/me">Cabinet</a>
+      {% else %}
+        <a class="btn btn-outline-primary btn-sm" href="/login">Login</a>
+        <a class="btn btn-link btn-sm" href="/register">Register</a>
+      {% endif %}
+    </div></div>
+  </div>
+  <div class="col-md-4">
+    <div class="card h-100"><div class="card-body">
+      <h2 class="h5 mt-0">Your records</h2>
+      <p class="card-text">After a visit, patients see their doctor's report and prescriptions in their own account.</p>
+    </div></div>
+  </div>
+</div>
 {% endblock %}

@@ -1,48 +1,53 @@
 {% extends "base.html" %}
+{% block title %}My appointments{% endblock %}
 {% block content %}
-
-
 <h1>My appointments</h1>
-<p><a href="/my/records">My medical records</a></p>
-{% if cancelled %}<p>Appointment cancelled.</p>{% endif %}
-{% if cancel_error %}<p>Appointment could not be cancelled. It may not belong to you or may already be cancelled.</p>
+<p><a class="btn btn-outline-primary btn-sm" href="/my/records">My medical records</a></p>
+{% if cancelled %}<div class="alert alert-success">Appointment cancelled.</div>{% endif %}
+{% if cancel_error %}<div class="alert alert-warning">Appointment could not be cancelled. It may not belong to you or may already be cancelled.</div>
 {% endif %}
 {% if booking_confirmation %}
-  <h2>Appointment confirmed</h2>
-  <p>Appointment booked successfully.</p>
-  <dl>
-    <dt>Doctor</dt><dd>{{ booking_confirmation.doctor_name }}</dd>
-    <dt>Service</dt><dd>{{ booking_confirmation.service_name }}</dd>
-    <dt>Date and time</dt>
-    <dd>{{ booking_confirmation.starts_at.strftime("%A, %Y-%m-%d %H:%M") }}–{{ booking_confirmation.ends_at.strftime("%H:%M") }}</dd>
-    <dt>Service duration</dt>
-    <dd>{{ booking_confirmation.duration_minutes }} min{% if booking_confirmation.buffer_minutes %} + {{ booking_confirmation.buffer_minutes }} min buffer{% endif %}</dd>
-  </dl>
+  <div class="card border-success mb-3">
+    <div class="card-body">
+    <h2 class="h5 mt-0 text-success">Appointment confirmed</h2>
+    <p>Appointment booked successfully.</p>
+    <dl class="row mb-0">
+      <dt class="col-sm-3">Doctor</dt><dd class="col-sm-9">{{ booking_confirmation.doctor_name }}</dd>
+      <dt class="col-sm-3">Service</dt><dd class="col-sm-9">{{ booking_confirmation.service_name }}</dd>
+      <dt class="col-sm-3">Date and time</dt>
+      <dd class="col-sm-9">{{ booking_confirmation.starts_at.strftime("%A, %Y-%m-%d %H:%M") }}–{{ booking_confirmation.ends_at.strftime("%H:%M") }}</dd>
+      <dt class="col-sm-3">Service duration</dt>
+      <dd class="col-sm-9">{{ booking_confirmation.duration_minutes }} min{% if booking_confirmation.buffer_minutes %} + {{ booking_confirmation.buffer_minutes }} min buffer{% endif %}</dd>
+    </dl>
+    </div>
+  </div>
 {% endif %}
-<ul>
+{% if items %}
+<ul class="clinic-list">
   {% for a in items %}
-    <li {% if a.status == "cancelled" %}style="color: gray"{% endif %}>
+    <li{% if a.status == "cancelled" %} class="is-cancelled"{% endif %}>
       {{ a.doctor_name }} — {{ a.service_name }} —
       {{ a.starts_at }} - {{ a.ends_at }} ({{ a.status }})
       — {{ a.duration_minutes }} min service{% if a.buffer_minutes %} + {{ a.buffer_minutes }} min buffer{% endif %}
       {% if a.status == "scheduled" and a.cancellable %}
-        <form method="post" action="/appointments/{{ a.id }}/cancel" style="display:inline" onsubmit="return confirm('Cancel this appointment?');">
+        <form class="inline-form" method="post" action="/appointments/{{ a.id }}/cancel" data-confirm="Cancel this appointment?">
   <input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}">
-          <button type="submit">Cancel appointment</button>
+          <button class="btn btn-outline-danger btn-sm" type="submit">Cancel appointment</button>
         </form>
       {% endif %}
       {% if a.notes %}
-        <div>Report / diagnosis:
+        <div class="mt-2">Report / diagnosis:
           {% for body in a.notes %}<pre>{{ body }}</pre>{% endfor %}
         </div>
       {% endif %}
       {% if a.prescriptions %}
-        <div>Prescription:
+        <div class="mt-2">Prescription:
           <ul>{% for body in a.prescriptions %}<li>{{ body }}</li>{% endfor %}</ul>
         </div>
       {% endif %}
     </li>
   {% endfor %}
 </ul>
-{% if not items %}<p>No appointments yet.</p>{% endif %}
+{% endif %}
+{% if not items %}<div class="alert alert-secondary">No appointments yet.</div>{% endif %}
 {% endblock %}

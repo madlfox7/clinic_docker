@@ -527,7 +527,7 @@ def test_book_cancel_frees_slot_for_other_patient():
 		assert new_ids, "cancel button missing after book"
 		appointment_id = new_ids.pop()
 		assert "min service" in mine.text
-		assert "return confirm('Cancel this appointment?')" in mine.text
+		assert 'data-confirm="Cancel this appointment?"' in mine.text
 		other_confirmation = pat2.get(
 			f"/my?booked=1&appointment_id={appointment_id}"
 		)
@@ -1212,7 +1212,7 @@ def test_medical_records_are_scoped_and_audited():
 			assert "Appointment cancelled." in cancelled.text
 			doctor_schedule = doctor.get("/doctor/appointments")
 			assert re.search(
-				rf'<li style="color: gray">\s*{re.escape(PAT)}[\s\S]*?\(cancelled[\s\S]*?'
+				rf'<li class="is-cancelled">\s*{re.escape(PAT)}[\s\S]*?\(cancelled[\s\S]*?'
 				rf'href="/doctor/appointments/{appointment_id}/records"',
 				doctor_schedule.text,
 			)
@@ -1831,7 +1831,7 @@ def test_admin_can_cancel_future_appointments_separately_from_block():
 			) == "cancelled"
 			doctor_schedule = doc.get("/doctor/appointments").text
 			assert re.search(
-				rf'<li style="color: gray">\s*{re.escape(PAT)}[\s\S]*?\(cancelled',
+				rf'<li class="is-cancelled">\s*{re.escape(PAT)}[\s\S]*?\(cancelled',
 				doctor_schedule,
 			)
 			admin.post(f"/admin/users/{user_id}/unblock")
@@ -3193,7 +3193,7 @@ def test_registrar_day_list_doctor_calendar_and_time_off_approval():
 				f"/doctor/calendar?day={selected_day}"
 			)
 			assert re.search(
-				rf'<li style="color: gray">[\s\S]*?{re.escape(PAT)} — cancelled',
+				rf'<li class="is-cancelled">[\s\S]*?{re.escape(PAT)} — cancelled',
 				calendar_after_cancel.text,
 			)
 			assert "Available" in calendar_after_cancel.text
@@ -3281,7 +3281,7 @@ def test_registrar_day_list_doctor_calendar_and_time_off_approval():
 				f"/doctor/calendar?view=week&day={selected_day}"
 			)
 			assert "doctor time off" in closed_week.text
-			assert 'style="background: #ddd; color: #666"' in closed_week.text
+			assert '<th class="is-closed">' in closed_week.text
 			assert psql(
 				f"SELECT count(*) FROM slots WHERE id IN ({slot_id}, {free_slot_id})"
 			) == "0"
@@ -4388,7 +4388,7 @@ def test_doctor_calendar_shows_cancelled_visit_and_slot_stays_bookable():
 
 		calendar = doctor.get(f"/doctor/calendar?day={day}").text
 		assert re.search(
-			rf'<li style="color: gray">\s*{start}[\s\S]*?{re.escape(PAT)} — cancelled',
+			rf'<li class="is-cancelled">\s*{start}[\s\S]*?{re.escape(PAT)} — cancelled',
 			calendar,
 		)
 		assert re.search(rf"<li>\s*{start}[\s\S]*?Available", calendar)

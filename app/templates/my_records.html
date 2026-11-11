@@ -1,9 +1,9 @@
 {% extends "base.html" %}
+{% block title %}My medical records{% endblock %}
 {% block content %}
-
 <h1>My medical records</h1>
-<p><a href="/my">Back to my appointments</a></p>
-<ul>
+<p><a class="btn btn-outline-primary btn-sm" href="/my">Back to my appointments</a></p>
+<ul class="clinic-list">
   {% for record in records %}
     <li>
       <strong>{{ record.record_type }}</strong> — {{ record.doctor_name }} —

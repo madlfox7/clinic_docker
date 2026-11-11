@@ -1,6 +1,11 @@
 {% extends "base.html" %}
+{% block title %}Access denied{% endblock %}
 {% block content %}
+<div class="card auth-card">
+  <div class="card-body p-4">
 <h1>Access denied</h1>
 <p>Your role does not have access to this page.</p>
-<p><a href="/">Back to home</a></p>
+<a class="btn btn-outline-primary" href="/">Back to home</a>
+  </div>
+</div>
 {% endblock %}
