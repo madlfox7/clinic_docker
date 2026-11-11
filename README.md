@@ -5,9 +5,15 @@
 http://127.0.0.1:8025
 
 
-cp -n .env.example .env
-docker compose down -v
-./scripts/init_secrets.sh && docker compose up --build -d
+```bash
+make start
+```
+
+Для управления контейнерами используйте `make stop`, `make restart` и `make clean`.
+`make clean` останавливает и удаляет контейнеры и сеть Compose, сохраняя данные БД.
+`make start` пересоздаёт Compose-окружение с удалением томов, включая данные БД.
+`make fclean` также удаляет тома и запускает `docker system prune -a`, который может
+удалить неиспользуемые Docker-ресурсы других проектов.
 
 
 
@@ -42,10 +48,7 @@ API и `seed` подключаются к PostgreSQL ролью `clinic_api`; `P
 
 
 
-```bash
-cp .env.example .env
-./scripts/init_secrets.sh && docker compose up --build -d
-```
+Для первого запуска и пересоздания окружения используйте `make start`.
 
 `.env` содержит только несекретные настройки. Пароли БД, ключ сессии и пароль SMTP лежат в `secrets/` (не коммитится) и попадают в контейнеры как Docker secrets в `/run/secrets/`. `scripts/init_secrets.sh` создаёт недостающие файлы, не перезаписывает существующие и удаляет из `.env` устаревшие строки `POSTGRES_PASSWORD`, `CLINIC_API_PASSWORD`, `SESSION_SECRET` и `SMTP_PASSWORD`. Если раньше пароли были в `.env`, после этого пересоздайте стек: `docker compose down -v && ./scripts/init_secrets.sh && docker compose up --build -d`. Подробнее: `docs/sec_doc.md`.
 
