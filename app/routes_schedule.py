@@ -29,6 +29,7 @@ def registrar_patients(request: Request):
     query = normalize_email_query(raw_query)
     if query is None:
         return templates.TemplateResponse(
+            request,
             "registrar_patients.html",
             {
                 "request": request,
@@ -73,6 +74,7 @@ def registrar_patients(request: Request):
     cur.close()
     conn.close()
     return templates.TemplateResponse(
+        request,
         "registrar_patients.html",
         {
             "request": request,
@@ -411,6 +413,7 @@ def registrar_appointments(request: Request):
     cur.close()
     conn.close()
     return templates.TemplateResponse(
+        request,
         "calendar.html",
         {
             "request": request,
@@ -486,6 +489,7 @@ def doctor_calendar(request: Request):
     conn.close()
 
     return templates.TemplateResponse(
+        request,
         "calendar.html",
         {
             "request": request,
@@ -580,6 +584,7 @@ def submit_time_off_request(
         cur.close()
         conn.close()
         return templates.TemplateResponse(
+            request,
             "error.html",
             {
                 "request": request,

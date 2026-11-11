@@ -281,6 +281,7 @@ def doctor_slots(request: Request, doctor_id: str):
         if conflict is None:
             conflict = conflict_candidates[0]
     return templates.TemplateResponse(
+        request,
         "slots.html",
         {
             "request": request,
@@ -784,6 +785,7 @@ def my_appointments(request: Request):
             decrypt_body("prescriptions", *row) for row in item["prescriptions"]
         ]
     return templates.TemplateResponse(
+        request,
         "my_appointments.html",
         {
             "request": request,
@@ -832,6 +834,7 @@ def doctor_appointments(request: Request):
     cur.close()
     conn.close()
     return templates.TemplateResponse(
+        request,
         "doctor_appointments.html",
         {"request": request, "items": items, "role": role},
     )

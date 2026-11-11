@@ -2,6 +2,9 @@
 import hashlib
 import os
 import re
+import secrets
+import subprocess
+import time
 from html.parser import HTMLParser
 from pathlib import Path
 
@@ -134,6 +137,32 @@ def test_static_never_carries_a_session_cookie():
         asset = c.get("/static/app.css")
         assert asset.status_code == 200
         assert "set-cookie" not in asset.headers
+
+
+def test_static_range_requests_stay_cheap():
+    # CVE-2025-62727: many overlapping ranges used to make StaticFiles spin.
+    ok = httpx.get(BASE + "/static/app.css", headers={"Range": "bytes=0-10"}, timeout=10.0)
+    assert ok.status_code == 206
+    assert len(ok.content) == 11
+    many = "bytes=" + ",".join("0-" for _ in range(1000))
+    started = time.monotonic()
+    bad = httpx.get(BASE + "/static/app.css", headers={"Range": many}, timeout=10.0)
+    assert time.monotonic() - started < 2.0
+    assert bad.status_code in (200, 400, 416), bad.status_code
+    assert httpx.get(BASE + "/static/app.css", timeout=10.0).status_code == 200
+
+
+def test_access_log_redacts_link_tokens():
+    token = secrets.token_hex(32)
+    httpx.get(BASE + "/reset-password?token=" + token, timeout=10.0)
+    httpx.get(BASE + "/confirm-email?token=" + token, timeout=10.0)
+    logs = subprocess.run(
+        ["docker", "compose", "logs", "--since", "2m", "api"],
+        cwd=ROOT, capture_output=True, text=True, timeout=30,
+    )
+    assert logs.returncode == 0, logs.stderr
+    assert "token=redacted" in logs.stdout
+    assert token not in logs.stdout
 
 
 @pytest.mark.parametrize(

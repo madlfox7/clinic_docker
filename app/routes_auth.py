@@ -96,6 +96,7 @@ def _login_page(
     doctor_id: int | None = None,
 ):
     return templates.TemplateResponse(
+        request,
         "login.html",
         {
             "request": request,
@@ -163,6 +164,7 @@ def _register_page(
     email: str = "",
 ):
     return templates.TemplateResponse(
+        request,
         "register.html",
         {
             "request": request,
@@ -224,6 +226,7 @@ def require_user(request: Request, *roles):
         return None, RedirectResponse("/login", status_code=303)
     if roles and user["role"] not in roles:
         return None, templates.TemplateResponse(
+            request,
             "forbidden.html",
             {"request": request, "role": user["role"]},
             status_code=403,
@@ -244,6 +247,7 @@ def home(request: Request):
     if settings is None:
         raise RuntimeError("Clinic settings row is missing")
     return templates.TemplateResponse(
+        request,
         "home.html",
         {
             "request": request,
@@ -432,6 +436,7 @@ def _forgot_password_page(
     sent: bool = False,
 ):
     return templates.TemplateResponse(
+        request,
         "forgot_password.html",
         {
             "request": request,
@@ -476,6 +481,7 @@ def _reset_password_page(
     status_code: int = 200,
 ):
     return templates.TemplateResponse(
+        request,
         "reset_password.html",
         {
             "request": request,
@@ -698,6 +704,7 @@ def me(request: Request):
     finally:
         conn.close()
     return templates.TemplateResponse(
+        request,
         "me.html",
         {
             "request": request,
@@ -819,11 +826,13 @@ def change_own_email(request: Request, new_email: str = Form(...)):
 def confirm_email_form(request: Request, token: str = ""):
     if not RESET_TOKEN_PATTERN.fullmatch(token):
         return templates.TemplateResponse(
+            request,
             "confirm_email.html",
             {"request": request, "role": "guest", "token": "", "error": "invalid"},
             status_code=400,
         )
     return templates.TemplateResponse(
+        request,
         "confirm_email.html",
         {"request": request, "role": "guest", "token": token, "error": None},
     )
@@ -833,6 +842,7 @@ def confirm_email_form(request: Request, token: str = ""):
 def confirm_email(request: Request, token: str = Form(...)):
     if contains_nul(token) or not RESET_TOKEN_PATTERN.fullmatch(token):
         return templates.TemplateResponse(
+            request,
             "confirm_email.html",
             {"request": request, "role": "guest", "token": "", "error": "invalid"},
             status_code=400,
@@ -850,10 +860,12 @@ def confirm_email(request: Request, token: str = Form(...)):
         return RedirectResponse("/login?email_changed=1", status_code=303)
     if status in ("confirmed_old", "confirmed_new"):
         return templates.TemplateResponse(
+            request,
             "confirm_email.html",
             {"request": request, "role": "guest", "token": "", "error": status},
         )
     return templates.TemplateResponse(
+        request,
         "confirm_email.html",
         {"request": request, "role": "guest", "token": "", "error": "invalid"},
         status_code=400,
@@ -971,6 +983,7 @@ def doctors_list(request: Request):
             }
         )
     return templates.TemplateResponse(
+        request,
         "doctors.html",
         {
             "request": request,

@@ -91,6 +91,7 @@ def admin_audit(request: Request):
     cur.close()
     conn.close()
     return templates.TemplateResponse(
+        request,
         "admin_audit.html",
         {"request": request, "role": admin_user["role"], "events": events},
     )
@@ -143,6 +144,7 @@ def admin_users(request: Request):
     cur.close()
     conn.close()
     return templates.TemplateResponse(
+        request,
         "admin_users.html",
         {
             "request": request,
@@ -351,6 +353,7 @@ def admin_services(request: Request):
     cur.close()
     conn.close()
     return templates.TemplateResponse(
+        request,
         "admin_services.html",
         {
             "request": request,
@@ -697,6 +700,7 @@ def admin_doctors(request: Request):
     cur.close()
     conn.close()
     return templates.TemplateResponse(
+        request,
         "admin_doctors.html",
         {
             "request": request,
@@ -720,6 +724,7 @@ def admin_new_doctor_form(request: Request):
     if denied:
         return denied
     return templates.TemplateResponse(
+        request,
         "admin_doctor_form.html",
         {
             "request": request,
@@ -909,6 +914,7 @@ def admin_settings(request: Request):
     if row is None:
         raise RuntimeError("Clinic settings row is missing")
     return templates.TemplateResponse(
+        request,
         "admin_settings.html",
         {
             "request": request,
@@ -1212,6 +1218,7 @@ def admin_schedule(request: Request):
     cur.close()
     conn.close()
     return templates.TemplateResponse(
+        request,
         "admin_schedule.html",
         {
             "request": request,

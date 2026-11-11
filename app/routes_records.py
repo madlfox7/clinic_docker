@@ -64,6 +64,7 @@ def doctor_patients(request: Request):
     cur.close()
     conn.close()
     return templates.TemplateResponse(
+        request,
         "doctor_patients.html",
         {
             "request": request,
@@ -181,6 +182,7 @@ def doctor_patient_history(request: Request, patient_id: str):
         ]
 
     return templates.TemplateResponse(
+        request,
         "doctor_patient_history.html",
         {
             "request": request,
@@ -260,6 +262,7 @@ def doctor_records(request: Request, appointment_id: str):
     prescriptions = [decrypt_body("prescriptions", *row) for row in prescriptions]
 
     return templates.TemplateResponse(
+        request,
         "doctor_records.html",
         {
             "request": request,
@@ -469,6 +472,7 @@ def patient_records(request: Request):
             table, record.pop("record_id"), record["appointment_id"], record["body"]
         )
     return templates.TemplateResponse(
+        request,
         "my_records.html",
         {"request": request, "role": user["role"], "records": records},
     )

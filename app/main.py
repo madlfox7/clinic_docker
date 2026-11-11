@@ -96,6 +96,7 @@ def _error_page(request: Request, status_code: int, headers=None, message=None):
     except Exception:
         role = None
     return templates.TemplateResponse(
+        request,
         "error.html",
         {
             "request": request,
