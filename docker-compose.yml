@@ -53,8 +53,8 @@ services:
           -f /docker-entrypoint-initdb.d/roles.sql
         psql -X -v ON_ERROR_STOP=1 -h db -U "$$POSTGRES_USER" -d "$$POSTGRES_DB" \
           -f /migrations/rls.sql
+        [ -s /run/secrets/clinic_api_password ] || { echo 'clinic_api_password missing' >&2; exit 1; }
         psql -X -v ON_ERROR_STOP=1 -h db -U "$$POSTGRES_USER" -d "$$POSTGRES_DB" \
-          -v clinic_api_password="$$(cat /run/secrets/clinic_api_password)" \
           -f /migrations/set_api_password.sql
 
   api:

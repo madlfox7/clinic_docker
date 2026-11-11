@@ -277,3 +277,15 @@ def test_init_secrets_does_not_overwrite_field_key():
     assert "keep    secrets/field_encryption_key" in run.stdout
     for value in _field_key_values():
         assert value not in run.stdout + run.stderr
+
+
+def test_migrate_keeps_api_password_out_of_argv():
+    compose = (ROOT / "docker-compose.yml").read_text(encoding="utf-8")
+    migrate = compose.split("\n  migrate:", 1)[1].split("\n  api:", 1)[0]
+    assert "-v clinic_api_password" not in migrate
+    assert "$$(cat /run/secrets/clinic_api_password)" not in migrate
+    assert "[ -s /run/secrets/clinic_api_password ] || " in migrate
+    sql = (ROOT / "db" / "set_api_password.sql").read_text(encoding="utf-8")
+    assert "\\set clinic_api_password `cat /run/secrets/clinic_api_password`" in sql
+    assert "SET log_statement = 'none';" in sql
+    assert "ALTER ROLE clinic_api PASSWORD :'clinic_api_password';" in sql
