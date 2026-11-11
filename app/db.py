@@ -9,6 +9,7 @@ from passlib.context import CryptContext
 
 from csrf import csrf_token
 from secret_files import read_secret
+from static_assets import static_url
 
 
 
@@ -17,6 +18,7 @@ pwd = CryptContext(schemes=["bcrypt"], deprecated="auto")
 log = logging.getLogger("clinic")
 templates = Jinja2Templates(directory="templates")
 templates.env.globals["csrf_token"] = csrf_token
+templates.env.globals["static_url"] = static_url
 
 ROLE_BY_APP = {
     "guest": "app_guest",

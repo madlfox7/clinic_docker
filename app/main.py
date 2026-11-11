@@ -4,12 +4,14 @@ import re
 from fastapi import Depends, FastAPI, Request
 from fastapi.exceptions import RequestValidationError
 from starlette.exceptions import HTTPException as StarletteHTTPException
+from fastapi.staticfiles import StaticFiles
 from starlette.middleware.sessions import SessionMiddleware
 
 from csrf import CSRF_ERROR_DETAIL, verify_csrf
 from db import load_session_user, log, templates
 from field_crypto import FieldDecryptError, init_keyring
 from secret_files import read_secret
+from static_assets import STATIC_DIR
 from routes_admin import router as admin_router
 from routes_auth import router as auth_router
 from routes_booking import router as booking_router
@@ -135,3 +137,5 @@ app.include_router(booking_router)
 app.include_router(admin_router)
 app.include_router(records_router)
 app.include_router(schedule_router)
+# CSS/JS/SVG only; StaticFiles never lists directories and does not follow symlinks.
+app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
