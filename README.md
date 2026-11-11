@@ -49,6 +49,8 @@ cp .env.example .env
 
 `.env` содержит только несекретные настройки. Пароли БД, ключ сессии и пароль SMTP лежат в `secrets/` (не коммитится) и попадают в контейнеры как Docker secrets в `/run/secrets/`. `scripts/init_secrets.sh` создаёт недостающие файлы, не перезаписывает существующие и удаляет из `.env` устаревшие строки `POSTGRES_PASSWORD`, `CLINIC_API_PASSWORD`, `SESSION_SECRET` и `SMTP_PASSWORD`. Если раньше пароли были в `.env`, после этого пересоздайте стек: `docker compose down -v && ./scripts/init_secrets.sh && docker compose up --build -d`. Подробнее: `docs/sec_doc.md`.
 
+Внешний вид и заголовки безопасности. Интерфейс собран на Bootstrap 5.3.8 (только CSS, без Bootstrap JS и без CDN): `app/static/vendor/bootstrap/bootstrap.min.css` плюс свои `app/static/app.css`, `app/static/app.js` и SVG-иконки в `app/static/img/`. Статику отдаёт `api` (`StaticFiles`, без листинга каталогов); в шаблонах ссылки вида `/static/app.css?v=<хэш>`, поэтому такие URL кешируются надолго, а HTML-страницы отдаются с `Cache-Control: no-store`. В шаблонах нет `style=`, `on...=`, встроенных `<script>`/`<style>` и `data:`-картинок; подтверждения — атрибут `data-confirm`. nginx ставит строгий `Content-Security-Policy` (без `unsafe-inline`) и остальные заголовки на все ответы. Версия и SHA-256 Bootstrap, политика и правила — в `docs/sec_doc.md`, раздел 8.
+
 Пароль демо-учёток (`admin`, `doc`, `doc2`, `pat`, `pat2`, `reg` @clinic.local) берётся только из `secrets/demo_password`: `seed` читает его как Docker secret и падает с ошибкой, если файла нет или он пуст. `init_secrets.sh` генерирует этот файл, если его нет, и не перезаписывает существующий, поэтому свой начальный пароль можно положить туда заранее. Известного демо-пароля в репозитории больше нет. Seed создаёт учётки только в пустой базе, поэтому в уже существующей базе остаётся старый демо-пароль, пока её не пересоздать: `docker compose down -v && ./scripts/init_secrets.sh && docker compose up --build -d`.
 
 Текст заметок (`visit_notes.body`) и рецептов (`prescriptions.body`) шифруется в `api` (AES-256-GCM, библиотека `cryptography`) до записи в базу и расшифровывается только при показе врачу или пациенту. В базе и в дампе лежит пакет `fe2:<key_id>:<nonce>:<шифротекст>:<тег>`, а не текст; база принимает в этих колонках только такие пакеты. Пакет привязан к своей записи: в проверку целостности входят таблица, id строки и id визита, поэтому пакет, скопированный в другую строку (даже той же таблицы), не расшифровывается — `api` показывает ошибку, а не чужой текст. Ключ — файл `secrets/field_encryption_key` в формате `<key_id>:<64 hex>`; его создаёт `init_secrets.sh` (только если файла нет, существующий не перезаписывает и значение не печатает). Ключ монтируется как Docker secret только в `api`; `db`, `migrate` и `seed` его не получают, в SQL он не передаётся. Права на файл `600` плюс ACL на чтение для пользователя api (uid 10001), то есть не world-readable. Если `setfacl` нет, выполните `sudo chown 10001:10001 secrets/field_encryption_key secrets/field_encryption_previous_keys` (права `600` останутся). Без ключа или с пустым/битым ключом `api` не стартует.
@@ -83,6 +85,12 @@ current tree:
 │   ├── routes_booking.py
 │   ├── routes_records.py
 │   ├── routes_schedule.py
+│   ├── static_assets.py
+│   ├── static
+│   │   ├── app.css
+│   │   ├── app.js
+│   │   ├── img/*.svg
+│   │   └── vendor/bootstrap/{bootstrap.min.css,LICENSE}
 │   └── templates
 │       ├── admin_audit.html
 │       ├── admin_doctor_form.html
@@ -112,7 +120,9 @@ current tree:
 │   │   └── Dockerfile
 │   └── proxy
 │       ├── Dockerfile
-│       └── nginx.conf
+│       ├── html_no_store.conf
+│       ├── nginx.conf
+│       └── security_headers.conf
 ├── docker-compose.yml
 ├── down_the_rabbit-hole.md
 ├── experiments
