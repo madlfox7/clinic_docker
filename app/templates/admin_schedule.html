@@ -1,4 +1,5 @@
 {% extends "base.html" %}
+{% from "_status.html" import status_badge %}
 {% block title %}Schedule management{% endblock %}
 {% block content %}
 <h1>Schedule management</h1>
@@ -235,7 +236,7 @@
       <td>{{ item.doctor_name }} ({{ item.doctor_email }})</td>
       <td>{{ item.starts_on }}–{{ item.ends_on }}</td>
       <td>{{ item.comment }}</td>
-      <td><span class="badge {% if item.status == 'pending' %}text-bg-warning{% elif item.status == 'approved' %}text-bg-success{% else %}text-bg-secondary{% endif %}">{{ item.status }}</span></td>
+      <td>{{ status_badge(item.status) }}</td>
       <td>{{ item.created_at.strftime("%Y-%m-%d %H:%M") }}</td>
       <td>
         {% if item.status == "pending" %}

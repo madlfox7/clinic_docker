@@ -1,4 +1,5 @@
 {% extends "base.html" %}
+{% from "_status.html" import status_badge %}
 {% block title %}Patient history{% endblock %}
 {% block content %}
 <h1>Patient history</h1>
@@ -13,7 +14,7 @@
     <h3>{{ visit.starts_at.strftime("%Y-%m-%d %H:%M") }} — {{ visit.service_name }}</h3>
     <p>
       {{ visit.starts_at.strftime("%H:%M") }}–{{ visit.ends_at.strftime("%H:%M") }}
-      — {{ visit.status }}
+      — {{ status_badge(visit.status) }}
       {% if visit.records_available %}
         — <a href="/doctor/appointments/{{ visit.id }}/records">Open visit record</a>
       {% endif %}

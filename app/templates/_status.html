@@ -1,0 +1,12 @@
+{#- Shared status badge. The CSS class comes only from this fixed table; unknown statuses get a neutral badge. -#}
+{%- macro status_badge(status) -%}
+{%- set classes = {
+  "scheduled": "text-bg-primary",
+  "completed": "text-bg-success",
+  "cancelled": "text-bg-secondary",
+  "pending": "text-bg-warning",
+  "approved": "text-bg-success",
+  "rejected": "text-bg-secondary",
+} -%}
+<span class="badge status-badge {{ classes.get(status, 'text-bg-light border') }}">{{ status }}</span>
+{%- endmacro -%}

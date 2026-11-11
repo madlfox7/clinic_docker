@@ -1213,7 +1213,7 @@ def test_medical_records_are_scoped_and_audited():
 			assert "Appointment cancelled." in cancelled.text
 			doctor_schedule = doctor.get("/doctor/appointments")
 			assert re.search(
-				rf'<li class="is-cancelled">\s*{re.escape(PAT)}[\s\S]*?\(cancelled[\s\S]*?'
+				rf'<li class="is-cancelled">\s*{re.escape(PAT)}[\s\S]*?<span class="badge status-badge text-bg-secondary">cancelled</span>[\s\S]*?'
 				rf'href="/doctor/appointments/{appointment_id}/records"',
 				doctor_schedule.text,
 			)
@@ -1542,7 +1542,7 @@ def test_records_on_completed_visit_and_survive_status_change():
 			) == "2"
 
 			my = pat.get("/my").text
-			assert "(completed)" in my
+			assert '<span class="badge status-badge text-bg-success">completed</span>' in my
 			assert f"before-{marker}" in my and f"after-{marker}" in my
 
 			again = doctor.post(f"/doctor/appointments/{visit}/complete")
@@ -1811,7 +1811,7 @@ def test_admin_can_cancel_future_appointments_separately_from_block():
 			) == "scheduled"
 			doctor_schedule = doc.get("/doctor/appointments").text
 			assert PAT in doctor_schedule
-			assert "scheduled, account blocked" in doctor_schedule
+			assert '<span class="badge status-badge text-bg-primary">scheduled</span> (account blocked)' in doctor_schedule
 
 			html = admin.get("/admin/users").text
 			patient_row_match = re.search(
@@ -1832,13 +1832,13 @@ def test_admin_can_cancel_future_appointments_separately_from_block():
 			) == "cancelled"
 			doctor_schedule = doc.get("/doctor/appointments").text
 			assert re.search(
-				rf'<li class="is-cancelled">\s*{re.escape(PAT)}[\s\S]*?\(cancelled',
+				rf'<li class="is-cancelled">\s*{re.escape(PAT)}[\s\S]*?<span class="badge status-badge text-bg-secondary">cancelled</span>',
 				doctor_schedule,
 			)
 			admin.post(f"/admin/users/{user_id}/unblock")
 			login(pat, PAT)
 			assert appointment_id not in appointment_ids(pat.get("/my").text)
-			assert "(cancelled)" in pat.get("/my").text
+			assert '<span class="badge status-badge text-bg-secondary">cancelled</span>' in pat.get("/my").text
 			assert "/admin/users" in cancelled.url.path
 		finally:
 			if user_id:
@@ -3122,7 +3122,7 @@ def test_registrar_day_list_doctor_calendar_and_time_off_approval():
 
 			doctor_calendar = doctor.get(f"/doctor/calendar?day={selected_day}")
 			assert doctor_calendar.status_code == 200
-			assert f"{PAT} — scheduled" in doctor_calendar.text
+			assert f'{PAT} — <span class="badge status-badge text-bg-primary">scheduled</span>' in doctor_calendar.text
 			assert "Available" in doctor_calendar.text
 			assert 'action="/slots/' not in doctor_calendar.text
 			assert "Save hours" not in doctor_calendar.text
@@ -3194,7 +3194,7 @@ def test_registrar_day_list_doctor_calendar_and_time_off_approval():
 				f"/doctor/calendar?day={selected_day}"
 			)
 			assert re.search(
-				rf'<li class="is-cancelled">[\s\S]*?{re.escape(PAT)} — cancelled',
+				rf'<li class="is-cancelled">[\s\S]*?{re.escape(PAT)} — <span class="badge status-badge text-bg-secondary">cancelled</span>',
 				calendar_after_cancel.text,
 			)
 			assert "Available" in calendar_after_cancel.text
@@ -4389,7 +4389,7 @@ def test_doctor_calendar_shows_cancelled_visit_and_slot_stays_bookable():
 
 		calendar = doctor.get(f"/doctor/calendar?day={day}").text
 		assert re.search(
-			rf'<li class="is-cancelled">\s*{start}[\s\S]*?{re.escape(PAT)} — cancelled',
+			rf'<li class="is-cancelled">\s*{start}[\s\S]*?{re.escape(PAT)} — <span class="badge status-badge text-bg-secondary">cancelled</span>',
 			calendar,
 		)
 		assert re.search(rf"<li>\s*{start}[\s\S]*?Available", calendar)

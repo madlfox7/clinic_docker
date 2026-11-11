@@ -1,4 +1,5 @@
 {% extends "base.html" %}
+{% from "_status.html" import status_badge %}
 {% block title %}{{ calendar_title }}{% endblock %}
 {% block content %}
 
@@ -65,14 +66,14 @@
           {% if event.status == "cancelled" %}
             <li class="is-cancelled">
               {{ event.starts_at.strftime("%H:%M") }}–{{ event.ends_at.strftime("%H:%M") }} —
-              {{ event.service_name }} — {{ event.patient_email or "Patient" }} — cancelled
+              {{ event.service_name }} — {{ event.patient_email or "Patient" }} — {{ status_badge("cancelled") }}
               {% if event.closed_reasons %}<strong> — Closed</strong>{% endif %}
             </li>
           {% else %}
             <li>
               {{ event.starts_at.strftime("%H:%M") }}–{{ event.ends_at.strftime("%H:%M") }} —
               {{ event.service_name }} —
-              {% if event.patient_email %}{{ event.patient_email }} — {{ event.status }}
+              {% if event.patient_email %}{{ event.patient_email }} — {{ status_badge(event.status) }}
               {% elif event.status == "available" %}Available
               {% elif event.status == "closed" %}Closed — {{ event.closed_reasons|join(", ") }}
               {% else %}Past{% endif %}
@@ -97,7 +98,7 @@
               <td>{{ event.doctor_name }}</td>
               <td>{{ event.service_name }}</td>
               <td>{{ event.patient_email }}</td>
-              <td>{{ event.status }}</td>
+              <td>{{ status_badge(event.status) }}</td>
             </tr>
           {% endfor %}
         {% else %}
@@ -114,7 +115,7 @@
             <span class="slot-time">{{ event.starts_at.strftime("%H:%M") }}–{{ event.ends_at.strftime("%H:%M") }}</span>
             — {{ event.doctor_name }} — {{ event.service_name }}
             {% if event.patient_email %}— {{ event.patient_email }}{% endif %}
-            — {{ event.status }}
+            — {{ status_badge(event.status) }}
           </li>
         {% endfor %}
       {% else %}
@@ -152,7 +153,7 @@
                   {% if role == "registrar" %}<br>{{ event.doctor_name }}{% endif %}
                   <br>{{ event.service_name }}
                   {% if event.patient_email %}<br>{{ event.patient_email }}{% endif %}
-                  <br>{{ event.status }}
+                  <br>{{ status_badge(event.status) }}
                   {% if event.closed_reasons %} — {{ event.closed_reasons|join(", ") }}{% endif %}
                 </div>
               {% endfor %}
@@ -178,7 +179,7 @@
               {% if role == "registrar" %}— {{ event.doctor_name }}{% endif %}
               — {{ event.service_name }}
               {% if event.patient_email %}— {{ event.patient_email }}{% endif %}
-              — {{ event.status }}
+              — {{ status_badge(event.status) }}
               {% if event.closed_reasons %} — {{ event.closed_reasons|join(", ") }}{% endif %}
             </li>
           {% endfor %}
@@ -212,7 +213,7 @@
   <ul class="clinic-list">
     {% for item in requests %}
       <li>
-        {{ item.starts_on }}–{{ item.ends_on }} — {{ item.status }} —
+        {{ item.starts_on }}–{{ item.ends_on }} — {{ status_badge(item.status) }} —
         {{ item.comment }} ({{ item.created_at.strftime("%Y-%m-%d %H:%M") }})
       </li>
     {% else %}

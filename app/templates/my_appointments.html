@@ -1,4 +1,5 @@
 {% extends "base.html" %}
+{% from "_status.html" import status_badge %}
 {% block title %}My appointments{% endblock %}
 {% block content %}
 <h1>My appointments</h1>
@@ -27,7 +28,7 @@
   {% for a in items %}
     <li{% if a.status == "cancelled" %} class="is-cancelled"{% endif %}>
       {{ a.doctor_name }} — {{ a.service_name }} —
-      {{ a.starts_at }} - {{ a.ends_at }} ({{ a.status }})
+      {{ a.starts_at }} - {{ a.ends_at }} {{ status_badge(a.status) }}
       — {{ a.duration_minutes }} min service{% if a.buffer_minutes %} + {{ a.buffer_minutes }} min buffer{% endif %}
       {% if a.status == "scheduled" and a.cancellable %}
         <form class="inline-form" method="post" action="/appointments/{{ a.id }}/cancel" data-confirm="Cancel this appointment?">

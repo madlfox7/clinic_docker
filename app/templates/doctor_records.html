@@ -1,4 +1,5 @@
 {% extends "base.html" %}
+{% from "_status.html" import status_badge %}
 {% block title %}Clinical records{% endblock %}
 {% block content %}
 <h1>Clinical records</h1>
@@ -6,7 +7,7 @@
   <div class="card-body">
 <p class="mb-1">{{ appointment.patient_email }} — {{ appointment.doctor_name }}</p>
 <p class="mb-1">{{ appointment.starts_at.strftime("%Y-%m-%d %H:%M") }}–{{ appointment.ends_at.strftime("%H:%M") }}</p>
-<p>Status: {{ appointment.status }}</p>
+<p>Status: {{ status_badge(appointment.status) }}</p>
 <a class="btn btn-outline-primary btn-sm" href="/doctor/appointments">Back to my appointments</a>
 {% if can_complete %}
 <form class="inline-form" method="post" action="/doctor/appointments/{{ appointment.id }}/complete" data-confirm="Mark this appointment as completed?">
