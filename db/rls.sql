@@ -321,6 +321,56 @@ BEGIN
 END;
 $function$;
 
+-- Sign-in journal (auth.*), called only from the SECURITY DEFINER auth
+-- functions below. One INSERT per call; auth.rate_limited is written at most
+-- once per 15 minutes for the same reason, source and account. A journal error
+-- never changes the answer to the client: it is reported as a server warning
+-- (no email, password or token in it) and the sign-in goes on.
+CREATE OR REPLACE FUNCTION public.record_auth_event(
+  event_action text,
+  event_user_id integer,
+  event_role text,
+  event_reason text,
+  event_source text
+)
+RETURNS void
+LANGUAGE plpgsql
+SET search_path = pg_catalog, public, pg_temp
+AS $function$
+DECLARE
+  short_source text := left(event_source, 64);
+BEGIN
+  BEGIN
+    IF event_action = 'auth.rate_limited' AND EXISTS (
+      SELECT 1 FROM public.audit_events
+      WHERE action = 'auth.rate_limited'
+        AND created_at > CURRENT_TIMESTAMP - INTERVAL '15 minutes'
+        AND reason IS NOT DISTINCT FROM event_reason
+        AND source IS NOT DISTINCT FROM short_source
+        AND actor_user_id IS NOT DISTINCT FROM event_user_id
+    ) THEN
+      RETURN;
+    END IF;
+    INSERT INTO public.audit_events (
+      actor_user_id, actor_role, action, target_type, target_id, reason, source
+    )
+    VALUES (
+      event_user_id,
+      CASE WHEN event_user_id IS NULL THEN 'anonymous' ELSE event_role END,
+      event_action,
+      'user',
+      event_user_id,
+      event_reason,
+      short_source
+    );
+  EXCEPTION WHEN OTHERS THEN
+    RAISE WARNING 'auth audit failed';
+  END;
+END;
+$function$;
+
+REVOKE ALL ON FUNCTION public.record_auth_event(text, integer, text, text, text) FROM PUBLIC;
+
 DROP FUNCTION IF EXISTS public.admin_reset_user_password(integer, text);
 
 DROP FUNCTION IF EXISTS public.request_patient_password_reset(text, text);
@@ -371,6 +421,9 @@ BEGIN
   IF attempt_found
      AND attempt_window > CURRENT_TIMESTAMP - INTERVAL '15 minutes'
      AND attempt_count >= 5 THEN
+    PERFORM public.record_auth_event(
+      'auth.rate_limited', NULL, NULL, 'password_reset', candidate_source
+    );
     RETURN QUERY SELECT NULL::text, TRUE, 'rate_limited'::text;
     RETURN;
   END IF;
@@ -382,6 +435,9 @@ BEGIN
     AND window_started_at > CURRENT_TIMESTAMP - INTERVAL '15 minutes';
 
   IF source_count >= 100 THEN
+    PERFORM public.record_auth_event(
+      'auth.rate_limited', NULL, NULL, 'password_reset', candidate_source
+    );
     RETURN QUERY SELECT NULL::text, TRUE, 'rate_limited'::text;
     RETURN;
   END IF;
@@ -659,6 +715,9 @@ BEGIN
        AND pair_failed_attempts >= 5
      )
      OR source_failed_attempts >= 100 THEN
+    PERFORM public.record_auth_event(
+      'auth.rate_limited', NULL, NULL, 'login', candidate_source
+    );
     RETURN QUERY
     SELECT NULL::integer, NULL::text, NULL::text, NULL::boolean,
            NULL::bigint, TRUE;
@@ -692,11 +751,30 @@ BEGIN
     DELETE FROM public.login_attempts
     WHERE email_fingerprint = email_key
       AND source_fingerprint = source_key;
+    -- Exactly one journal row in every branch keeps the timing equal.
+    IF matched_blocked THEN
+      PERFORM public.record_auth_event(
+        'auth.login.failure', matched_id, matched_role, 'blocked', candidate_source
+      );
+    ELSE
+      PERFORM public.record_auth_event(
+        'auth.login.success', matched_id, matched_role, NULL, candidate_source
+      );
+    END IF;
     RETURN QUERY
     SELECT matched_id, matched_email, matched_role, matched_blocked,
            matched_auth_version, FALSE;
     RETURN;
   END IF;
+
+  -- Unknown email: no account id and no email in the journal.
+  PERFORM public.record_auth_event(
+    'auth.login.failure',
+    CASE WHEN user_found THEN matched_id END,
+    matched_role,
+    'bad_credentials',
+    candidate_source
+  );
 
   INSERT INTO public.login_attempts (
     email_fingerprint, source_fingerprint, failed_attempts,
@@ -1492,6 +1570,11 @@ BEGIN
   WHERE user_id = actor_id
     AND created_at > CURRENT_TIMESTAMP - INTERVAL '15 minutes';
   IF recent_count >= 5 THEN
+    PERFORM public.record_auth_event(
+      'auth.rate_limited', actor_id,
+      (SELECT u.role FROM public.users AS u WHERE u.id = actor_id),
+      'email_change', NULL
+    );
     RETURN QUERY SELECT 'rate_limited'::text, NULL::text, NULL::text, NULL::text, NULL::text;
     RETURN;
   END IF;
@@ -2248,6 +2331,13 @@ BEGIN
   UPDATE public.users
   SET auth_version = auth_version + 1
   WHERE id = actor_id;
+  IF FOUND THEN
+    PERFORM public.record_auth_event(
+      'auth.logout', actor_id,
+      (SELECT u.role FROM public.users AS u WHERE u.id = actor_id),
+      NULL, NULL
+    );
+  END IF;
 END;
 $function$;
 

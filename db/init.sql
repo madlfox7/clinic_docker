@@ -619,3 +619,37 @@ CREATE TABLE IF NOT EXISTS audit_events (
 
 CREATE INDEX IF NOT EXISTS audit_events_created_at_idx
   ON audit_events (created_at DESC, id DESC);
+
+-- Sign-in events (auth.*) go to the same journal. A failed sign-in for an
+-- unknown email or a rate-limited request has no actor: actor_user_id is NULL
+-- and actor_role is 'anonymous'. The email itself is never stored, not even
+-- hashed. source is the client address the api already passes to the auth
+-- functions.
+ALTER TABLE audit_events ALTER COLUMN actor_user_id DROP NOT NULL;
+ALTER TABLE audit_events ADD COLUMN IF NOT EXISTS reason TEXT;
+ALTER TABLE audit_events ADD COLUMN IF NOT EXISTS source TEXT;
+ALTER TABLE audit_events DROP CONSTRAINT IF EXISTS audit_events_actor_role_check;
+ALTER TABLE audit_events ADD CONSTRAINT audit_events_actor_role_check
+  CHECK (actor_role IN ('admin', 'doctor', 'patient', 'registrar', 'anonymous'));
+ALTER TABLE audit_events DROP CONSTRAINT IF EXISTS audit_events_actor_check;
+ALTER TABLE audit_events ADD CONSTRAINT audit_events_actor_check
+  CHECK (
+    (actor_user_id IS NOT NULL AND actor_role <> 'anonymous')
+    OR (
+      actor_user_id IS NULL
+      AND actor_role = 'anonymous'
+      AND action IN ('auth.login.failure', 'auth.rate_limited')
+    )
+  );
+ALTER TABLE audit_events DROP CONSTRAINT IF EXISTS audit_events_reason_check;
+ALTER TABLE audit_events ADD CONSTRAINT audit_events_reason_check
+  CHECK (reason IS NULL OR reason IN (
+    'bad_credentials', 'blocked', 'login', 'password_reset', 'email_change'
+  ));
+ALTER TABLE audit_events DROP CONSTRAINT IF EXISTS audit_events_source_check;
+ALTER TABLE audit_events ADD CONSTRAINT audit_events_source_check
+  CHECK (source IS NULL OR length(source) <= 64);
+
+CREATE INDEX IF NOT EXISTS audit_events_rate_limited_idx
+  ON audit_events (created_at)
+  WHERE action = 'auth.rate_limited';

@@ -70,9 +70,9 @@ def admin_audit(request: Request):
     cur.execute(
         """
         SELECT e.created_at, u.email, e.actor_role, e.action,
-               e.target_type, e.target_id
+               e.target_type, e.target_id, e.reason, e.source
         FROM audit_events e
-        JOIN users u ON u.id = e.actor_user_id
+        LEFT JOIN users u ON u.id = e.actor_user_id
         ORDER BY e.created_at DESC, e.id DESC
         LIMIT 100
         """
@@ -85,6 +85,8 @@ def admin_audit(request: Request):
             "action": row[3],
             "target_type": row[4],
             "target_id": row[5],
+            "reason": row[6],
+            "source": row[7],
         }
         for row in cur.fetchall()
     ]

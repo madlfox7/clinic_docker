@@ -177,6 +177,8 @@ def test_login_throttles_repeated_failed_attempts():
 				f"""
 				DELETE FROM login_attempts
 				WHERE email_fingerprint = public.digest(lower('{email}'), 'sha256');
+				DELETE FROM audit_events
+				WHERE actor_user_id = (SELECT id FROM users WHERE email = '{email}');
 				DELETE FROM users WHERE email = '{email}'
 				"""
 			)
@@ -329,7 +331,8 @@ def test_weak_passwords_are_rejected_without_creating_users():
 		psql(
 			f"""
 			DELETE FROM audit_events
-			WHERE target_id = (SELECT id FROM users WHERE email = '{staff_email}');
+			WHERE target_id = (SELECT id FROM users WHERE email = '{staff_email}')
+			   OR actor_user_id = (SELECT id FROM users WHERE email = '{staff_email}');
 			DELETE FROM password_reset_tokens
 			WHERE user_id = (SELECT id FROM users WHERE email = '{staff_email}');
 			DELETE FROM users WHERE email = '{staff_email}';
@@ -476,6 +479,8 @@ def test_login_timing_does_not_reveal_whether_email_exists():
 			f"""
 			DELETE FROM login_attempts
 			WHERE email_fingerprint = public.digest(lower('{email}'), 'sha256');
+			DELETE FROM audit_events
+			WHERE actor_user_id = (SELECT id FROM users WHERE email = '{email}');
 			DELETE FROM users WHERE email = '{email}'
 			"""
 		)
@@ -4301,7 +4306,7 @@ def test_admin_can_create_staff_and_reset_password():
 			psql(
 				f"""
 				DELETE FROM audit_events
-				WHERE target_id IN ({ids_csv});
+				WHERE target_id IN ({ids_csv}) OR actor_user_id IN ({ids_csv});
 				DELETE FROM users WHERE id IN ({ids_csv});
 				"""
 			)
@@ -4516,7 +4521,10 @@ def test_cancelled_only_patient_is_not_own_patient_of_doctor():
 		assert listed.stdout.split()[-2] == "1", listed.stdout
 	finally:
 		_drop_visit(visit)
-		psql(f"DELETE FROM users WHERE id = {patient_id}")
+		psql(
+			f"DELETE FROM audit_events WHERE actor_user_id = {patient_id}; "
+			f"DELETE FROM users WHERE id = {patient_id}"
+		)
 
 
 def test_admin_cannot_cancel_started_visit():
