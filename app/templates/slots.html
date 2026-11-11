@@ -31,8 +31,8 @@
   <div class="alert alert-warning"><strong>This service is not currently available for this doctor. Choose another service.</strong></div>
 {% elif selected_service %}
   <p class="text-body-secondary">
-    Selected service: {{ selected_service.name }}.
-    Reserved time includes {{ selected_service.duration_minutes }} minutes for the service
+    Slots currently shown for: {{ selected_service.name }}.
+    Each reserves {{ selected_service.duration_minutes }} minutes for the service
     and {{ selected_service.buffer_minutes }} minutes for the buffer.
   </p>
 {% elif not services %}
