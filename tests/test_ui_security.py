@@ -345,6 +345,10 @@ def test_nginx_includes_security_headers_in_every_location():
         if "proxy_pass" in block:
             for header in ("Host", "Cookie", "X-Real-IP"):
                 assert f"proxy_set_header {header}" in block, block
+            # Client-supplied forwarding headers are overwritten, never passed on.
+            assert "proxy_set_header X-Forwarded-For $remote_addr;" in block, block
+            assert 'proxy_set_header Forwarded "";' in block, block
+            assert "proxy_add_x_forwarded_for" not in block, block
     for line in snippet.splitlines():
         if line.startswith("add_header"):
             assert line.rstrip().endswith(" always;"), line

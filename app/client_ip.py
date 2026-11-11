@@ -1,14 +1,21 @@
+import ipaddress
+
 from fastapi import Request
 
-from db import contains_nul, within_length
+from trusted_proxy import SCOPE_KEY
 
 
-def client_source(request: Request) -> str:
-    client_source = request.headers.get("x-real-ip")
-    if (
-        not client_source
-        or contains_nul(client_source)
-        or not within_length(client_source, 128)
-    ):
-        return request.client.host if request.client else "unknown"
-    return client_source
+def client_ip(request: Request) -> str:
+    """Client address for rate limits and the journal.
+
+    X-Real-IP is used only when the peer is the trusted proxy (which overwrites
+    it with $remote_addr) and it is a valid IP; otherwise the peer address.
+    """
+    peer = request.client.host if request.client else "unknown"
+    if request.scope.get(SCOPE_KEY):
+        raw = request.headers.get("x-real-ip", "")
+        try:
+            return str(ipaddress.ip_address(raw.strip()))
+        except ValueError:
+            return peer
+    return peer

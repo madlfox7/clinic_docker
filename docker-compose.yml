@@ -85,9 +85,11 @@ services:
       # medical field keys: api only, never db/migrate/seed
       - field_encryption_key
       - field_encryption_previous_keys
+    # app: only proxy reaches api:8000; mail: SMTP to mailpit or an outside server.
     networks:
-      - frontend
+      - app
       - backend
+      - mail
     depends_on:
       seed:
         condition: service_completed_successfully
@@ -121,17 +123,21 @@ services:
       - "127.0.0.1:8025:8025"
       - "127.0.0.1:1025:1025"
     networks:
-      - frontend
+      - mail
     restart: unless-stopped
 
   proxy:
     build:
       context: .
       dockerfile: docker/proxy/Dockerfile
+    # Listens on all interfaces by default; set CLINIC_PROXY_BIND=127.0.0.1 in .env
+    # to open the site on this machine only. Port lists from override files are
+    # appended, so an override that changes this port must use `ports: !override`.
     ports:
-      - "${CLINIC_PROXY_PORT:-8080}:8080"
+      - "${CLINIC_PROXY_BIND:-0.0.0.0}:${CLINIC_PROXY_PORT:-8080}:8080"
     networks:
       - frontend
+      - app
     depends_on:
       - api
     read_only: true
@@ -163,6 +169,9 @@ volumes:
   db_data:
 
 networks:
-  frontend:
+  frontend: {}
+  app:
+    internal: true
   backend:
     internal: true
+  mail: {}

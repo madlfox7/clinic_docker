@@ -13,6 +13,7 @@ from field_crypto import FieldDecryptError, init_keyring
 from secret_files import read_secret
 from session_config import ABSOLUTE_SECONDS, HTTPS_ONLY, SAME_SITE
 from static_assets import STATIC_DIR
+from trusted_proxy import TrustedProxyMiddleware
 from routes_admin import router as admin_router
 from routes_auth import router as auth_router
 from routes_booking import router as booking_router
@@ -85,6 +86,8 @@ app.add_middleware(
     https_only=HTTPS_ONLY,
     path="/",
 )
+# Added last, so it runs first: only the proxy (or loopback) reaches the app.
+app.add_middleware(TrustedProxyMiddleware)
 
 _ERROR_TEXT = {
     400: ("Bad request", "The request could not be processed."),

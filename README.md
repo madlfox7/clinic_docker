@@ -70,6 +70,8 @@ http://127.0.0.1:8025.
 
 (nginx only, for now without tls)
 
+По умолчанию proxy слушает все интерфейсы (`0.0.0.0:8080`) и без TLS доступен из локальной сети. Чтобы открыть сайт только на этой машине, добавьте в `.env` строку `CLINIC_PROXY_BIND=127.0.0.1` и выполните `docker compose up -d proxy`.
+
 
 ```bash
 docker compose ps

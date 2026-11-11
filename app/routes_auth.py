@@ -27,7 +27,7 @@ from db import (
     templates,
     within_length,
 )
-from client_ip import client_source
+from client_ip import client_ip
 from mailer import send_account_message, send_password_changed, send_password_reset, smtp_ready
 
 router = APIRouter()
@@ -385,13 +385,7 @@ def login(
         or not within_length(password, MAX_PASSWORD_LENGTH)
     ):
         return _login_page(request, "Invalid email or password", 401, doctor_id=doctor_id)
-    client_source = request.headers.get("x-real-ip")
-    if (
-        not client_source
-        or contains_nul(client_source)
-        or not within_length(client_source, 128)
-    ):
-        client_source = request.client.host if request.client else "unknown"
+    client_source = client_ip(request)
     conn = db()
     try:
         with conn.cursor() as cur:
@@ -537,7 +531,7 @@ def forgot_password(request: Request, email: str = Form(...)):
                 SELECT reset_token, rate_limited, outcome
                 FROM public.request_password_reset(%s, %s, FALSE)
                 """,
-                (normalized_email, client_source(request)),
+                (normalized_email, client_ip(request)),
             )
             row = cur.fetchone()
         conn.commit()

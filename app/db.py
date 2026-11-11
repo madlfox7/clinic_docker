@@ -9,6 +9,7 @@ import psycopg2.errors
 from fastapi.templating import Jinja2Templates
 from passlib.context import CryptContext
 
+from client_ip import client_ip
 from csrf import csrf_token
 from secret_files import read_secret
 from session_config import (
@@ -238,8 +239,6 @@ def db_as_guest():
 #
 def _session_expired(request, user_id: int, role: str, reason: str) -> None:
     """Journal one auth.session_expired event; a journal error never blocks the request."""
-    from client_ip import client_source
-
     try:
         conn = db_as({"id": user_id, "role": role})
         try:
@@ -247,7 +246,7 @@ def _session_expired(request, user_id: int, role: str, reason: str) -> None:
                 with conn.cursor() as cur:
                     cur.execute(
                         "SELECT public.record_session_expired(%s, %s)",
-                        (reason, client_source(request)),
+                        (reason, client_ip(request)),
                     )
         finally:
             conn.close()
