@@ -98,7 +98,8 @@ def test_application_database_timezone_is_yerevan():
 
 
 def logout(c: httpx.Client) -> None:
-	c.get("/logout")
+	response = c.post("/logout")
+	assert response.status_code == 200 and response.url.path == "/", response.status_code
 
 
 def slot_ids(html: str) -> list[str]:
@@ -371,7 +372,7 @@ def test_weak_passwords_are_rejected_without_creating_users():
 		)
 		assert "password_error=same" in str(same.url)
 		assert "different from your current one" in same.text
-		guest.get("/logout")
+		logout(guest)
 		spaced_password = "Policy Check 2026"
 		spaced = guest.post(
 			"/register",
@@ -398,7 +399,7 @@ def test_weak_passwords_are_rejected_without_creating_users():
 			data={"email": stored_email, "password": spaced_password},
 		)
 		assert "Role: patient" in spaced_login.text
-		guest.get("/logout")
+		logout(guest)
 		stripped_login = guest.post(
 			"/login",
 			data={"email": stored_email, "password": "PolicyCheck2026"},
@@ -3800,7 +3801,7 @@ def test_public_registration_is_patient_only_and_can_book(request):
 		)
 		assert "password_changed=1" in str(changed.url)
 		assert "Password changed successfully." in changed.text
-		guest.get("/logout")
+		logout(guest)
 		old_password_login = guest.post(
 			"/login", data={"email": email, "password": password}
 		)
@@ -4435,6 +4436,34 @@ def test_logout_revokes_copied_session_cookie():
 		page = replay.get("/my")
 		assert page.status_code == 303
 		assert page.headers["location"].endswith("/login")
+
+
+def test_logout_requires_post_with_csrf_token():
+	with client() as c:
+		login(c, PAT2)
+		assert c.get("/my").url.path == "/my"
+		# GET no longer logs out: 405 and the session stays valid.
+		get = c.get("/logout")
+		assert get.status_code == 405
+		assert c.get("/my").url.path == "/my"
+		# POST without a token or with a wrong one is rejected and keeps the session.
+		missing = c.post("/logout", csrf=False)
+		assert missing.status_code == 403
+		wrong = c.post("/logout", data={"csrf_token": "x" * 43})
+		assert wrong.status_code == 403
+		assert c.get("/my").url.path == "/my"
+		# The menu carries the POST form with the session token, not a link.
+		cabinet = c.get("/me").text
+		assert 'href="/logout"' not in cabinet
+		form = re.search(r'<form[^>]*method="post" action="/logout"><input type="hidden" name="csrf_token" value="([^"]+)">', cabinet)
+		assert form and form.group(1) == c.csrf_token()
+		copied = dict(c.cookies)
+		done = c.post("/logout", data={"csrf_token": form.group(1)})
+		assert done.status_code == 200 and done.url.path == "/"
+		assert 'action="/logout"' not in done.text and 'href="/login"' in done.text
+		assert c.get("/my", follow_redirects=False).status_code == 303
+	with CsrfClient(base_url=BASE, follow_redirects=False, timeout=10.0, cookies=copied) as replay:
+		assert replay.get("/my").status_code == 303
 
 
 def test_patient_cannot_forge_audit_events():

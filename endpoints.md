@@ -1,5 +1,5 @@
 
-GET /, GET /doctors, GET /login, GET /logout	все, включая guest
+GET /, GET /doctors, GET /login, POST /logout (CSRF; GET /logout -> 405)	все, включая guest
 POST /login	все; уже вошедший не перелогинивается
 GET /me	любая сессия, иначе /login
 GET /doctors/{id}/slots	patient, registrar

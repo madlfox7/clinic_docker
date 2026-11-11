@@ -6,7 +6,11 @@
 <h1>Login</h1>
 {% if email %}
 <p>You are already logged in as {{ email }}. Log out before using another account.</p>
-<p><a class="btn btn-primary" href="/me">Cabinet</a> <a class="btn btn-outline-secondary" href="/logout">Logout</a></p>
+<div><a class="btn btn-primary" href="/me">Cabinet</a>
+<form class="inline-form" method="post" action="/logout">
+  <input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}">
+  <button class="btn btn-outline-secondary" type="submit">Logout</button>
+</form></div>
 {% else %}
 {% if error %}<div class="alert alert-danger" role="alert">{{ error }}</div>{% endif %}
 {% if registered %}<div class="alert alert-success">Account created. Please log in.</div>{% endif %}

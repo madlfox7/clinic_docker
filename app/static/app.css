@@ -69,6 +69,8 @@ pre { white-space: pre-wrap; word-break: break-word; font-family: inherit; margi
 .site-nav { gap: .25rem; }
 .site-nav .nav-link { color: #3d4f5c; border-radius: var(--bs-border-radius); padding: .4rem .7rem; }
 .site-nav .nav-link:hover { background: var(--bs-primary-bg-subtle); color: var(--bs-primary-text-emphasis); }
+.nav-form { margin: 0; }
+.nav-form .nav-link { background: none; border: 0; font: inherit; cursor: pointer; }
 .site-nav .nav-link.active { background: var(--bs-primary); color: #ffffff; }
 .mobile-nav > summary { list-style: none; cursor: pointer; display: inline-flex; align-items: center; gap: .35rem;
   padding: .35rem .6rem; border: 1px solid #cfdbe1; border-radius: var(--bs-border-radius); }

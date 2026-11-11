@@ -856,7 +856,9 @@ def change_own_password(
     return RedirectResponse("/me?password_changed=1", status_code=303)
 
 
-@router.get("/logout")
+# POST only: the global CSRF check runs first, so a cross-site request or a
+# missing/wrong token cannot end the session. GET /logout answers 405.
+@router.post("/logout")
 def logout(request: Request):
     user = viewer(request)
     if user:

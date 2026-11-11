@@ -39,7 +39,11 @@
   {%- macro nav_links(extra_class) %}
     <ul class="nav site-nav {{ extra_class }}">
       {%- for href, label in nav_items %}
+      {%- if href == "/logout" %}
+      <li class="nav-item"><form class="nav-form" method="post" action="/logout"><input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}"><button class="nav-link" type="submit">{{ label }}</button></form></li>
+      {%- else %}
       <li class="nav-item"><a class="nav-link{% if href == nav_state.active %} active{% endif %}" href="{{ href }}"{% if href == nav_state.active %} aria-current="page"{% endif %}>{{ label }}</a></li>
+      {%- endif %}
       {%- endfor %}
     </ul>
   {%- endmacro %}

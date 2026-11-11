@@ -79,3 +79,4 @@ git grep -n "<значение секрета>"                                 
 - Лог nginx — формат `clinic_path` (путь без query string) по умолчанию для всего `server` и явно в `/reset-password`, `/confirm-email`.
 - Проверка: `curl -sI http://localhost:8080/`, `.../reset-password?token=x`, `.../static/app.css`, `.../no-such-page` — везде те же заголовки; `pytest tests/test_ui_security.py`.
 
+- Выход: только `POST /logout` из формы в меню со скрытым CSRF-токеном (общая проверка `verify_csrf`). Без токена или с неверным — 403, сессия не завершается. `GET /logout` отвечает 405 и сессию не трогает, поэтому чужая страница не может разлогинить пользователя ссылкой или картинкой.
