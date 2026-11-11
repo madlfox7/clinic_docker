@@ -9,11 +9,17 @@ http://127.0.0.1:8025
 make start
 ```
 
-Для управления контейнерами используйте `make stop`, `make restart` и `make clean`.
-`make clean` останавливает и удаляет контейнеры и сеть Compose, сохраняя данные БД.
-`make start` пересоздаёт Compose-окружение с удалением томов, включая данные БД.
-`make fclean` также удаляет тома и запускает `docker system prune -a`, который может
-удалить неиспользуемые Docker-ресурсы других проектов.
+Цели `make` (`make` или `make help` выводит список):
+
+- `make start` — создаёт `.env` и `secrets/`, если их нет, собирает и запускает стек; данные БД сохраняются, повторный запуск ничего не удаляет.
+- `make stop`, `make restart` — остановка и перезапуск контейнеров.
+- `make clean` — удаляет контейнеры и сети Compose (`down`), данные БД сохраняются.
+- `make logs`, `make ps` — логи всех сервисов (`logs -f`) и список контейнеров.
+- `make test` — тесты против запущенного стека; адреса и проект меняются переменными `TEST_BASE` (по умолчанию `http://localhost:8080`), `TEST_MAILPIT` (`http://127.0.0.1:8025`), `TEST_PROJECT`, а также `PYTHON` и `PYTEST_ARGS`.
+
+**`make reset` и `make fclean` удаляют БД.** `reset` выполняет `down -v` и затем `start`; `fclean` выполняет `down -v --rmi local --remove-orphans` только для этого Compose-проекта (`docker system prune` не вызывается). Обе цели сначала спрашивают подтверждение; `CONFIRM=yes` пропускает вопрос, без `yes` ничего не удаляется.
+
+Все цели вызывают `$(COMPOSE)` (по умолчанию `docker compose`), поэтому другой проект можно указать так: `make start COMPOSE="docker compose -p planera"`.
 
 
 
@@ -48,7 +54,7 @@ API и `seed` подключаются к PostgreSQL ролью `clinic_api`; `P
 
 
 
-Для первого запуска и пересоздания окружения используйте `make start`.
+Для первого запуска используйте `make start`; пересоздать окружение с пустой БД — `make reset`.
 
 `.env` содержит только несекретные настройки. Пароли БД, ключ сессии и пароль SMTP лежат в `secrets/` (не коммитится) и попадают в контейнеры как Docker secrets в `/run/secrets/`. `scripts/init_secrets.sh` создаёт недостающие файлы, не перезаписывает существующие и удаляет из `.env` устаревшие строки `POSTGRES_PASSWORD`, `CLINIC_API_PASSWORD`, `SESSION_SECRET` и `SMTP_PASSWORD`. Если раньше пароли были в `.env`, после этого пересоздайте стек: `docker compose down -v && ./scripts/init_secrets.sh && docker compose up --build -d`. Подробнее: `docs/sec_doc.md`.
 
