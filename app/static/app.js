@@ -50,6 +50,16 @@
     window.alert(box.dataset.popupMessage);
   });
 
+  // Admin cabinet dropdown (<details>): close it on an outside click or Escape.
+  document.querySelectorAll("details.cabinet-menu").forEach((menu) => {
+    document.addEventListener("click", (event) => {
+      if (menu.open && !menu.contains(event.target)) menu.open = false;
+    });
+    document.addEventListener("keydown", (event) => {
+      if (event.key === "Escape" && menu.open) menu.open = false;
+    });
+  });
+
   // Booking form: show the chosen service's duration and buffer under the short option label.
   const serviceSelect = document.getElementById("service-select");
   const serviceDetails = document.getElementById("service-details");

@@ -128,3 +128,15 @@ fieldset legend { font-size: 1rem; font-weight: 600; }
 
 .patient-results { list-style: none; padding-left: 0; }
 .patient-results > li { margin-bottom: .25rem; }
+
+/* Admin cabinet dropdown in the desktop header (<details>, no JS required) */
+.cabinet-menu { position: relative; }
+.cabinet-menu > summary { list-style: none; cursor: pointer; white-space: nowrap; }
+.cabinet-menu > summary::-webkit-details-marker { display: none; }
+.cabinet-menu > summary::after { content: ""; display: inline-block; margin-left: .35rem; vertical-align: .15em;
+  border-top: .3em solid currentColor; border-right: .3em solid transparent; border-left: .3em solid transparent; }
+.cabinet-menu-list { position: absolute; right: 0; top: calc(100% + .25rem); z-index: 1000; min-width: 10rem;
+  padding: .35rem; background: #ffffff; border: 1px solid #dde5ea; border-radius: var(--bs-border-radius);
+  box-shadow: 0 .5rem 1rem rgba(16, 42, 54, .12); }
+.cabinet-menu-list .nav-link { width: 100%; text-align: left; white-space: nowrap; }
+.site-nav .nav-link { white-space: nowrap; }

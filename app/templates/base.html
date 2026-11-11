@@ -21,7 +21,8 @@
     {%- set nav_items = nav_items + [("/registrar/appointments", "Appointments calendar"), ("/registrar/patients", "Patients")] %}
   {%- endif %}
   {%- if role == "admin" %}
-    {%- set nav_items = nav_items + [("/admin/users", "Manage staff"), ("/admin/doctors", "Manage doctors"), ("/admin/services", "Manage services"), ("/admin/settings", "Clinic settings"), ("/admin/schedule", "Schedule"), ("/admin/audit", "Audit log")] %}
+    {#- Short labels so the admin menu fits on one line; the public list is "Doctor list" to avoid two "Doctors". #}
+    {%- set nav_items = [("/", "Home"), ("/doctors", "Doctor list"), ("/admin/users", "Staff"), ("/admin/doctors", "Doctors"), ("/admin/services", "Services"), ("/admin/schedule", "Schedule"), ("/admin/audit", "Audit"), ("/admin/settings", "Settings")] %}
   {%- endif %}
   {%- if role in ("patient", "doctor", "registrar", "admin") %}
     {%- set nav_items = nav_items + [("/me", "Cabinet"), ("/logout", "Logout")] %}
@@ -36,22 +37,40 @@
       {%- if href|length > nav_state.active|length %}{% set nav_state.active = href %}{% endif %}
     {%- endif %}
   {%- endfor %}
-  {%- macro nav_links(extra_class) %}
-    <ul class="nav site-nav {{ extra_class }}">
-      {%- for href, label in nav_items %}
+  {#- Admin on wide screens: Cabinet, Settings and Logout sit in a <details> dropdown (no JS needed). #}
+  {%- set cabinet_menu_hrefs = ("/me", "/admin/settings", "/logout") %}
+  {%- macro nav_item(href, label) %}
       {%- if href == "/logout" %}
       <li class="nav-item"><form class="nav-form" method="post" action="/logout"><input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}"><button class="nav-link" type="submit">{{ label }}</button></form></li>
       {%- else %}
       <li class="nav-item"><a class="nav-link{% if href == nav_state.active %} active{% endif %}" href="{{ href }}"{% if href == nav_state.active %} aria-current="page"{% endif %}>{{ label }}</a></li>
       {%- endif %}
+  {%- endmacro %}
+  {%- macro nav_links(extra_class, dropdown=false) %}
+    {%- set use_dropdown = dropdown and role == "admin" %}
+    <ul class="nav site-nav {{ extra_class }}">
+      {%- for href, label in nav_items %}
+      {%- if not (use_dropdown and href in cabinet_menu_hrefs) %}{{ nav_item(href, label) }}{% endif %}
       {%- endfor %}
+      {%- if use_dropdown %}
+      <li class="nav-item">
+        <details class="cabinet-menu">
+          <summary class="nav-link{% if nav_state.active in cabinet_menu_hrefs %} active{% endif %}">Cabinet</summary>
+          <ul class="nav flex-column site-nav cabinet-menu-list">
+            {%- for href, label in nav_items %}
+            {%- if href in cabinet_menu_hrefs %}{{ nav_item(href, label) }}{% endif %}
+            {%- endfor %}
+          </ul>
+        </details>
+      </li>
+      {%- endif %}
     </ul>
   {%- endmacro %}
   <header class="site-header">
     <div class="container py-2">
       <div class="d-flex align-items-center justify-content-between flex-wrap gap-2">
         <a class="brand" href="/"><img src="{{ static_url('img/logo.svg') }}" alt="" width="32" height="32"><span>Clinic</span></a>
-        <nav class="d-none d-lg-block" aria-label="Main">{{ nav_links("justify-content-end") }}</nav>
+        <nav class="d-none d-lg-block" aria-label="Main">{{ nav_links("justify-content-end flex-nowrap", true) }}</nav>
         <details class="mobile-nav d-lg-none w-100">
           <summary><img src="{{ static_url('img/menu.svg') }}" alt="" width="24" height="24"><span>Menu</span></summary>
           <nav aria-label="Main">{{ nav_links("flex-column") }}</nav>

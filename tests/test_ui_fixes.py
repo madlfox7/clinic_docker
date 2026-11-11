@@ -37,3 +37,24 @@ def test_status_badge_classes_come_from_a_fixed_table():
         # A raw status must never be written into a class attribute.
         assert not re.search(r'class="[^"]*\{\{[^}]*status[^}]*\}\}', text.replace("classes.get(status", "")), path.name
 
+
+
+def test_admin_menu_uses_short_labels_and_keeps_every_link():
+    with _client() as c:
+        assert "Cabinet" in c.post("/login", data={"email": "admin@clinic.local", "password": PASSWORD}).text
+        html = c.get("/admin/audit").text
+    desktop = html.split('<nav class="d-none d-lg-block"', 1)[1].split("</nav>", 1)[0]
+    for href, label in (("/admin/users", "Staff"), ("/admin/doctors", "Doctors"), ("/admin/services", "Services"),
+                        ("/admin/schedule", "Schedule"), ("/admin/audit", "Audit")):
+        assert re.search(rf'href="{href}"[^>]*>{label}</a>', desktop), label
+    menu = desktop.split('<details class="cabinet-menu">', 1)[1].split("</details>", 1)[0]
+    assert 'href="/me"' in menu and 'href="/admin/settings"' in menu
+    assert '<form class="nav-form" method="post" action="/logout"><input type="hidden" name="csrf_token" value="' in menu
+    assert "Manage staff" not in desktop
+
+
+def test_non_admin_menu_has_no_admin_links():
+    with _client() as c:
+        assert "Cabinet" in c.post("/login", data={"email": "reg@clinic.local", "password": PASSWORD}).text
+        html = c.get("/registrar/patients").text
+    assert "/admin/" not in html and "cabinet-menu" not in html
