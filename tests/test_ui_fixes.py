@@ -53,7 +53,7 @@ def test_admin_menu_uses_short_labels_and_keeps_every_link():
         assert re.search(rf'href="{href}"[^>]*>{label}</a>', desktop), label
     menu = desktop.split('<details class="cabinet-menu">', 1)[1].split("</details>", 1)[0]
     assert 'href="/me"' in menu and 'href="/admin/settings"' in menu
-    assert '<form class="nav-form" method="post" action="/logout" data-confirm="Выйти из системы?"><input type="hidden" name="csrf_token" value="' in menu
+    assert '<form class="nav-form" method="post" action="/logout" data-confirm="Log out?"><input type="hidden" name="csrf_token" value="' in menu
     assert "Manage staff" not in desktop
 
 
@@ -213,7 +213,7 @@ def test_blocked_patient_with_doctor_value_stays_logged_out():
 # Every logout form (nav, admin <details>, mobile menu, already-logged-in login
 # page) asks before submitting. Cancel is handled in app.js via data-confirm.
 
-LOGOUT_CONFIRM = "Выйти из системы?"
+LOGOUT_CONFIRM = "Log out?"
 
 _ROLE_PAGES = {
     PAT: ("/", "/doctors", "/me", "/my", "/my/records", "/login"),
