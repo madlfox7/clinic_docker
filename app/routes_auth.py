@@ -32,6 +32,7 @@ from db import (
     within_length,
 )
 from client_ip import client_ip
+from date_filters import clean_search, escape_like
 from mailer import (
     send_account_message,
     send_email_verification,
@@ -1171,16 +1172,45 @@ def doctors_list(request: Request):
         candidate = request.query_params.get("patient_email", "").strip()
         if not contains_nul(candidate) and within_length(candidate, MAX_EMAIL_LENGTH):
             selected_patient_email = candidate
+    filter_errors = []
     conn = db()
     cur = conn.cursor()
+    cur.execute(
+        """
+        SELECT DISTINCT d.specialty
+        FROM doctors d
+        JOIN users u ON u.id = d.user_id
+        WHERE u.role = 'doctor' AND NOT u.blocked
+        ORDER BY d.specialty
+        """
+    )
+    specialties = [row[0] for row in cur.fetchall()]
+    raw_specialty = request.query_params.get("specialty", "")
+    selected_specialty = ""
+    if raw_specialty:
+        if raw_specialty in specialties:
+            selected_specialty = raw_specialty
+        else:
+            filter_errors.append("invalid_filter")
+    search, search_error = clean_search(request.query_params.get("q"))
+    if search_error:
+        filter_errors.append(search_error)
     cur.execute(
         """
         SELECT d.id, d.full_name, d.specialty, d.experience_years
         FROM doctors d
         JOIN users u ON u.id = d.user_id
         WHERE u.role = 'doctor' AND NOT u.blocked
+          AND (%s = '' OR d.specialty = %s)
+          AND (%s = '' OR d.full_name ILIKE %s ESCAPE '\\')
         ORDER BY d.id
-        """
+        """,
+        (
+            selected_specialty,
+            selected_specialty,
+            search,
+            f"%{escape_like(search)}%",
+        ),
     )
     rows = cur.fetchall()
     cur.close()
@@ -1207,5 +1237,10 @@ def doctors_list(request: Request):
             "doctors": doctors,
             "role": user["role"] if user else "guest",
             "selected_patient_email": selected_patient_email,
+            "specialties": specialties,
+            "selected_specialty": selected_specialty,
+            "search": search,
+            "filter_errors": filter_errors,
+            "filtered": bool(selected_specialty or search),
         },
     )

@@ -15,6 +15,7 @@ from db import (
     templates,
     within_length,
 )
+from date_filters import calendar_state
 from routes_auth import normalize_email_query, require_user, update_patient_profile
 
 
@@ -248,43 +249,21 @@ def registrar_start_booking(request: Request, patient_id: str):
     )
 
 
-CALENDAR_MIN_YEAR = 1900
-CALENDAR_MAX_YEAR = 2100
-
-
 def _calendar_state(request: Request):
-    errors = []
-    raw_day = request.query_params.get("day")
-    selected_day = date.today()
-    if raw_day is not None:
-        try:
-            parsed_day = date.fromisoformat(raw_day)
-            if parsed_day.isoformat() != raw_day:
-                raise ValueError
-            if not CALENDAR_MIN_YEAR <= parsed_day.year <= CALENDAR_MAX_YEAR:
-                errors.append("day_out_of_range")
-            else:
-                selected_day = parsed_day
-        except ValueError:
-            errors.append("invalid_day")
-
-    raw_view = request.query_params.get("view", "day")
-    if raw_view not in ("day", "week"):
-        errors.append("invalid_view")
-        view = "day"
-    else:
-        view = raw_view
-    return selected_day, view, errors
+    return calendar_state(request, default_view="day")
 
 
-def _calendar_url(path, view, day, doctor_id=None):
+def _calendar_url(path, view, day, doctor_id=None, extra=None):
     params = {"view": view, "day": day.isoformat()}
     if doctor_id is not None:
         params["doctor_id"] = str(doctor_id)
+    for key, value in (extra or {}).items():
+        if value not in (None, ""):
+            params[key] = str(value)
     return f"{path}?{urlencode(params)}"
 
 
-def _calendar_navigation(path, view, selected_day, doctor_id=None):
+def _calendar_navigation(path, view, selected_day, doctor_id=None, extra=None):
     if view == "week":
         week_start = selected_day - timedelta(days=selected_day.weekday())
         previous_day = week_start - timedelta(days=7)
@@ -293,11 +272,11 @@ def _calendar_navigation(path, view, selected_day, doctor_id=None):
         previous_day = selected_day - timedelta(days=1)
         next_day = selected_day + timedelta(days=1)
     return {
-        "previous_url": _calendar_url(path, view, previous_day, doctor_id),
-        "today_url": _calendar_url(path, view, date.today(), doctor_id),
-        "next_url": _calendar_url(path, view, next_day, doctor_id),
-        "day_view_url": _calendar_url(path, "day", selected_day, doctor_id),
-        "week_view_url": _calendar_url(path, "week", selected_day, doctor_id),
+        "previous_url": _calendar_url(path, view, previous_day, doctor_id, extra),
+        "today_url": _calendar_url(path, view, date.today(), doctor_id, extra),
+        "next_url": _calendar_url(path, view, next_day, doctor_id, extra),
+        "day_view_url": _calendar_url(path, "day", selected_day, doctor_id, extra),
+        "week_view_url": _calendar_url(path, "week", selected_day, doctor_id, extra),
     }
 
 

@@ -5,6 +5,24 @@
 {% if role == "registrar" and selected_patient_email %}
   <div class="alert alert-info">Select a doctor to book for {{ selected_patient_email }}.</div>
 {% endif %}
+{% if filter_errors %}<div class="alert alert-warning">Some filters were not valid and were ignored.</div>{% endif %}
+<div class="card mb-3"><div class="card-body">
+<form class="row g-2 align-items-end" method="get" action="/doctors">
+  {% if role == "registrar" and selected_patient_email %}<input type="hidden" name="patient_email" value="{{ selected_patient_email }}">{% endif %}
+  <div class="col-md-4"><label class="form-label w-100 mb-0">Specialty
+    <select class="form-select" name="specialty">
+      <option value="">All specialties</option>
+      {% for item in specialties %}
+        <option value="{{ item }}" {% if item == selected_specialty %}selected{% endif %}>{{ item }}</option>
+      {% endfor %}
+    </select>
+  </label></div>
+  <div class="col-md-5"><label class="form-label w-100 mb-0">Doctor name
+    <input class="form-control" type="search" name="q" maxlength="100" value="{{ search }}">
+  </label></div>
+  <div class="col-md-3"><button class="btn btn-primary w-100" type="submit">Find doctors</button></div>
+</form>
+</div></div>
 <div class="row g-3">
   {% for d in doctors %}
     <div class="col-sm-6 col-lg-4">
@@ -24,7 +42,7 @@
       </div>
     </div>
   {% else %}
-    <p>No doctors available.</p>
+    <p>{% if filtered %}No doctors match these filters.{% else %}No doctors available.{% endif %}</p>
   {% endfor %}
 </div>
 {% if not role %}

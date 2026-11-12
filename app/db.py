@@ -31,6 +31,19 @@ templates = Jinja2Templates(directory="templates")
 templates.env.globals["csrf_token"] = csrf_token
 templates.env.globals["static_url"] = static_url
 
+
+def visit_when(starts_at, ends_at=None) -> str:
+    """Readable visit time for the UI: "Thu, 12 Nov 2026 09:00–09:30"."""
+    if starts_at is None:
+        return ""
+    text = starts_at.strftime("%a, %d %b %Y %H:%M")
+    if ends_at is not None:
+        text += "\u2013" + ends_at.strftime("%H:%M")
+    return text
+
+
+templates.env.filters["visit_when"] = visit_when
+
 ROLE_BY_APP = {
     "guest": "app_guest",
     "patient": "app_patient",

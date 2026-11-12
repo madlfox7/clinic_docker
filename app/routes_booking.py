@@ -1,4 +1,5 @@
 import psycopg2
+from datetime import date, timedelta
 from typing import Optional
 from urllib.parse import quote
 
@@ -16,6 +17,7 @@ from db import (
     templates,
     within_length,
 )
+from date_filters import calendar_state, day_start, url_with
 from field_crypto import decrypt_body
 from mailer import deliver_appointment_emails
 from routes_auth import _login_doctor_id, _normalize_registration_email, require_user
@@ -42,6 +44,23 @@ def _overlap_redirect(doctor_id, service_id, patient_email_query=""):
     )
 
 
+def _slots_navigation(doctor_id, view, selected_day, extra):
+    """Back/today/forward links for the slot list; keeps service, patient and filter."""
+    step = timedelta(days=7 if view == "week" else 1)
+    path = f"/doctors/{doctor_id}/slots"
+
+    def link(day, link_view=view):
+        return url_with(path, {**extra, "view": link_view, "day": day.isoformat()})
+
+    return {
+        "previous_url": link(selected_day - step),
+        "today_url": link(date.today()),
+        "next_url": link(selected_day + step),
+        "day_view_url": link(selected_day, "day"),
+        "week_view_url": link(selected_day, "week"),
+    }
+
+
 @router.get("/doctors/{doctor_id}/slots")
 def doctor_slots(request: Request, doctor_id: str):
     user, denied = require_user(
@@ -54,6 +73,11 @@ def doctor_slots(request: Request, doctor_id: str):
     doctor_id = parse_strict_int(doctor_id, min_value=1)
     if doctor_id is None:
         return RedirectResponse("/doctors", status_code=303)
+    selected_day, view, date_errors = calendar_state(request, default_view="week")
+    window_days = 7 if view == "week" else 1
+    window_start = day_start(selected_day)
+    window_end = day_start(selected_day + timedelta(days=window_days))
+    hide_taken = role == "registrar" and request.query_params.get("hide_taken") == "1"
     error = request.query_params.get("error")
     booked = request.query_params.get("booked")
     booking_confirmation = None
@@ -237,13 +261,17 @@ def doctor_slots(request: Request, doctor_id: str):
               ON ds.doctor_id = s.doctor_id AND ds.service_id = s.service_id
             WHERE s.doctor_id = %s
               AND s.service_id = %s
+              AND s.starts_at >= %s
+              AND s.starts_at < %s
             ORDER BY s.starts_at
             """,
-            (user["id"], doctor_id, selected_service["id"]),
+            (user["id"], doctor_id, selected_service["id"], window_start, window_end),
         )
         rows = cur.fetchall()
         if role == "patient":
             rows = [row for row in rows if not row[9] and not row[10]]
+        elif hide_taken:
+            rows = [row for row in rows if not row[6]]
     cur.close()
     conn.close()
     if not doc:
@@ -305,6 +333,25 @@ def doctor_slots(request: Request, doctor_id: str):
             "conflict": conflict,
             "selected_patient": selected_patient,
             "role": role,
+            "selected_day": selected_day,
+            "view": view,
+            "window_last_day": selected_day + timedelta(days=window_days - 1),
+            "date_errors": date_errors,
+            "hide_taken": hide_taken,
+            "navigation": _slots_navigation(
+                doctor_id,
+                view,
+                selected_day,
+                {
+                    "service_id": selected_service["id"] if selected_service else None,
+                    "patient_email": (
+                        selected_patient["email"]
+                        if role == "registrar" and selected_patient
+                        else None
+                    ),
+                    "hide_taken": "1" if hide_taken else None,
+                },
+            ),
         },
     )
 

@@ -750,7 +750,17 @@ print(json.dumps({
                 data={"email": PATIENT_A, "password": demo_password()},
             )
             assert login.status_code == 200
-            page = client.get(f"/doctors/{result['doctor_b_id']}/slots")
+            slot_b_day = compose_exec(
+                "db",
+                [
+                    "psql", "-X", "-q", "-At", "-v", "ON_ERROR_STOP=1",
+                    "-U", "clinic", "-d", "clinic", "-c",
+                    f"SELECT starts_at::date FROM slots WHERE id={slot_b}",
+                ],
+            )
+            page = client.get(
+                f"/doctors/{result['doctor_b_id']}/slots", params={"day": slot_b_day}
+            )
             assert page.status_code == 200
             assert f'action="/slots/{slot_b}/book"' not in page.text
             assert "Unavailable" in page.text

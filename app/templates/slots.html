@@ -22,11 +22,43 @@
           {%- if shown_service %}Reserved time: {{ shown_service.duration_minutes }} min + {{ shown_service.buffer_minutes }} min buffer{% endif -%}
         </div>
       </div>
+      <div class="col-sm-6 col-md-2"><label class="form-label w-100 mb-1">View
+        <select class="form-select" name="view">
+          <option value="week" {% if view == "week" %}selected{% endif %}>Week</option>
+          <option value="day" {% if view == "day" %}selected{% endif %}>Day</option>
+        </select>
+      </label></div>
+      <div class="col-sm-6 col-md-2"><label class="form-label w-100 mb-1">From
+        <input class="form-control" type="date" name="day" value="{{ selected_day.isoformat() }}" required>
+      </label></div>
+      {% if role == "registrar" %}
+        <input type="hidden" name="patient_email" value="{{ selected_patient.email if selected_patient else '' }}">
+        <div class="col-md-8"><label class="form-check-label"><input class="form-check-input" type="checkbox" name="hide_taken" value="1" {% if hide_taken %}checked{% endif %}> Show only free slots</label></div>
+      {% endif %}
       <div class="col-md-4">
         <button class="btn btn-primary w-100" type="submit">Show slots for this service</button>
       </div>
     </form>
   </div>
+</div>
+{% for date_error in date_errors %}
+  {% if date_error == "invalid_day" %}<div class="alert alert-warning">Invalid date; showing today.</div>
+  {% elif date_error == "day_out_of_range" %}<div class="alert alert-warning">Date must be between years 1900 and 2100; showing today.</div>
+  {% elif date_error == "invalid_view" %}<div class="alert alert-warning">Invalid view; showing a week.</div>{% endif %}
+{% endfor %}
+<div class="d-flex flex-wrap gap-2 align-items-center mb-3">
+  <div class="btn-group" role="group" aria-label="Move">
+    <a class="btn btn-outline-primary btn-sm" href="{{ navigation.previous_url }}" aria-label="Previous">←</a>
+    <a class="btn btn-outline-primary btn-sm" href="{{ navigation.today_url }}">Today</a>
+    <a class="btn btn-outline-primary btn-sm" href="{{ navigation.next_url }}" aria-label="Next">→</a>
+  </div>
+  <div class="btn-group" role="group" aria-label="View">
+    <a class="btn btn-sm {% if view == 'day' %}btn-primary{% else %}btn-outline-primary{% endif %}" href="{{ navigation.day_view_url }}">Day</a>
+    <a class="btn btn-sm {% if view == 'week' %}btn-primary{% else %}btn-outline-primary{% endif %}" href="{{ navigation.week_view_url }}">Week</a>
+  </div>
+  <span class="text-body-secondary">
+    {% if view == "week" %}{{ selected_day.strftime("%a, %d %b %Y") }} – {{ window_last_day.strftime("%a, %d %b %Y") }}{% else %}{{ selected_day.strftime("%a, %d %b %Y") }}{% endif %}
+  </span>
 </div>
 {% if service_error %}
   <div class="alert alert-warning"><strong>This service is not currently available for this doctor. Choose another service.</strong></div>
@@ -64,7 +96,7 @@
   <div class="alert alert-danger" role="alert" data-popup-message="Your appointment times overlap.">
   <p class="mb-1"><strong>Booking failed.</strong> Your appointment times overlap.</p>
   {% if conflict %}
-    <p class="mb-1">Existing appointment: {{ conflict.doctor_name }} — {{ conflict.starts_at }} - {{ conflict.ends_at }}.</p>
+    <p class="mb-1">Existing appointment: {{ conflict.doctor_name }} — {{ conflict.starts_at|visit_when(conflict.ends_at) }}.</p>
     <p class="mb-0">Cause: appointment times overlap.</p>
   {% endif %}
   </div>
@@ -164,5 +196,7 @@
     </li>
   {% endfor %}
   </ul>
+{% else %}
+  {% if selected_service %}<div class="alert alert-secondary">No slots in this period. Use the arrows to look at other dates.</div>{% endif %}
 {% endfor %}
 {% endblock %}
