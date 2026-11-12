@@ -747,32 +747,37 @@ BEGIN
 
   password_matches := public.crypt(password_to_check, stored_hash) = stored_hash;
 
-  IF user_found AND password_matches AND stored_hash IS DISTINCT FROM dummy_hash THEN
+  -- Branch order: rate limit, one crypt, bad credentials, blocked (answered
+  -- exactly like bad credentials), success. Exactly one journal row in every
+  -- branch keeps the timing equal.
+  IF user_found AND password_matches AND stored_hash IS DISTINCT FROM dummy_hash
+     AND NOT matched_blocked THEN
     DELETE FROM public.login_attempts
     WHERE email_fingerprint = email_key
       AND source_fingerprint = source_key;
-    -- Exactly one journal row in every branch keeps the timing equal.
-    IF matched_blocked THEN
-      PERFORM public.record_auth_event(
-        'auth.login.failure', matched_id, matched_role, 'blocked', candidate_source
-      );
-    ELSE
-      PERFORM public.record_auth_event(
-        'auth.login.success', matched_id, matched_role, NULL, candidate_source
-      );
-    END IF;
+    PERFORM public.record_auth_event(
+      'auth.login.success', matched_id, matched_role, NULL, candidate_source
+    );
     RETURN QUERY
     SELECT matched_id, matched_email, matched_role, matched_blocked,
            matched_auth_version, FALSE;
     RETURN;
   END IF;
 
-  -- Unknown email: no account id and no email in the journal.
+  -- A blocked account with the right password takes the bad-credentials path
+  -- as a whole (attempt counter, one journal row, no row returned), so the
+  -- answer does not tell that the email exists and is blocked. Unknown email:
+  -- no account id and no email in the journal.
   PERFORM public.record_auth_event(
     'auth.login.failure',
     CASE WHEN user_found THEN matched_id END,
     matched_role,
-    'bad_credentials',
+    CASE
+      WHEN user_found AND password_matches
+           AND stored_hash IS DISTINCT FROM dummy_hash AND matched_blocked
+        THEN 'blocked'
+      ELSE 'bad_credentials'
+    END,
     candidate_source
   );
 

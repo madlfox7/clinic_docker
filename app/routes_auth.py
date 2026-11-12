@@ -411,8 +411,6 @@ def login(
         )
         response.headers["Retry-After"] = "900"
         return response
-    if row[3]:
-        return _login_page(request, "Account is blocked", 403, doctor_id=doctor_id)
     request.session.clear()
     signed_in_at = int(time.time())
     request.session["user_id"] = row[0]

@@ -203,7 +203,8 @@ def test_blocked_patient_with_doctor_value_stays_logged_out():
     try:
         with _client() as c:
             response = c.post("/login", data={"email": PAT2, "password": PASSWORD, "doctor": doctor_id})
-            assert response.status_code == 403 and "Account is blocked" in response.text
+            assert response.status_code == 401 and "Invalid email or password" in response.text
+            assert "Account is blocked" not in response.text
             assert c.get(f"/doctors/{doctor_id}/slots").url.path == "/login"
     finally:
         psql(f"UPDATE users SET blocked = FALSE WHERE email = '{PAT2}'")

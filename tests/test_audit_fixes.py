@@ -157,7 +157,8 @@ def test_blocked_login_is_journaled_as_failure():
         with _client() as c:
             mark = _audit_mark()
             page = c.post("/login", data={"email": PAT2, "password": PASSWORD})
-            assert page.status_code == 403
+            assert page.status_code == 401
+            assert "Invalid email or password" in page.text
             events = _auth_events_since(mark)
             assert [e[:4] for e in events] == [("auth.login.failure", str(pat2_id), "patient", "blocked")]
     finally:

@@ -1871,7 +1871,9 @@ def test_admin_block_pat():
 				"/login",
 				data={"email": PAT, "password": PASSWORD},
 			)
-			assert "Account is blocked" in response.text
+			assert response.status_code == 401
+			assert "Invalid email or password" in response.text
+			assert "Account is blocked" not in response.text
 		finally:
 			admin.post(f"/admin/users/{user_id}/unblock")
 
