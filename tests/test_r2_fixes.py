@@ -1,14 +1,25 @@
 """AUDIT_ROLES_2 fixes: neutral answer for a blocked account at sign-in,
-patient name and phone (patient_profiles)."""
+patient name and phone (patient_profiles), email confirmation before sign-in."""
+import json
 import os
+import re
 import subprocess
 import uuid
 from pathlib import Path
 
+import httpx
+
 from tests.clinical_notes import cleanup_cross_doctor_notes, insert_cross_doctor_notes
 from tests.csrf_client import CsrfClient
 from tests.demo_secret import demo_password
-from tests.registration import registration_form
+from tests.registration import (
+    MAILPIT,
+    confirm_registration,
+    latest_verification_token,
+    register_patient,
+    registration_form,
+    verification_messages,
+)
 
 ROOT = Path(__file__).resolve().parents[1]
 BASE = os.environ.get("CLINIC_TEST_BASE", "http://localhost:8080")
@@ -85,6 +96,8 @@ def _delete_user(email: str) -> None:
         f"DELETE FROM audit_events WHERE actor_user_id = (SELECT id FROM users WHERE email = '{email}') "
         f"OR (target_type IN ('user', 'patient') AND target_id = (SELECT id FROM users WHERE email = '{email}')); "
         f"DELETE FROM login_attempts WHERE email_fingerprint = public.digest('{email}', 'sha256'); "
+        f"DELETE FROM email_verification_attempts WHERE email_fingerprint = public.digest('{email}', 'sha256'); "
+        f"DELETE FROM password_reset_attempts WHERE email_fingerprint = public.digest('{email}', 'sha256'); "
         f"DELETE FROM users WHERE email = '{email}'"
     )
 
@@ -346,3 +359,344 @@ def test_guest_and_api_roles_have_no_profile_or_user_insert():
         "WHERE routine_name = 'register_patient' AND privilege_type = 'EXECUTE' AND grantee <> 'clinic'"
     )
     assert grantees == ["app_guest"]
+
+
+# --- R2-A-reg-no-email-confirm -----------------------------------------------
+
+CONFIRM_FIRST = "Please confirm your email before signing in."
+RESENT = "If this email belongs to an unconfirmed account, we sent a new link."
+NEUTRAL_INVALID = "This confirmation link is invalid or already used. If you already confirmed your email, sign in."
+REG_PASSWORD = "Confirm-Check-2026!"
+
+
+def _verified_at(email: str) -> str:
+    return _psql(f"SELECT coalesce(email_verified_at::text, 'NULL') FROM users WHERE email = '{email}'")[0]
+
+
+def _reset_messages(address: str) -> list[dict]:
+    response = httpx.get(
+        f"{MAILPIT}/api/v1/search",
+        params={"query": f'to:"{address}" subject:"Reset your clinic password"'},
+        timeout=5,
+    )
+    response.raise_for_status()
+    return response.json().get("messages") or []
+
+
+def _latest_reset_token(address: str) -> str:
+    messages = _reset_messages(address)
+    assert messages, "reset email was not delivered"
+    message_id = messages[0].get("ID") or messages[0].get("Id")
+    body = httpx.get(f"{MAILPIT}/api/v1/message/{message_id}", timeout=5).json().get("Text") or ""
+    match = re.search(r"reset-password\?token=([0-9a-f]{64})", body)
+    assert match, "reset link missing"
+    return match.group(1)
+
+
+def _in_api(script: str) -> dict:
+    completed = subprocess.run(
+        ["docker", "compose", "exec", "-T", "api", "python", "-"],
+        input=script, cwd=ROOT, capture_output=True, text=True,
+    )
+    assert completed.returncode == 0, completed.stderr[-2000:]
+    return json.loads(completed.stdout.strip().splitlines()[-1])
+
+
+def test_email_column_has_no_default_and_restart_keeps_pending_unconfirmed():
+    assert _psql(
+        "SELECT coalesce(column_default, 'none'), is_nullable FROM information_schema.columns "
+        "WHERE table_name = 'users' AND column_name = 'email_verified_at'"
+    ) == ["none|YES"]
+    email = f"restart-{uuid.uuid4().hex}@example.com"
+    try:
+        with _client() as guest:
+            register_patient(guest, email, REG_PASSWORD, confirm=False)
+        assert _verified_at(email) == "NULL"
+        rerun = subprocess.run(
+            ["docker", "compose", "exec", "-T", "db", "psql", "-X", "-q", "-U", "clinic", "-d", "clinic",
+             "-v", "ON_ERROR_STOP=1", "-f", "/docker-entrypoint-initdb.d/init.sql"],
+            cwd=ROOT, capture_output=True, text=True,
+        )
+        assert rerun.returncode == 0, rerun.stderr[-2000:]
+        assert _verified_at(email) == "NULL"
+        for demo in (ADMIN, DOC, REG, PAT, PAT2):
+            assert _verified_at(demo) != "NULL", demo
+    finally:
+        _delete_user(email)
+
+
+def test_registration_mails_once_and_sign_in_waits_for_confirmation():
+    stamp = uuid.uuid4().hex[:10]
+    email = f"confirm-{stamp}@example.com"
+    name = f"Confirm Person {stamp}"
+    try:
+        with _client() as guest:
+            created = register_patient(guest, email, REG_PASSWORD, confirm=False, full_name=name)
+            assert "registered=1" in str(created.url)
+            assert "sign-in will be available after confirmation" in created.text
+        messages = verification_messages(email)
+        assert len(messages) == 1
+        assert [to["Address"] for to in messages[0]["To"]] == [email]
+        assert name not in messages[0]["Subject"] and name not in json.dumps(messages[0]["To"])
+        assert name in messages[0]["Text"]
+        user_id = _user_id(email)
+        assert _verified_at(email) == "NULL"
+
+        with _client() as c:
+            for _ in range(2):
+                c.post("/login", data={"email": email, "password": "wrong-password"})
+            page = c.post("/login", data={"email": email, "password": REG_PASSWORD})
+            assert page.status_code == 403 and CONFIRM_FIRST in page.text
+            assert 'action="/resend-verification"' in page.text
+            assert c.get("/me").url.path == "/login"
+        assert _psql(
+            f"SELECT count(*) FROM login_attempts WHERE email_fingerprint = public.digest('{email}', 'sha256')"
+        ) == ["0"]
+        assert _psql(
+            "SELECT reason FROM audit_events WHERE action = 'auth.login.failure' "
+            f"AND actor_user_id = {user_id} ORDER BY id DESC LIMIT 1"
+        ) == ["unverified"]
+        wrong = _client().post("/login", data={"email": email, "password": "wrong-password"})
+        assert wrong.status_code == 401 and CONFIRM_FIRST not in wrong.text
+
+        token = latest_verification_token(email)
+        with _client() as c:
+            form = c.get("/verify-email", params={"token": token})
+            assert form.status_code == 200
+            assert email not in form.text and "@" not in form.text.split("<main", 1)[-1].split("</main>", 1)[0]
+            assert _verified_at(email) == "NULL", "GET must not confirm"
+            confirmed = c.post("/verify-email", data={"token": token})
+            assert confirmed.url.path == "/login" and "verified=1" in str(confirmed.url)
+            assert "Email confirmed." in confirmed.text
+            assert c.get("/me").url.path == "/login", "no automatic sign-in"
+            again = c.post("/verify-email", data={"token": token})
+            assert again.status_code == 400 and NEUTRAL_INVALID in again.text
+            stale_get = c.get("/verify-email", params={"token": token})
+            assert stale_get.status_code == 400
+        assert _verified_at(email) != "NULL"
+        assert _psql(
+            f"SELECT count(*) FROM email_verification_tokens WHERE user_id = {user_id} AND used_at IS NULL"
+        ) == ["0"]
+        with _client() as c:
+            _login(c, email, REG_PASSWORD)
+
+        events = _audit_rows_for(user_id, "user.email_verified")
+        assert events == [f"{user_id}|patient|user.email_verified|user|{user_id}"]
+        journal = "\n".join(_psql(
+            "SELECT concat_ws('|', action, target_type, target_id, reason, source, old_value, new_value) "
+            f"FROM audit_events WHERE actor_user_id = {user_id} OR target_id = {user_id}"
+        ))
+        for secret in (token, stamp, "000111", email):
+            assert secret not in journal
+    finally:
+        _delete_user(email)
+
+
+def test_expired_or_forged_tokens_are_invalid_without_500():
+    email = f"expired-{uuid.uuid4().hex}@example.com"
+    try:
+        with _client() as guest:
+            register_patient(guest, email, REG_PASSWORD, confirm=False)
+        token = latest_verification_token(email)
+        _psql(
+            "UPDATE email_verification_tokens SET expires_at = now() - interval '1 minute' "
+            f"WHERE user_id = {_user_id(email)}"
+        )
+        with _client() as c:
+            assert c.get("/verify-email", params={"token": token}).status_code == 400
+            expired = c.post("/verify-email", data={"token": token})
+            assert expired.status_code == 400 and NEUTRAL_INVALID in expired.text
+            for forged in ("", "abc", "g" * 64, token.upper(), token[:-1], token + "0", uuid.uuid4().hex * 2):
+                got = c.get("/verify-email", params={"token": forged})
+                assert got.status_code == 400 and "@" not in got.text.split("<main", 1)[-1].split("</main>", 1)[0]
+                posted = c.post("/verify-email", data={"token": forged})
+                assert posted.status_code == 400 and NEUTRAL_INVALID in posted.text
+        assert _verified_at(email) == "NULL"
+    finally:
+        _delete_user(email)
+
+
+def test_resend_answers_the_same_and_mails_only_unconfirmed_patients():
+    stamp = uuid.uuid4().hex[:10]
+    pending = f"resend-pending-{stamp}@example.com"
+    blocked = f"resend-blocked-{stamp}@example.com"
+    unknown = f"resend-unknown-{stamp}@example.com"
+    try:
+        with _client() as guest:
+            register_patient(guest, pending, REG_PASSWORD, confirm=False)
+            register_patient(guest, blocked, REG_PASSWORD, confirm=False)
+        _psql(f"UPDATE users SET blocked = TRUE WHERE email = '{blocked}'")
+        old_token = latest_verification_token(pending)
+        before = {address: len(verification_messages(address)) for address in (pending, blocked, unknown, PAT)}
+        answers = []
+        for address in (unknown, PAT, blocked, pending):
+            with _client() as c:
+                page = c.post("/resend-verification", data={"email": address})
+                answers.append((page.status_code, str(page.url).split("?", 1)[-1], RESENT in page.text))
+        assert answers == [(200, "resent=1", True)] * 4
+        after = {address: len(verification_messages(address)) for address in before}
+        assert after[unknown] == before[unknown] == 0
+        assert after[PAT] == before[PAT]
+        assert after[blocked] == before[blocked]
+        assert after[pending] == before[pending] + 1
+        new_token = latest_verification_token(pending)
+        assert new_token != old_token
+        with _client() as c:
+            stale = c.post("/verify-email", data={"token": old_token})
+            assert stale.status_code == 400
+        confirm_registration(pending)
+        assert _verified_at(pending) != "NULL"
+        assert _verified_at(blocked) == "NULL"
+    finally:
+        for address in (pending, blocked, unknown, PAT):
+            _psql(
+                "DELETE FROM email_verification_attempts "
+                f"WHERE email_fingerprint = public.digest('{address}', 'sha256')"
+            )
+        _delete_user(pending)
+        _delete_user(blocked)
+
+
+def test_resend_rate_limits_do_not_reveal_the_address():
+    stamp = uuid.uuid4().hex[:10]
+    pending = f"limit-pending-{stamp}@example.com"
+    unknown = f"limit-unknown-{stamp}@example.com"
+    try:
+        with _client() as guest:
+            register_patient(guest, pending, REG_PASSWORD, confirm=False)
+        for address in (pending, unknown):
+            with _client() as c:
+                for _ in range(7):
+                    page = c.post("/resend-verification", data={"email": address})
+                    assert page.status_code == 200 and RESENT in page.text
+        # one mail at registration plus five accepted resends; the rest is limited
+        assert len(verification_messages(pending)) == 6
+        assert len(verification_messages(unknown)) == 0
+        daily = f"limit-daily-{stamp}@example.com"
+        limited = _psql(
+            "SELECT string_agg(rate_limited::text, ',' ORDER BY g) FROM generate_series(1, 11) AS g, "
+            f"LATERAL public.request_email_verification('{daily}', 'daily-source-' || g)"
+        )
+        assert limited == [",".join(["false"] * 10 + ["true"])]
+        _psql(f"DELETE FROM email_verification_attempts WHERE email_fingerprint = public.digest('{daily}', 'sha256')")
+        assert _psql("SELECT count(*) FROM pg_proc WHERE proname = 'request_email_verification' "
+                     "AND prosrc LIKE '%password_reset_attempts%'") == ["0"]
+    finally:
+        _psql(f"DELETE FROM email_verification_attempts WHERE email_fingerprint = public.digest('{unknown}', 'sha256')")
+        _delete_user(pending)
+
+
+def test_smtp_failure_keeps_registration_and_resend_answers_the_same():
+    email = f"smtp-down-{uuid.uuid4().hex}@example.com"
+    script = f"""
+import json
+from starlette.requests import Request
+import routes_auth
+
+def boom(*args, **kwargs):
+    raise OSError("smtp down")
+
+routes_auth.send_email_verification = boom
+
+def request(path):
+    return Request({{"type": "http", "method": "POST", "path": path, "headers": [],
+                    "query_string": b"", "client": ("10.200.0.9", 4000), "session": {{}},
+                    "server": ("test", 80), "scheme": "http"}})
+
+created = routes_auth.register(request("/register"), email={email!r}, password={REG_PASSWORD!r},
+                               confirm_password={REG_PASSWORD!r}, full_name="Smtp Down", phone="+374 10 101010")
+resent = routes_auth.resend_verification(request("/resend-verification"), email={email!r})
+print(json.dumps({{"created": [created.status_code, created.headers["location"]],
+                  "resent": [resent.status_code, resent.headers["location"]]}}))
+"""
+    try:
+        result = _in_api(script)
+        assert result["created"] == [303, "/login?registered=1&mail=failed"]
+        assert result["resent"] == [303, "/login?resent=1"]
+        user_id = _user_id(email)
+        assert _psql(f"SELECT count(*) FROM patient_profiles WHERE user_id = {user_id}") == ["1"]
+        assert _psql(
+            f"SELECT count(*) FROM email_verification_tokens WHERE user_id = {user_id} AND used_at IS NULL"
+        ) == ["1"]
+        with _client() as c:
+            page = c.get("/login", params={"registered": "1", "mail": "failed"})
+            assert "could not be sent" in page.text and 'action="/resend-verification"' in page.text
+    finally:
+        _delete_user(email)
+
+
+def test_password_reset_confirms_email_and_locks_out_the_pre_registrant():
+    email = f"prehijack-{uuid.uuid4().hex}@example.com"
+    attacker_password = "Attacker-Pass-2026!"
+    owner_password = "Owner-Takes-Back-2026!"
+    try:
+        with _client() as attacker:
+            register_patient(attacker, email, attacker_password, confirm=False)
+        user_id = _user_id(email)
+        version_before = int(_psql(f"SELECT auth_version FROM users WHERE id = {user_id}")[0])
+        with _client() as owner:
+            sent = owner.post("/forgot-password", data={"email": email})
+            assert "sent=1" in str(sent.url)
+            assert len(_reset_messages(email)) == 1
+            changed = owner.post("/reset-password", data={
+                "token": _latest_reset_token(email),
+                "new_password": owner_password,
+                "confirm_password": owner_password,
+            })
+            assert "Password updated." in changed.text
+        assert _verified_at(email) != "NULL"
+        assert int(_psql(f"SELECT auth_version FROM users WHERE id = {user_id}")[0]) == version_before + 1
+        with _client() as attacker:
+            denied = attacker.post("/login", data={"email": email, "password": attacker_password})
+            assert denied.status_code == 401
+        with _client() as owner:
+            _login(owner, email, owner_password)
+        assert _audit_rows_for(user_id, "user.email_verified") == [
+            f"{user_id}|patient|user.email_verified|user|{user_id}"
+        ]
+    finally:
+        _delete_user(email)
+
+
+def test_staff_invite_is_unconfirmed_until_the_setup_link_is_used():
+    email = f"invite-{uuid.uuid4().hex}@example.com"
+    password = "Invited-Registrar-2026!"
+    try:
+        with _client() as admin:
+            _login(admin, ADMIN)
+            created = admin.post("/admin/users", data={"email": email, "role": "registrar"})
+            assert "Staff account created." in created.text
+        assert _verified_at(email) == "NULL"
+        with _client() as staff:
+            changed = staff.post("/reset-password", data={
+                "token": _latest_reset_token(email),
+                "new_password": password,
+                "confirm_password": password,
+            })
+            assert "Password updated." in changed.text
+            assert _verified_at(email) != "NULL"
+            _login(staff, email, password)
+    finally:
+        _psql(
+            f"DELETE FROM audit_events WHERE actor_user_id = (SELECT id FROM users WHERE email = '{email}') "
+            f"OR (target_type IN ('user', 'registrar') AND target_id = (SELECT id FROM users WHERE email = '{email}'))"
+        )
+        _delete_user(email)
+
+
+def test_blocked_unconfirmed_account_answers_401_not_403():
+    email = f"blocked-pending-{uuid.uuid4().hex}@example.com"
+    try:
+        with _client() as guest:
+            register_patient(guest, email, REG_PASSWORD, confirm=False)
+        _psql(f"UPDATE users SET blocked = TRUE WHERE email = '{email}'")
+        with _client() as c:
+            page = c.post("/login", data={"email": email, "password": REG_PASSWORD})
+            assert page.status_code == 401 and INVALID in page.text
+            assert CONFIRM_FIRST not in page.text and 'action="/resend-verification"' not in page.text
+        token = latest_verification_token(email)
+        with _client() as c:
+            assert c.post("/verify-email", data={"token": token}).status_code == 400
+        assert _verified_at(email) == "NULL"
+    finally:
+        _delete_user(email)

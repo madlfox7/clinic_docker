@@ -1,0 +1,20 @@
+{% extends "base.html" %}
+{% block title %}Confirm email{% endblock %}
+{% block content %}
+<div class="card auth-card">
+  <div class="card-body p-4">
+<h1>Confirm email</h1>
+{% if error %}
+  <div class="alert alert-danger" role="alert">This confirmation link is invalid or already used. If you already confirmed your email, sign in.</div>
+{% else %}
+  <p>Confirm the email address of your patient account.</p>
+  <form method="post" action="/verify-email">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}">
+    <input type="hidden" name="token" value="{{ token }}">
+    <button class="btn btn-primary w-100" type="submit">Confirm email</button>
+  </form>
+{% endif %}
+<p class="mt-3 mb-0"><a href="/login">Back to login</a></p>
+  </div>
+</div>
+{% endblock %}

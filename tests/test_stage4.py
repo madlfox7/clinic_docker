@@ -10,7 +10,7 @@ from pathlib import Path
 import httpx
 import pytest
 
-from tests.registration import PATIENT_FIELDS
+from tests.registration import PATIENT_FIELDS, confirm_registration
 from tests.csrf_client import CsrfClient
 from tests.demo_secret import demo_password
 from tests.field_key import PROBE_PACKET, decrypt, is_packet, seal_pending, sql_packet
@@ -369,6 +369,7 @@ def test_weak_passwords_are_rejected_without_creating_users():
 			},
 		)
 		assert "registered=1" in str(created.url)
+		confirm_registration(policy_email)
 		login_policy = guest.post(
 			"/login",
 			data={"email": f"  {policy_email.upper()}  ", "password": policy_password},
@@ -397,6 +398,7 @@ def test_weak_passwords_are_rejected_without_creating_users():
 		)
 		assert "registered=1" in str(spaced.url)
 		stored_email = f"spaced-{stamp}@example.com"
+		confirm_registration(stored_email)
 		assert psql(f"SELECT email FROM users WHERE email = '{stored_email}'") == stored_email
 		duplicate = guest.post(
 			"/register",
@@ -899,6 +901,7 @@ def test_patient_recovers_password_without_admin_reset():
 			)
 			assert "Account created." in registered.text
 			user_id = int(psql(f"SELECT id FROM users WHERE email = '{email}'"))
+			confirm_registration(email)
 			login(admin, ADMIN)
 			users_page = admin.get("/admin/users")
 			assert "Forgot password?" not in users_page.text
@@ -1091,6 +1094,7 @@ def test_owner_confirms_email_change_on_both_addresses():
 			)
 			assert "Account created." in registered.text
 			user_id = int(psql(f"SELECT id FROM users WHERE email = '{email}'"))
+			confirm_registration(email)
 			assert "Role: patient" in owner.post(
 				"/login", data={"email": email, "password": password}
 			).text
@@ -3778,7 +3782,9 @@ def test_public_registration_is_patient_only_and_can_book(request):
 		)
 		assert created.status_code == 200
 		assert "/login?registered=1" in str(created.url)
-		assert "Account created. Please log in." in created.text
+		assert "Account created." in created.text
+		assert "sign-in will be available after confirmation" in created.text
+		confirm_registration(email)
 		user_id = int(
 			psql(f"SELECT id FROM users WHERE email = '{email}'")
 		)

@@ -12,7 +12,7 @@ from urllib.parse import urlparse
 
 import pytest
 
-from tests.registration import PATIENT_FIELDS
+from tests.registration import PATIENT_FIELDS, confirm_registration
 from tests.csrf_client import CsrfClient
 from tests.demo_secret import demo_password
 from tests.test_rls_boundary import compose_exec, compose_exec_run
@@ -262,6 +262,7 @@ def test_password_change_keeps_sign_in_time():
     with _client(follow=True) as c:
         created = c.post("/register", data={**PATIENT_FIELDS, "email": email, "password": password, "confirm_password": password})
         assert "registered=1" in str(created.url)
+    confirm_registration(email)
     try:
         cookie = _aged_cookie_for(email, password, iat_ago=2 * 3600)
         iat = _payload(cookie)["iat"]

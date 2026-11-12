@@ -66,6 +66,52 @@ CHECK (auth_version >= 0);
 CREATE UNIQUE INDEX IF NOT EXISTS users_email_lower_unique
 ON users (lower(email));
 
+-- Email confirmation. NULL = not confirmed; the column has no DEFAULT, so every
+-- INSERT sets it explicitly (seed: now(); registration and staff invites: NULL).
+-- init.sql runs on every start, so the backfill for accounts that existed
+-- before the column runs only once, in the same step that adds the column;
+-- a restart never confirms a pending registration.
+DO $$
+BEGIN
+  IF NOT EXISTS (
+    SELECT 1 FROM information_schema.columns
+    WHERE table_schema = 'public'
+      AND table_name = 'users'
+      AND column_name = 'email_verified_at'
+  ) THEN
+    ALTER TABLE public.users ADD COLUMN email_verified_at TIMESTAMPTZ NULL;
+    UPDATE public.users SET email_verified_at = now();
+  END IF;
+END
+$$;
+
+-- One-time confirmation links: only the sha256 of the raw token is stored.
+CREATE TABLE IF NOT EXISTS email_verification_tokens (
+  id BIGSERIAL PRIMARY KEY,
+  user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  token_hash BYTEA NOT NULL UNIQUE,
+  expires_at TIMESTAMPTZ NOT NULL,
+  used_at TIMESTAMPTZ,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE INDEX IF NOT EXISTS email_verification_tokens_user_idx
+  ON email_verification_tokens (user_id, created_at DESC);
+
+-- Resend requests, separate from password_reset_attempts: hashes of the email
+-- and of the source only, one row per accepted request, kept for one day.
+CREATE TABLE IF NOT EXISTS email_verification_attempts (
+  id BIGSERIAL PRIMARY KEY,
+  email_fingerprint BYTEA NOT NULL,
+  source_fingerprint BYTEA NOT NULL,
+  requested_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE INDEX IF NOT EXISTS email_verification_attempts_email_idx
+  ON email_verification_attempts (email_fingerprint, requested_at);
+CREATE INDEX IF NOT EXISTS email_verification_attempts_source_idx
+  ON email_verification_attempts (source_fingerprint, requested_at);
+
 -- Patient name and phone. Grants, RLS and the only INSERT paths (register_patient,
 -- seed, backfill) are in rls.sql. The CHECKs repeat the api validators because
 -- patients and registrars update the row directly through their column grants.
@@ -676,7 +722,7 @@ ALTER TABLE audit_events DROP CONSTRAINT IF EXISTS audit_events_reason_check;
 ALTER TABLE audit_events ADD CONSTRAINT audit_events_reason_check
   CHECK (reason IS NULL OR reason IN (
     'bad_credentials', 'blocked', 'login', 'password_reset', 'email_change',
-    'idle_timeout', 'absolute_timeout'
+    'idle_timeout', 'absolute_timeout', 'unverified', 'email_verification'
   ));
 ALTER TABLE audit_events DROP CONSTRAINT IF EXISTS audit_events_source_check;
 ALTER TABLE audit_events ADD CONSTRAINT audit_events_source_check

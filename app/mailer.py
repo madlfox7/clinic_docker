@@ -170,3 +170,22 @@ def send_password_reset(recipient: str, token: str) -> None:
         f"{base_url}/reset-password?token={token}\n\n"
         "If you did not request this, you can ignore this message.\n",
     )
+
+
+def send_email_verification(recipient: str, full_name: str | None, token: str) -> None:
+    """Confirmation link after registration. The name goes only into the body."""
+    if any(char in token for char in "\r\n"):
+        raise ValueError("invalid verification message")
+    base_url = os.environ.get("PUBLIC_BASE_URL", "http://localhost:8080").strip().rstrip("/")
+    if not base_url or any(char in base_url for char in "\r\n"):
+        raise ValueError("invalid public base URL")
+    greeting = f"Hello, {_mail_line(full_name)}.\n\n" if full_name else ""
+    send_account_message(
+        recipient,
+        "Confirm your clinic email",
+        f"{greeting}"
+        "Confirm the email address of your new clinic patient account.\n"
+        "Sign-in becomes available after confirmation.\n"
+        "The link expires in 24 hours and works once.\n\n"
+        f"{base_url}/verify-email?token={token}\n",
+    )

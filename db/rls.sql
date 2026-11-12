@@ -582,6 +582,7 @@ DECLARE
   stored_hash text;
   crypt_hash text;
   changed_auth_version bigint;
+  was_unverified boolean;
 BEGIN
   IF raw_token IS NULL
      OR raw_token !~ '^[0-9a-f]{64}$'
@@ -641,9 +642,17 @@ BEGIN
     RETURN;
   END IF;
 
+  -- The link reached this mailbox, so setting a password also confirms the
+  -- email (staff invites, and the real owner taking back a pre-registered
+  -- address).
+  SELECT u.email_verified_at IS NULL INTO was_unverified
+  FROM public.users AS u
+  WHERE u.id = target_id;
+
   UPDATE public.users
   SET password_hash = replacement_hash,
-      auth_version = public.users.auth_version + 1
+      auth_version = public.users.auth_version + 1,
+      email_verified_at = COALESCE(public.users.email_verified_at, CURRENT_TIMESTAMP)
   WHERE id = target_id
   RETURNING public.users.auth_version INTO changed_auth_version;
 
@@ -658,6 +667,16 @@ BEGIN
   VALUES (
     target_id, target_role, 'user.password_recovery', 'user', target_id
   );
+
+  IF was_unverified THEN
+    UPDATE public.email_verification_tokens
+    SET used_at = CURRENT_TIMESTAMP
+    WHERE user_id = target_id AND used_at IS NULL;
+    INSERT INTO public.audit_events (
+      actor_user_id, actor_role, action, target_type, target_id
+    )
+    VALUES (target_id, target_role, 'user.email_verified', 'user', target_id);
+  END IF;
 
   RETURN QUERY SELECT 'changed'::text, changed_auth_version;
 END;
@@ -676,7 +695,8 @@ RETURNS TABLE (
   role text,
   blocked boolean,
   auth_version bigint,
-  rate_limited boolean
+  rate_limited boolean,
+  unverified boolean
 )
 LANGUAGE plpgsql
 SECURITY DEFINER
@@ -693,6 +713,7 @@ DECLARE
   matched_email text;
   matched_role text;
   matched_blocked boolean;
+  matched_verified boolean;
   matched_auth_version bigint;
   stored_hash text;
   password_to_check text;
@@ -728,13 +749,14 @@ BEGIN
     );
     RETURN QUERY
     SELECT NULL::integer, NULL::text, NULL::text, NULL::boolean,
-           NULL::bigint, TRUE;
+           NULL::bigint, TRUE, FALSE;
     RETURN;
   END IF;
 
   -- One cost-12 crypt runs whether or not the email exists.
-  SELECT u.id, u.email, u.role, u.blocked, u.auth_version, u.password_hash
-  INTO matched_id, matched_email, matched_role, matched_blocked,
+  SELECT u.id, u.email, u.role, u.blocked, u.email_verified_at IS NOT NULL,
+         u.auth_version, u.password_hash
+  INTO matched_id, matched_email, matched_role, matched_blocked, matched_verified,
        matched_auth_version, stored_hash
   FROM public.users AS u
   WHERE candidate_email IS NOT NULL
@@ -756,19 +778,31 @@ BEGIN
   password_matches := public.crypt(password_to_check, stored_hash) = stored_hash;
 
   -- Branch order: rate limit, one crypt, bad credentials, blocked (answered
-  -- exactly like bad credentials), success. Exactly one journal row in every
-  -- branch keeps the timing equal.
+  -- exactly like bad credentials), unverified email, success. blocked always
+  -- wins over unverified. Exactly one journal row in every branch keeps the
+  -- timing equal.
   IF user_found AND password_matches AND stored_hash IS DISTINCT FROM dummy_hash
      AND NOT matched_blocked THEN
+    -- The password was right: the attempt counter is cleared as on success.
     DELETE FROM public.login_attempts
     WHERE email_fingerprint = email_key
       AND source_fingerprint = source_key;
+    IF NOT matched_verified THEN
+      -- No session until the email is confirmed; only a marker, no account data.
+      PERFORM public.record_auth_event(
+        'auth.login.failure', matched_id, matched_role, 'unverified', candidate_source
+      );
+      RETURN QUERY
+      SELECT NULL::integer, NULL::text, NULL::text, NULL::boolean,
+             NULL::bigint, FALSE, TRUE;
+      RETURN;
+    END IF;
     PERFORM public.record_auth_event(
       'auth.login.success', matched_id, matched_role, NULL, candidate_source
     );
     RETURN QUERY
     SELECT matched_id, matched_email, matched_role, matched_blocked,
-           matched_auth_version, FALSE;
+           matched_auth_version, FALSE, FALSE;
     RETURN;
   END IF;
 
@@ -846,8 +880,8 @@ BEGIN
       USING ERRCODE = '42501';
   END IF;
 
-  INSERT INTO public.users (email, password_hash, role, blocked)
-  VALUES (seed_email, replacement_hash, 'admin', FALSE)
+  INSERT INTO public.users (email, password_hash, role, blocked, email_verified_at)
+  VALUES (seed_email, replacement_hash, 'admin', FALSE, CURRENT_TIMESTAMP)
   RETURNING id INTO created_admin_id;
 
   RETURN created_admin_id;
@@ -892,8 +926,8 @@ BEGIN
   WHERE lower(email) = lower(seed_email);
 
   IF existing_id IS NULL THEN
-    INSERT INTO public.users (email, password_hash, role, blocked)
-    VALUES (lower(seed_email), replacement_hash, seed_role, FALSE)
+    INSERT INTO public.users (email, password_hash, role, blocked, email_verified_at)
+    VALUES (lower(seed_email), replacement_hash, seed_role, FALSE, CURRENT_TIMESTAMP)
     RETURNING id INTO created_id;
   ELSE
     created_id := existing_id;
@@ -1423,7 +1457,8 @@ BEGIN
     END IF;
   END IF;
 
-  INSERT INTO public.users (email, password_hash, role, blocked)
+  -- Unconfirmed until the invite link sets a password (consume_password_reset).
+  INSERT INTO public.users (email, password_hash, role, blocked, email_verified_at)
   VALUES (
     normalized_email,
     public.crypt(
@@ -1431,7 +1466,8 @@ BEGIN
       public.gen_salt('bf', 12)
     ),
     candidate_role,
-    FALSE
+    FALSE,
+    NULL
   )
   RETURNING id INTO new_id;
 
@@ -1513,7 +1549,8 @@ BEGIN
     RETURN;
   END IF;
 
-  INSERT INTO public.users (email, password_hash, role, blocked)
+  -- Unconfirmed until the invite link sets a password (consume_password_reset).
+  INSERT INTO public.users (email, password_hash, role, blocked, email_verified_at)
   VALUES (
     normalized_email,
     public.crypt(
@@ -1521,7 +1558,8 @@ BEGIN
       public.gen_salt('bf', 12)
     ),
     'doctor',
-    FALSE
+    FALSE,
+    NULL
   )
   RETURNING id INTO new_id;
 
@@ -2719,8 +2757,10 @@ CREATE POLICY patient_profiles_admin_select ON public.patient_profiles
   USING (true);
 
 -- Public registration. The role is fixed to patient here, email, name, phone
--- and the bcrypt hash are checked again, and the user and profile rows are
--- written in one transaction. Only app_guest (the role of db_as_guest) may call it.
+-- and the bcrypt hash are checked again, and the user (email not confirmed),
+-- the profile and a 24-hour confirmation token are written in one transaction.
+-- The raw token is returned once. Only app_guest (the role of db_as_guest)
+-- may call it.
 DROP FUNCTION IF EXISTS public.register_patient(text, text, text, text);
 CREATE FUNCTION public.register_patient(
   candidate_email text,
@@ -2728,7 +2768,7 @@ CREATE FUNCTION public.register_patient(
   candidate_name text,
   candidate_phone text
 )
-RETURNS text
+RETURNS TABLE (status text, verification_token text)
 LANGUAGE plpgsql
 SECURITY DEFINER
 SET search_path = pg_catalog, public, pg_temp
@@ -2738,6 +2778,7 @@ DECLARE
   clean_name text := btrim(coalesce(candidate_name, ''));
   clean_phone text := btrim(coalesce(candidate_phone, ''));
   new_id integer;
+  raw_token text;
 BEGIN
   IF current_setting('role', true) IS DISTINCT FROM 'app_guest' THEN
     RAISE EXCEPTION 'invalid registration context' USING ERRCODE = '42501';
@@ -2750,29 +2791,230 @@ BEGIN
      OR length(regexp_replace(clean_phone, '[^0-9]', '', 'g')) < 5
      OR candidate_hash IS NULL
      OR candidate_hash !~ '^\$2[aby]\$[0-9]{2}\$[./A-Za-z0-9]{53}$' THEN
-    RETURN 'invalid';
+    RETURN QUERY SELECT 'invalid'::text, NULL::text;
+    RETURN;
   END IF;
 
   IF EXISTS (SELECT 1 FROM public.users AS u WHERE lower(u.email) = normalized_email) THEN
-    RETURN 'exists';
+    RETURN QUERY SELECT 'exists'::text, NULL::text;
+    RETURN;
   END IF;
 
   BEGIN
-    INSERT INTO public.users (email, password_hash, role, blocked)
-    VALUES (normalized_email, candidate_hash, 'patient', FALSE)
+    INSERT INTO public.users (email, password_hash, role, blocked, email_verified_at)
+    VALUES (normalized_email, candidate_hash, 'patient', FALSE, NULL)
     RETURNING id INTO new_id;
   EXCEPTION WHEN unique_violation THEN
-    RETURN 'exists';
+    RETURN QUERY SELECT 'exists'::text, NULL::text;
+    RETURN;
   END;
 
   INSERT INTO public.patient_profiles (user_id, full_name, phone)
   VALUES (new_id, clean_name, clean_phone);
 
-  RETURN 'created';
+  raw_token := encode(public.gen_random_bytes(32), 'hex');
+  INSERT INTO public.email_verification_tokens (user_id, token_hash, expires_at)
+  VALUES (new_id, public.digest(raw_token, 'sha256'), CURRENT_TIMESTAMP + INTERVAL '24 hours');
+
+  RETURN QUERY SELECT 'created'::text, raw_token;
 END;
 $function$;
 
 REVOKE ALL ON FUNCTION public.register_patient(text, text, text, text) FROM PUBLIC;
 GRANT EXECUTE ON FUNCTION public.register_patient(text, text, text, text) TO app_guest;
+
+-- Email confirmation after registration (tables in init.sql). The api reaches
+-- these only as clinic_api; no role has direct rights on the tables.
+
+-- GET /verify-email: only valid / invalid, never the email.
+CREATE OR REPLACE FUNCTION public.email_verification_token_status(raw_token text)
+RETURNS text
+LANGUAGE sql
+STABLE
+SECURITY DEFINER
+SET search_path = pg_catalog, public, pg_temp
+AS $function$
+  SELECT CASE
+    WHEN EXISTS (
+      SELECT 1
+      FROM public.email_verification_tokens AS t
+      JOIN public.users AS u ON u.id = t.user_id
+      WHERE raw_token ~ '^[0-9a-f]{64}$'
+        AND t.token_hash = public.digest(raw_token, 'sha256')
+        AND t.used_at IS NULL
+        AND t.expires_at > CURRENT_TIMESTAMP
+        AND u.email_verified_at IS NULL
+        AND NOT u.blocked
+    ) THEN 'valid'
+    ELSE 'invalid'
+  END;
+$function$;
+
+-- POST /verify-email: the token is taken atomically (one UPDATE ... RETURNING),
+-- then the user row is locked. Success confirms the email, burns every token
+-- of the user and journals user.email_verified (ids only). Anything else is
+-- the same neutral 'invalid'.
+CREATE OR REPLACE FUNCTION public.confirm_email_verification(raw_token text)
+RETURNS text
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = pg_catalog, public, pg_temp
+AS $function$
+DECLARE
+  target_id integer;
+  consumed_id integer;
+  target_role text;
+  target_blocked boolean;
+  target_verified timestamptz;
+BEGIN
+  IF raw_token IS NULL OR raw_token !~ '^[0-9a-f]{64}$' THEN
+    RETURN 'invalid';
+  END IF;
+
+  -- Lock the user row first (same order as request_email_verification), then
+  -- take the token with one atomic UPDATE: two parallel confirms cannot both win.
+  SELECT t.user_id INTO target_id
+  FROM public.email_verification_tokens AS t
+  WHERE t.token_hash = public.digest(raw_token, 'sha256');
+
+  IF target_id IS NULL THEN
+    RETURN 'invalid';
+  END IF;
+
+  SELECT u.role, u.blocked, u.email_verified_at
+  INTO target_role, target_blocked, target_verified
+  FROM public.users AS u
+  WHERE u.id = target_id
+  FOR UPDATE;
+
+  UPDATE public.email_verification_tokens
+  SET used_at = CURRENT_TIMESTAMP
+  WHERE token_hash = public.digest(raw_token, 'sha256')
+    AND used_at IS NULL
+    AND expires_at > CURRENT_TIMESTAMP
+  RETURNING user_id INTO consumed_id;
+
+  IF consumed_id IS NULL OR target_role IS NULL
+     OR target_blocked OR target_verified IS NOT NULL THEN
+    RETURN 'invalid';
+  END IF;
+
+  UPDATE public.users
+  SET email_verified_at = CURRENT_TIMESTAMP
+  WHERE id = target_id;
+
+  UPDATE public.email_verification_tokens
+  SET used_at = CURRENT_TIMESTAMP
+  WHERE user_id = target_id AND used_at IS NULL;
+
+  INSERT INTO public.audit_events (
+    actor_user_id, actor_role, action, target_type, target_id
+  )
+  VALUES (target_id, target_role, 'user.email_verified', 'user', target_id);
+
+  RETURN 'verified';
+END;
+$function$;
+
+-- POST /resend-verification. Own attempt table: 5 per 15 minutes for the pair
+-- email + source, 100 per 15 minutes per source, 10 per day per email. A new
+-- token goes out only for an existing, unblocked, unconfirmed patient and
+-- burns the older unused ones. The caller always shows the same message.
+CREATE OR REPLACE FUNCTION public.request_email_verification(
+  candidate_email text,
+  candidate_source text
+)
+RETURNS TABLE (
+  verification_token text,
+  recipient text,
+  recipient_name text,
+  rate_limited boolean
+)
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = pg_catalog, public, pg_temp
+AS $function$
+DECLARE
+  normalized_email text := lower(btrim(coalesce(candidate_email, '')));
+  email_key bytea := public.digest(normalized_email, 'sha256');
+  source_key bytea := public.digest(coalesce(candidate_source, ''), 'sha256');
+  target_id integer;
+  target_email text;
+  raw_token text;
+BEGIN
+  PERFORM pg_advisory_xact_lock(hashtextextended('email-verification:' || encode(email_key, 'hex'), 0));
+
+  DELETE FROM public.email_verification_attempts
+  WHERE requested_at < CURRENT_TIMESTAMP - INTERVAL '1 day';
+
+  IF (
+       SELECT count(*) FROM public.email_verification_attempts
+       WHERE email_fingerprint = email_key AND source_fingerprint = source_key
+         AND requested_at > CURRENT_TIMESTAMP - INTERVAL '15 minutes'
+     ) >= 5
+     OR (
+       SELECT count(*) FROM public.email_verification_attempts
+       WHERE source_fingerprint = source_key
+         AND requested_at > CURRENT_TIMESTAMP - INTERVAL '15 minutes'
+     ) >= 100
+     OR (
+       SELECT count(*) FROM public.email_verification_attempts
+       WHERE email_fingerprint = email_key
+         AND requested_at > CURRENT_TIMESTAMP - INTERVAL '1 day'
+     ) >= 10 THEN
+    PERFORM public.record_auth_event(
+      'auth.rate_limited', NULL, NULL, 'email_verification', candidate_source
+    );
+    RETURN QUERY SELECT NULL::text, NULL::text, NULL::text, TRUE;
+    RETURN;
+  END IF;
+
+  INSERT INTO public.email_verification_attempts (email_fingerprint, source_fingerprint)
+  VALUES (email_key, source_key);
+
+  IF length(normalized_email) NOT BETWEEN 3 AND 254
+     OR position('@' IN normalized_email) = 0 THEN
+    RETURN QUERY SELECT NULL::text, NULL::text, NULL::text, FALSE;
+    RETURN;
+  END IF;
+
+  SELECT u.id, u.email INTO target_id, target_email
+  FROM public.users AS u
+  WHERE lower(u.email) = normalized_email
+    AND u.role = 'patient'
+    AND NOT u.blocked
+    AND u.email_verified_at IS NULL
+  FOR UPDATE;
+
+  IF target_id IS NULL THEN
+    RETURN QUERY SELECT NULL::text, NULL::text, NULL::text, FALSE;
+    RETURN;
+  END IF;
+
+  UPDATE public.email_verification_tokens
+  SET used_at = CURRENT_TIMESTAMP
+  WHERE user_id = target_id AND used_at IS NULL;
+
+  raw_token := encode(public.gen_random_bytes(32), 'hex');
+  INSERT INTO public.email_verification_tokens (user_id, token_hash, expires_at)
+  VALUES (target_id, public.digest(raw_token, 'sha256'), CURRENT_TIMESTAMP + INTERVAL '24 hours');
+
+  RETURN QUERY
+  SELECT raw_token, target_email,
+         (SELECT pp.full_name FROM public.patient_profiles AS pp WHERE pp.user_id = target_id),
+         FALSE;
+END;
+$function$;
+
+REVOKE ALL ON TABLE public.email_verification_tokens, public.email_verification_attempts
+  FROM PUBLIC, clinic_api, app_guest, app_patient, app_doctor, app_registrar, app_admin;
+REVOKE ALL ON SEQUENCE public.email_verification_tokens_id_seq, public.email_verification_attempts_id_seq
+  FROM PUBLIC, clinic_api, app_guest, app_patient, app_doctor, app_registrar, app_admin;
+REVOKE ALL ON FUNCTION public.email_verification_token_status(text) FROM PUBLIC;
+REVOKE ALL ON FUNCTION public.confirm_email_verification(text) FROM PUBLIC;
+REVOKE ALL ON FUNCTION public.request_email_verification(text, text) FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION public.email_verification_token_status(text) TO clinic_api;
+GRANT EXECUTE ON FUNCTION public.confirm_email_verification(text) TO clinic_api;
+GRANT EXECUTE ON FUNCTION public.request_email_verification(text, text) TO clinic_api;
 
 COMMIT;

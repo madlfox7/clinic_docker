@@ -49,7 +49,8 @@ ROLE_PAGES = {
                                      "/admin/schedule", "/admin/audit"]),
 }
 GUEST_PAGES = ["/", "/doctors", "/login", "/register", "/forgot-password",
-               "/reset-password?token=" + "0" * 64, "/confirm-email?token=" + "0" * 64]
+               "/reset-password?token=" + "0" * 64, "/confirm-email?token=" + "0" * 64,
+               "/verify-email?token=" + "0" * 64]
 
 
 def _client(**kwargs):
@@ -94,6 +95,7 @@ def _asset_urls(html):
         "/doctors",
         "/reset-password?token=" + "0" * 64,
         "/confirm-email?token=" + "0" * 64,
+        "/verify-email?token=" + "0" * 64,
         "/no-such-page",
         "/static/app.css",
         "/static/no-such-file.css",

@@ -14,7 +14,10 @@
 {% else %}
 {% if error %}<div class="alert alert-danger" role="alert">{{ error }}</div>{% endif %}
 {% if expired %}<div class="alert alert-warning" role="alert">Your session has expired. Please sign in again.</div>{% endif %}
-{% if registered %}<div class="alert alert-success">Account created. Please log in.</div>{% endif %}
+{% if registered %}<div class="alert alert-success">Account created. Open the confirmation email and follow the link; sign-in will be available after confirmation.</div>{% endif %}
+{% if notice == "mail_failed" %}<div class="alert alert-warning" role="alert">The confirmation email could not be sent. Request a new link below.</div>
+{% elif notice == "verified" %}<div class="alert alert-success">Email confirmed. You can sign in now.</div>
+{% elif notice == "resent" %}<div class="alert alert-info">If this email belongs to an unconfirmed account, we sent a new link.</div>{% endif %}
 {% if password_reset %}<div class="alert alert-success">Password updated. Please log in.</div>{% endif %}
 {% if doctor_id %}<div class="alert alert-info">Log in as a patient to choose a time with the selected doctor.</div>{% endif %}
 <form method="post" action="/login">
@@ -24,6 +27,13 @@
   <div class="mb-3"><label class="form-label w-100">Password: <input class="form-control" name="password" type="password" required></label></div>
   <button class="btn btn-primary w-100" type="submit">Login</button>
 </form>
+{% if unverified or registered or notice in ("mail_failed", "resent") %}
+<form class="mt-3" method="post" action="/resend-verification">
+  <input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}">
+  <div class="mb-2"><label class="form-label w-100">Send a new confirmation link to: <input class="form-control" name="email" type="email" maxlength="254" required></label></div>
+  <button class="btn btn-outline-primary w-100" type="submit">Resend confirmation email</button>
+</form>
+{% endif %}
 <p class="mt-3 mb-1"><a href="/register">Create a patient account</a></p>
 <p class="mb-0"><a href="/forgot-password">Forgot password?</a></p>
 {% endif %}

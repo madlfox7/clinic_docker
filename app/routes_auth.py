@@ -32,7 +32,13 @@ from db import (
     within_length,
 )
 from client_ip import client_ip
-from mailer import send_account_message, send_password_changed, send_password_reset, smtp_ready
+from mailer import (
+    send_account_message,
+    send_email_verification,
+    send_password_changed,
+    send_password_reset,
+    smtp_ready,
+)
 
 router = APIRouter()
 
@@ -101,6 +107,8 @@ def _login_page(
     password_reset: bool = False,
     doctor_id: int | None = None,
     expired: bool = False,
+    unverified: bool = False,
+    notice: str | None = None,
 ):
     return templates.TemplateResponse(
         request,
@@ -113,6 +121,9 @@ def _login_page(
             "email": email,
             "registered": registered,
             "password_reset": password_reset,
+            # Only after a right password for an unconfirmed account: offer a resend.
+            "unverified": unverified,
+            "notice": notice,
             # Only a validated integer ever reaches the form, never the raw value.
             "doctor_id": doctor_id,
         },
@@ -286,6 +297,13 @@ def login_form(request: Request):
         return _login_page(request, "Account is blocked", 403)
     if status == "ok":
         return _login_page(request, None, role=user["role"], email=user["email"])
+    notice = None
+    if request.query_params.get("verified") == "1":
+        notice = "verified"
+    elif request.query_params.get("resent") == "1":
+        notice = "resent"
+    elif request.query_params.get("mail") == "failed":
+        notice = "mail_failed"
     return _login_page(
         request,
         None,
@@ -293,6 +311,7 @@ def login_form(request: Request):
         password_reset=request.query_params.get("reset") == "1",
         doctor_id=_login_doctor_id(request.query_params.getlist("doctor")),
         expired=request.query_params.get("expired") == "1",
+        notice=notice,
     )
 
 
@@ -369,14 +388,18 @@ def register(
             **keep,
         )
 
+    token = None
     conn = db_as_guest()
     try:
         with conn.cursor() as cur:
             cur.execute(
-                "SELECT public.register_patient(%s, %s, %s, %s)",
+                """
+                SELECT status, verification_token
+                FROM public.register_patient(%s, %s, %s, %s)
+                """,
                 (normalized_email, pwd.hash(password), clean_name, cleaned_phone),
             )
-            outcome = cur.fetchone()[0]
+            outcome, token = cur.fetchone()
         conn.commit()
     except UniqueViolation:
         conn.rollback()
@@ -391,10 +414,17 @@ def register(
             normalized_email,
             **keep,
         )
-    if outcome != "created":
+    if outcome != "created" or not token:
         return _register_page(
             request, "Check the registration details.", 400, normalized_email, **keep
         )
+    # The account, profile and token stay even if the mail fails; the login
+    # page then says so and offers a new link.
+    try:
+        send_email_verification(normalized_email, clean_name, token)
+    except Exception:
+        log.exception("could not send email confirmation")
+        return RedirectResponse("/login?registered=1&mail=failed", status_code=303)
     return RedirectResponse("/login?registered=1", status_code=303)
 
 
@@ -425,7 +455,7 @@ def login(
         with conn.cursor() as cur:
             cur.execute(
                 """
-                SELECT id, email, role, blocked, auth_version, rate_limited
+                SELECT id, email, role, blocked, auth_version, rate_limited, unverified
                 FROM public.authenticate_user(%s, %s, %s)
                 """,
                 (normalized_email, password, client_source),
@@ -445,6 +475,14 @@ def login(
         )
         response.headers["Retry-After"] = "900"
         return response
+    if row[6]:
+        return _login_page(
+            request,
+            "Please confirm your email before signing in.",
+            403,
+            doctor_id=doctor_id,
+            unverified=True,
+        )
     request.session.clear()
     signed_in_at = int(time.time())
     request.session["user_id"] = row[0]
@@ -458,6 +496,91 @@ def login(
 
 
 RESET_TOKEN_PATTERN = re.compile(r"^[0-9a-f]{64}$")
+
+
+def _verify_email_page(request: Request, token: str, error: bool, status_code: int = 200):
+    # The page never shows the email of the account behind the token.
+    return templates.TemplateResponse(
+        request,
+        "verify_email.html",
+        {"request": request, "role": "guest", "token": token, "error": error},
+        status_code=status_code,
+    )
+
+
+def _verification_token_is_open(token: str) -> bool:
+    conn = db()
+    try:
+        with conn.cursor() as cur:
+            cur.execute("SELECT public.email_verification_token_status(%s)", (token,))
+            return cur.fetchone()[0] == "valid"
+    finally:
+        conn.close()
+
+
+@router.get("/verify-email")
+def verify_email_form(request: Request, token: str = ""):
+    # GET only shows a button: a mail client preview must not burn the token.
+    if not RESET_TOKEN_PATTERN.fullmatch(token) or not _verification_token_is_open(token):
+        return _verify_email_page(request, "", True, 400)
+    return _verify_email_page(request, token, False)
+
+
+@router.post("/verify-email")
+def verify_email(request: Request, token: str = Form("")):
+    if contains_nul(token) or not RESET_TOKEN_PATTERN.fullmatch(token):
+        return _verify_email_page(request, "", True, 400)
+    conn = db()
+    try:
+        with conn.cursor() as cur:
+            cur.execute("SELECT public.confirm_email_verification(%s)", (token,))
+            status = cur.fetchone()[0]
+        conn.commit()
+    finally:
+        conn.close()
+    if status != "verified":
+        return _verify_email_page(request, "", True, 400)
+    return RedirectResponse("/login?verified=1", status_code=303)
+
+
+@router.post("/resend-verification")
+def resend_verification(request: Request, email: str = Form("")):
+    """Always the same answer: unknown, confirmed, blocked, rate-limited and
+    SMTP failure all end at /login?resent=1. SMTP errors go only to the log."""
+    user, status = load_session_user(request)
+    if status == "ok":
+        return RedirectResponse("/me", status_code=303)
+    if status == "blocked":
+        return _login_page(request, "Account is blocked", 403)
+    if contains_nul(email) or any(char in email for char in "\r\n"):
+        return _login_page(request, "Enter a valid email address.", 400, unverified=True)
+    normalized_email = _normalize_registration_email(email)
+    if normalized_email is None:
+        return _login_page(request, "Enter a valid email address.", 400, unverified=True)
+    row = None
+    try:
+        conn = db()
+        try:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT verification_token, recipient, recipient_name, rate_limited
+                    FROM public.request_email_verification(%s, %s)
+                    """,
+                    (normalized_email, client_ip(request)),
+                )
+                row = cur.fetchone()
+            conn.commit()
+        finally:
+            conn.close()
+    except Exception:
+        log.exception("could not issue an email confirmation link")
+    if row and row[0]:
+        try:
+            send_email_verification(row[1], row[2], row[0])
+        except Exception:
+            log.exception("could not send email confirmation")
+    return RedirectResponse("/login?resent=1", status_code=303)
 
 
 def _forgot_password_page(
