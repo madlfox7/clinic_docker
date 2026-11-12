@@ -22,6 +22,28 @@
   </div>
 </div>
 
+{% if role == "patient" and profile %}
+<div class="card mb-3"><div class="card-body">
+<h2 class="mt-0">Profile</h2>
+{% if profile.needs_update %}<div class="alert alert-warning" role="alert">Please enter your real full name and phone number.</div>{% endif %}
+{% if profile_saved == "1" %}<div class="alert alert-success">Profile saved.</div>{% endif %}
+{% if profile_error == "name" %}<div class="alert alert-danger" role="alert">Enter your full name (2–100 characters).</div>
+{% elif profile_error == "phone" %}<div class="alert alert-danger" role="alert">Enter a valid phone number (digits, spaces, + ( ) -, at least 5 digits).</div>
+{% elif profile_error %}<div class="alert alert-danger" role="alert">Could not save the profile.</div>{% endif %}
+<dl class="row mb-2">
+  <dt class="col-sm-3">Full name</dt><dd class="col-sm-9">{{ profile.full_name }}</dd>
+  <dt class="col-sm-3">Phone</dt><dd class="col-sm-9">{{ profile.phone }}</dd>
+  <dt class="col-sm-3">Email</dt><dd class="col-sm-9">{{ email }}</dd>
+</dl>
+<form class="row g-2 align-items-end" method="post" action="/me/profile">
+  <input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}">
+  <div class="col-md-5"><label class="form-label w-100 mb-0">Full name <input class="form-control" name="full_name" type="text" minlength="2" maxlength="100" value="{{ profile.full_name }}" required></label></div>
+  <div class="col-md-4"><label class="form-label w-100 mb-0">Phone <input class="form-control" name="phone" type="tel" maxlength="40" value="{{ profile.phone }}" required></label></div>
+  <div class="col-md-3"><button class="btn btn-primary" type="submit">Save profile</button></div>
+</form>
+</div></div>
+{% endif %}
+
 {% if role == "patient" %}
   <h2>Upcoming visits</h2>
   <ul class="clinic-list">

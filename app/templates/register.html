@@ -8,6 +8,8 @@
 <form method="post" action="/register">
   <input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}">
   <div class="mb-3"><label class="form-label w-100">Email: <input class="form-control" name="email" type="email" maxlength="254" value="{{ email }}" required></label></div>
+  <div class="mb-3"><label class="form-label w-100">Full name: <input class="form-control" name="full_name" type="text" minlength="2" maxlength="100" autocomplete="name" value="{{ full_name }}" required></label></div>
+  <div class="mb-3"><label class="form-label w-100">Phone: <input class="form-control" name="phone" type="tel" maxlength="40" autocomplete="tel" value="{{ phone }}" required></label></div>
   <div class="mb-3"><label class="form-label w-100">Password: <input class="form-control" name="password" type="password" minlength="8" maxlength="72" required></label></div>
   <div class="mb-3"><label class="form-label w-100">Confirm password: <input class="form-control" name="confirm_password" type="password" minlength="8" maxlength="72" required></label></div>
   <button class="btn btn-primary w-100" type="submit">Create patient account</button>

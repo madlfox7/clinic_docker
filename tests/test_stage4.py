@@ -10,6 +10,7 @@ from pathlib import Path
 import httpx
 import pytest
 
+from tests.registration import PATIENT_FIELDS
 from tests.csrf_client import CsrfClient
 from tests.demo_secret import demo_password
 from tests.field_key import PROBE_PACKET, decrypt, is_packet, seal_pending, sql_packet
@@ -28,6 +29,8 @@ PASSWORD = demo_password()
 
 PAT = "pat@clinic.local"
 PAT2 = "pat2@clinic.local"
+PAT_NAME = "Narek Hakobyan"
+PAT2_NAME = "Ani Sargsyan"
 DOC = "doc@clinic.local"
 DOC2 = "doc2@clinic.local"
 REG = "reg@clinic.local"
@@ -155,6 +158,7 @@ def test_login_throttles_repeated_failed_attempts():
 		created = c.post(
 			"/register",
 			data={
+				**PATIENT_FIELDS,
 				"email": email,
 				"password": password,
 				"confirm_password": password,
@@ -199,6 +203,7 @@ def test_nul_characters_are_rejected_before_database_use():
 		register_nul = guest.post(
 			"/register",
 			data={
+				**PATIENT_FIELDS,
 				"email": f"bad{nul}@clinic.local",
 				"password": "New-Password-2026!",
 				"confirm_password": "New-Password-2026!",
@@ -273,6 +278,7 @@ def test_weak_passwords_are_rejected_without_creating_users():
 			rejected = guest.post(
 				"/register",
 				data={
+					**PATIENT_FIELDS,
 					"email": email,
 					"password": password,
 					"confirm_password": password,
@@ -283,6 +289,7 @@ def test_weak_passwords_are_rejected_without_creating_users():
 		spaced_email = guest.post(
 			"/register",
 			data={
+				**PATIENT_FIELDS,
 				"email": f"bad {stamp}@example.com",
 				"password": "Policy-Check-2026!",
 				"confirm_password": "Policy-Check-2026!",
@@ -294,6 +301,7 @@ def test_weak_passwords_are_rejected_without_creating_users():
 			rejected = guest.post(
 				"/register",
 				data={
+					**PATIENT_FIELDS,
 					"email": email,
 					"password": password,
 					"confirm_password": password,
@@ -354,6 +362,7 @@ def test_weak_passwords_are_rejected_without_creating_users():
 		created = guest.post(
 			"/register",
 			data={
+				**PATIENT_FIELDS,
 				"email": policy_email,
 				"password": policy_password,
 				"confirm_password": policy_password,
@@ -380,6 +389,7 @@ def test_weak_passwords_are_rejected_without_creating_users():
 		spaced = guest.post(
 			"/register",
 			data={
+				**PATIENT_FIELDS,
 				"email": f"  Spaced-{stamp}@Example.COM  ",
 				"password": spaced_password,
 				"confirm_password": spaced_password,
@@ -391,6 +401,7 @@ def test_weak_passwords_are_rejected_without_creating_users():
 		duplicate = guest.post(
 			"/register",
 			data={
+				**PATIENT_FIELDS,
 				"email": stored_email,
 				"password": spaced_password,
 				"confirm_password": spaced_password,
@@ -444,6 +455,7 @@ def test_login_timing_does_not_reveal_whether_email_exists():
 		created = guest.post(
 			"/register",
 			data={
+				**PATIENT_FIELDS,
 				"email": email,
 				"password": password,
 				"confirm_password": password,
@@ -879,6 +891,7 @@ def test_patient_recovers_password_without_admin_reset():
 			registered = guest.post(
 				"/register",
 				data={
+					**PATIENT_FIELDS,
 					"email": email,
 					"password": password,
 					"confirm_password": password,
@@ -1070,6 +1083,7 @@ def test_owner_confirms_email_change_on_both_addresses():
 			registered = owner.post(
 				"/register",
 				data={
+					**PATIENT_FIELDS,
 					"email": email,
 					"password": password,
 					"confirm_password": password,
@@ -1218,7 +1232,7 @@ def test_medical_records_are_scoped_and_audited():
 			assert "Appointment cancelled." in cancelled.text
 			doctor_schedule = doctor.get("/doctor/appointments")
 			assert re.search(
-				rf'<li class="is-cancelled">\s*{re.escape(PAT)}[\s\S]*?<span class="badge status-badge text-bg-secondary">cancelled</span>[\s\S]*?'
+				rf'<li class="is-cancelled">\s*{re.escape(PAT_NAME)} — {re.escape(PAT)}[\s\S]*?<span class="badge status-badge text-bg-secondary">cancelled</span>[\s\S]*?'
 				rf'href="/doctor/appointments/{appointment_id}/records"',
 				doctor_schedule.text,
 			)
@@ -1837,7 +1851,7 @@ def test_admin_can_cancel_future_appointments_separately_from_block():
 			) == "cancelled"
 			doctor_schedule = doc.get("/doctor/appointments").text
 			assert re.search(
-				rf'<li class="is-cancelled">\s*{re.escape(PAT)}[\s\S]*?<span class="badge status-badge text-bg-secondary">cancelled</span>',
+				rf'<li class="is-cancelled">\s*{re.escape(PAT_NAME)} — {re.escape(PAT)}[\s\S]*?<span class="badge status-badge text-bg-secondary">cancelled</span>',
 				doctor_schedule,
 			)
 			admin.post(f"/admin/users/{user_id}/unblock")
@@ -3707,6 +3721,7 @@ def test_public_registration_is_patient_only_and_can_book(request):
 		invalid_email = guest.post(
 			"/register",
 			data={
+				**PATIENT_FIELDS,
 				"email": "not-an-email",
 				"password": password,
 				"confirm_password": password,
@@ -3718,6 +3733,7 @@ def test_public_registration_is_patient_only_and_can_book(request):
 		short_password = guest.post(
 			"/register",
 			data={
+				**PATIENT_FIELDS,
 				"email": email,
 				"password": "short",
 				"confirm_password": "short",
@@ -3729,6 +3745,7 @@ def test_public_registration_is_patient_only_and_can_book(request):
 		default_password = guest.post(
 			"/register",
 			data={
+				**PATIENT_FIELDS,
 				"email": email,
 				"password": "password123",
 				"confirm_password": "password123",
@@ -3740,6 +3757,7 @@ def test_public_registration_is_patient_only_and_can_book(request):
 		mismatched_passwords = guest.post(
 			"/register",
 			data={
+				**PATIENT_FIELDS,
 				"email": email,
 				"password": password,
 				"confirm_password": password + "different",
@@ -3751,6 +3769,7 @@ def test_public_registration_is_patient_only_and_can_book(request):
 		created = guest.post(
 			"/register",
 			data={
+				**PATIENT_FIELDS,
 				"email": email.upper(),
 				"password": password,
 				"confirm_password": password,
@@ -3769,6 +3788,7 @@ def test_public_registration_is_patient_only_and_can_book(request):
 		duplicate = guest.post(
 			"/register",
 			data={
+				**PATIENT_FIELDS,
 				"email": email.upper(),
 				"password": password,
 				"confirm_password": password,
@@ -3829,7 +3849,7 @@ def test_public_registration_is_patient_only_and_can_book(request):
 	with client() as admin, client() as new_patient, client() as second_guest:
 		login(admin, ADMIN)
 		patient_row_match = re.search(
-			rf"<li>\s*{re.escape(email)}\s*([\s\S]*?)</li>",
+			rf"<li>\s*{re.escape(PATIENT_FIELDS['full_name'])} — {re.escape(email)}\s*([\s\S]*?)</li>",
 			admin.get("/admin/users").text,
 		)
 		assert patient_row_match, "admin cannot see the newly registered patient"
@@ -3850,6 +3870,7 @@ def test_public_registration_is_patient_only_and_can_book(request):
 		reregister = second_guest.post(
 			"/register",
 			data={
+				**PATIENT_FIELDS,
 				"email": email,
 				"password": password,
 				"confirm_password": password,

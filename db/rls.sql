@@ -72,17 +72,21 @@ $function$;
 REVOKE ALL ON FUNCTION public.doctor_patients(integer) FROM PUBLIC;
 GRANT EXECUTE ON FUNCTION public.doctor_patients(integer) TO app_doctor;
 
--- identities on the doctor's own visits, cancelled ones included (schedule labels only)
-CREATE OR REPLACE FUNCTION public.doctor_visit_patients(doc_user_id int)
-RETURNS TABLE (id int, email text, blocked boolean)
+-- identities on the doctor's own visits, cancelled ones included (schedule labels only).
+-- This is the only way a doctor reads a patient's name and phone: app_doctor has
+-- no grant on patient_profiles.
+DROP FUNCTION IF EXISTS public.doctor_visit_patients(integer);
+CREATE FUNCTION public.doctor_visit_patients(doc_user_id int)
+RETURNS TABLE (id int, email text, blocked boolean, full_name text, phone text)
 LANGUAGE sql
 STABLE
 SECURITY DEFINER
 SET search_path = pg_catalog, public, pg_temp
 AS $function$
-  SELECT u.id, u.email, u.blocked
+  SELECT u.id, u.email, u.blocked, pp.full_name, pp.phone
   FROM public.users AS u 
   JOIN public.doctors AS d ON d.user_id = doc_user_id
+  LEFT JOIN public.patient_profiles AS pp ON pp.user_id = u.id
   WHERE doc_user_id = NULLIF(current_setting('app.user_id', true), '')::int
     AND EXISTS (
       SELECT 1
@@ -275,12 +279,16 @@ BEGIN
         AND target_type = 'appointment'
         AND EXISTS (SELECT 1 FROM public.appointments AS a
                     WHERE a.id = target_id AND a.patient_user_id = actor_id))
-      OR (event_action = 'medical.records.view'
+      OR (event_action IN ('medical.records.view', 'patient.profile.update')
         AND target_type = 'patient' AND target_id = actor_id)))
-    OR (actor_role = 'registrar'
-      AND event_action IN ('appointment.book', 'appointment.cancel')
-      AND target_type = 'appointment'
-      AND EXISTS (SELECT 1 FROM public.appointments AS a WHERE a.id = target_id))
+    OR (actor_role = 'registrar' AND (
+      (event_action IN ('appointment.book', 'appointment.cancel')
+        AND target_type = 'appointment'
+        AND EXISTS (SELECT 1 FROM public.appointments AS a WHERE a.id = target_id))
+      OR (event_action = 'patient.profile.update'
+        AND target_type = 'patient'
+        AND EXISTS (SELECT 1 FROM public.users AS u
+                    WHERE u.id = target_id AND u.role = 'patient'))))
     OR (actor_role = 'doctor' AND (
       (event_action IN ('medical.records.view', 'medical.note.save',
                         'medical.prescription.add', 'appointment.complete')
@@ -883,13 +891,29 @@ BEGIN
   FROM public.users
   WHERE lower(email) = lower(seed_email);
 
-  IF existing_id IS NOT NULL THEN
-    RETURN existing_id;
+  IF existing_id IS NULL THEN
+    INSERT INTO public.users (email, password_hash, role, blocked)
+    VALUES (lower(seed_email), replacement_hash, seed_role, FALSE)
+    RETURNING id INTO created_id;
+  ELSE
+    created_id := existing_id;
   END IF;
 
-  INSERT INTO public.users (email, password_hash, role, blocked)
-  VALUES (lower(seed_email), replacement_hash, seed_role, FALSE)
-  RETURNING id INTO created_id;
+  IF seed_role = 'patient' THEN
+    INSERT INTO public.patient_profiles (user_id, full_name, phone)
+    VALUES (
+      created_id,
+      CASE lower(seed_email)
+        WHEN 'pat@clinic.local' THEN 'Narek Hakobyan'
+        ELSE 'Ani Sargsyan'
+      END,
+      CASE lower(seed_email)
+        WHEN 'pat@clinic.local' THEN '+374 10 123456'
+        ELSE '+374 10 654321'
+      END
+    )
+    ON CONFLICT DO NOTHING;
+  END IF;
 
   RETURN created_id;
 END;
@@ -933,6 +957,49 @@ BEGIN
   END IF;
 
   RETURN patient_email;
+END;
+$function$;
+
+-- Same rule as calendar_patient_email, for the patient's name.
+CREATE OR REPLACE FUNCTION public.calendar_patient_name(
+  target_patient_id integer,
+  target_doctor_id integer
+)
+RETURNS text
+LANGUAGE plpgsql
+STABLE
+SECURITY DEFINER
+SET search_path = pg_catalog, public, pg_temp
+AS $function$
+DECLARE
+  actor_id integer := NULLIF(current_setting('app.user_id', true), '')::integer;
+  actor_role text := current_setting('role', true);
+  patient_name text;
+BEGIN
+  IF target_patient_id IS NULL OR target_doctor_id IS NULL THEN
+    RETURN NULL;
+  END IF;
+
+  IF actor_role = 'app_registrar' THEN
+    SELECT pp.full_name INTO patient_name
+    FROM public.patient_profiles AS pp
+    JOIN public.users AS u ON u.id = pp.user_id
+    WHERE pp.user_id = target_patient_id AND u.role = 'patient';
+    RETURN patient_name;
+  END IF;
+
+  IF actor_role = 'app_doctor'
+     AND EXISTS (
+       SELECT 1
+       FROM public.doctors AS d
+       WHERE d.id = target_doctor_id AND d.user_id = actor_id
+     ) THEN
+    SELECT dp.full_name INTO patient_name
+    FROM public.doctor_visit_patients(actor_id) AS dp
+    WHERE dp.id = target_patient_id;
+  END IF;
+
+  RETURN patient_name;
 END;
 $function$;
 
@@ -1216,6 +1283,7 @@ REVOKE ALL ON FUNCTION public.authenticate_user(text, text, text) FROM PUBLIC;
 REVOKE ALL ON FUNCTION public.bootstrap_seed_admin(text, text) FROM PUBLIC;
 REVOKE ALL ON FUNCTION public.bootstrap_seed_user(text, text, text) FROM PUBLIC;
 REVOKE ALL ON FUNCTION public.calendar_patient_email(integer, integer) FROM PUBLIC;
+REVOKE ALL ON FUNCTION public.calendar_patient_name(integer, integer) FROM PUBLIC;
 REVOKE ALL ON FUNCTION public.appointment_notice(integer) FROM PUBLIC;
 REVOKE ALL ON FUNCTION public.own_email_notifications() FROM PUBLIC;
 REVOKE ALL ON FUNCTION public.set_own_email_notifications(boolean) FROM PUBLIC;
@@ -1721,6 +1789,8 @@ GRANT EXECUTE ON FUNCTION public.bootstrap_seed_admin(text, text) TO clinic_api;
 GRANT EXECUTE ON FUNCTION public.bootstrap_seed_user(text, text, text) TO clinic_api;
 GRANT EXECUTE ON FUNCTION public.calendar_patient_email(integer, integer)
   TO app_doctor, app_registrar;
+GRANT EXECUTE ON FUNCTION public.calendar_patient_name(integer, integer)
+  TO app_doctor, app_registrar;
 GRANT EXECUTE ON FUNCTION public.appointment_notice(integer)
   TO app_patient, app_registrar, app_admin;
 GRANT EXECUTE ON FUNCTION public.own_email_notifications()
@@ -1748,8 +1818,10 @@ GRANT USAGE, SELECT ON SEQUENCE public.doctors_id_seq TO app_admin;
 GRANT SELECT ON public.clinic_settings
   TO app_guest, app_patient, app_doctor, app_registrar, app_admin;
 GRANT UPDATE (address, phone) ON public.clinic_settings TO app_admin;
-GRANT INSERT (email, password_hash, role, blocked) ON public.users TO app_guest;
-GRANT USAGE, SELECT ON SEQUENCE public.users_id_seq TO app_guest;
+-- Registration goes only through register_patient (SECURITY DEFINER); the
+-- guest role has no INSERT on users and no use of its sequence.
+REVOKE INSERT ON public.users FROM app_guest;
+REVOKE USAGE, SELECT ON SEQUENCE public.users_id_seq FROM app_guest;
 GRANT SELECT ON public.slots, public.work_hours, public.time_off, public.holidays
   TO app_patient, app_registrar;
 GRANT SELECT ON public.slots TO app_doctor, app_admin;
@@ -2106,9 +2178,6 @@ CREATE POLICY users_admin_update ON public.users
 CREATE POLICY users_admin_insert ON public.users
   FOR INSERT TO app_admin
   WITH CHECK (role IN ('doctor', 'registrar', 'admin') AND NOT blocked);
-CREATE POLICY users_guest_insert ON public.users
-  FOR INSERT TO app_guest
-  WITH CHECK (role = 'patient' AND NOT blocked);
 
 DROP POLICY IF EXISTS clinic_settings_select ON public.clinic_settings;
 DROP POLICY IF EXISTS clinic_settings_admin_update ON public.clinic_settings;
@@ -2562,5 +2631,148 @@ GRANT EXECUTE ON FUNCTION public.medical_bodies_to_encrypt(text, text, boolean, 
   TO clinic_api;
 GRANT EXECUTE ON FUNCTION public.medical_body_replace(text, integer, text, text)
   TO clinic_api;
+
+-- Patient name and phone (table in init.sql). FORCE RLS; no grants for
+-- app_guest, clinic_api or app_doctor (the doctor reads them only through
+-- doctor_visit_patients). Patient and registrar may change only full_name and
+-- phone; updated_at is set by the trigger. The admin sees the name, not the phone.
+CREATE OR REPLACE FUNCTION public.touch_patient_profile()
+RETURNS trigger
+LANGUAGE plpgsql
+SET search_path = pg_catalog, public, pg_temp
+AS $function$
+BEGIN
+  NEW.updated_at := CURRENT_TIMESTAMP;
+  RETURN NEW;
+END;
+$function$;
+
+DROP TRIGGER IF EXISTS patient_profiles_touch ON public.patient_profiles;
+CREATE TRIGGER patient_profiles_touch
+  BEFORE UPDATE ON public.patient_profiles
+  FOR EACH ROW
+  EXECUTE FUNCTION public.touch_patient_profile();
+
+-- Patients that existed before the table: demo names, otherwise a placeholder
+-- the patient is asked to replace on /me.
+INSERT INTO public.patient_profiles (user_id, full_name, phone)
+SELECT u.id,
+       CASE lower(u.email)
+         WHEN 'pat@clinic.local' THEN 'Narek Hakobyan'
+         WHEN 'pat2@clinic.local' THEN 'Ani Sargsyan'
+         ELSE 'Patient ' || u.id
+       END,
+       CASE lower(u.email)
+         WHEN 'pat@clinic.local' THEN '+374 10 123456'
+         WHEN 'pat2@clinic.local' THEN '+374 10 654321'
+         ELSE '+374 00 000000'
+       END
+FROM public.users AS u
+WHERE u.role = 'patient'
+ON CONFLICT DO NOTHING;
+
+ALTER TABLE public.patient_profiles ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.patient_profiles FORCE ROW LEVEL SECURITY;
+
+REVOKE ALL ON TABLE public.patient_profiles
+  FROM PUBLIC, clinic_api, app_guest, app_patient, app_doctor, app_registrar, app_admin;
+GRANT SELECT, UPDATE (full_name, phone) ON public.patient_profiles TO app_patient;
+GRANT SELECT, UPDATE (full_name, phone) ON public.patient_profiles TO app_registrar;
+GRANT SELECT (user_id, full_name) ON public.patient_profiles TO app_admin;
+
+DROP POLICY IF EXISTS patient_profiles_patient_select ON public.patient_profiles;
+DROP POLICY IF EXISTS patient_profiles_patient_update ON public.patient_profiles;
+DROP POLICY IF EXISTS patient_profiles_registrar_select ON public.patient_profiles;
+DROP POLICY IF EXISTS patient_profiles_registrar_update ON public.patient_profiles;
+DROP POLICY IF EXISTS patient_profiles_admin_select ON public.patient_profiles;
+CREATE POLICY patient_profiles_patient_select ON public.patient_profiles
+  FOR SELECT TO app_patient
+  USING (
+    user_id = current_setting('app.user_id', true)::integer
+    AND public.current_patient_is_active()
+  );
+CREATE POLICY patient_profiles_patient_update ON public.patient_profiles
+  FOR UPDATE TO app_patient
+  USING (
+    user_id = current_setting('app.user_id', true)::integer
+    AND public.current_patient_is_active()
+  )
+  WITH CHECK (
+    user_id = current_setting('app.user_id', true)::integer
+    AND public.current_patient_is_active()
+  );
+CREATE POLICY patient_profiles_registrar_select ON public.patient_profiles
+  FOR SELECT TO app_registrar
+  USING (
+    EXISTS (SELECT 1 FROM public.users AS u WHERE u.id = user_id AND u.role = 'patient')
+  );
+CREATE POLICY patient_profiles_registrar_update ON public.patient_profiles
+  FOR UPDATE TO app_registrar
+  USING (
+    EXISTS (SELECT 1 FROM public.users AS u WHERE u.id = user_id AND u.role = 'patient')
+  )
+  WITH CHECK (
+    EXISTS (SELECT 1 FROM public.users AS u WHERE u.id = user_id AND u.role = 'patient')
+  );
+CREATE POLICY patient_profiles_admin_select ON public.patient_profiles
+  FOR SELECT TO app_admin
+  USING (true);
+
+-- Public registration. The role is fixed to patient here, email, name, phone
+-- and the bcrypt hash are checked again, and the user and profile rows are
+-- written in one transaction. Only app_guest (the role of db_as_guest) may call it.
+DROP FUNCTION IF EXISTS public.register_patient(text, text, text, text);
+CREATE FUNCTION public.register_patient(
+  candidate_email text,
+  candidate_hash text,
+  candidate_name text,
+  candidate_phone text
+)
+RETURNS text
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = pg_catalog, public, pg_temp
+AS $function$
+DECLARE
+  normalized_email text := lower(btrim(coalesce(candidate_email, '')));
+  clean_name text := btrim(coalesce(candidate_name, ''));
+  clean_phone text := btrim(coalesce(candidate_phone, ''));
+  new_id integer;
+BEGIN
+  IF current_setting('role', true) IS DISTINCT FROM 'app_guest' THEN
+    RAISE EXCEPTION 'invalid registration context' USING ERRCODE = '42501';
+  END IF;
+  IF length(normalized_email) NOT BETWEEN 3 AND 254
+     OR normalized_email !~ '^[^@[:space:]]+@[^@[:space:]]+\.[^@[:space:]]+$'
+     OR length(clean_name) NOT BETWEEN 2 AND 100
+     OR clean_name ~ '[[:cntrl:]]'
+     OR clean_phone !~ '^[0-9+() -]{5,40}$'
+     OR length(regexp_replace(clean_phone, '[^0-9]', '', 'g')) < 5
+     OR candidate_hash IS NULL
+     OR candidate_hash !~ '^\$2[aby]\$[0-9]{2}\$[./A-Za-z0-9]{53}$' THEN
+    RETURN 'invalid';
+  END IF;
+
+  IF EXISTS (SELECT 1 FROM public.users AS u WHERE lower(u.email) = normalized_email) THEN
+    RETURN 'exists';
+  END IF;
+
+  BEGIN
+    INSERT INTO public.users (email, password_hash, role, blocked)
+    VALUES (normalized_email, candidate_hash, 'patient', FALSE)
+    RETURNING id INTO new_id;
+  EXCEPTION WHEN unique_violation THEN
+    RETURN 'exists';
+  END;
+
+  INSERT INTO public.patient_profiles (user_id, full_name, phone)
+  VALUES (new_id, clean_name, clean_phone);
+
+  RETURN 'created';
+END;
+$function$;
+
+REVOKE ALL ON FUNCTION public.register_patient(text, text, text, text) FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION public.register_patient(text, text, text, text) TO app_guest;
 
 COMMIT;

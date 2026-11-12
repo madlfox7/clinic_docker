@@ -104,9 +104,10 @@ def doctor_slots(request: Request, doctor_id: str):
         if requested_patient_email:
             cur.execute(
                 """
-                SELECT email, blocked
-                FROM users
-                WHERE lower(email) = %s AND role = 'patient'
+                SELECT u.email, u.blocked, pp.full_name
+                FROM users u
+                LEFT JOIN patient_profiles pp ON pp.user_id = u.id
+                WHERE lower(u.email) = %s AND u.role = 'patient'
                 """,
                 (requested_patient_email,),
             )
@@ -115,6 +116,7 @@ def doctor_slots(request: Request, doctor_id: str):
                 selected_patient = {
                     "email": patient_row[0],
                     "blocked": patient_row[1],
+                    "full_name": patient_row[2],
                 }
     if not doctor_active:
         cur.close()
@@ -164,10 +166,11 @@ def doctor_slots(request: Request, doctor_id: str):
         cur.execute(
             """
             SELECT d.full_name, u.email, svc.name, s.duration_minutes,
-                   s.buffer_minutes, a.starts_at, a.ends_at
+                   s.buffer_minutes, a.starts_at, a.ends_at, pp.full_name
             FROM appointments a
             JOIN doctors d ON d.id = a.doctor_id
             JOIN users u ON u.id = a.patient_user_id
+            LEFT JOIN patient_profiles pp ON pp.user_id = a.patient_user_id
             JOIN slots s ON s.id = a.slot_id
             JOIN services svc ON svc.id = s.service_id
             WHERE a.id = %s
@@ -181,6 +184,7 @@ def doctor_slots(request: Request, doctor_id: str):
             booking_confirmation = {
                 "doctor_name": row[0],
                 "patient_email": row[1],
+                "patient_name": row[7],
                 "service_name": row[2],
                 "duration_minutes": row[3],
                 "buffer_minutes": row[4],
@@ -815,7 +819,8 @@ def doctor_appointments(request: Request):
     cur = conn.cursor()
     cur.execute(
         """
-        SELECT a.id, dp.email, svc.name, a.starts_at, a.ends_at, a.status, dp.blocked
+        SELECT a.id, dp.email, svc.name, a.starts_at, a.ends_at, a.status, dp.blocked,
+               dp.full_name
         FROM appointments a
         JOIN slots s ON s.id=a.slot_id
         JOIN services svc ON svc.id=s.service_id
@@ -835,6 +840,7 @@ def doctor_appointments(request: Request):
             "ends_at": r[4],
             "status": r[5],
             "patient_blocked": r[6],
+            "patient_name": r[7],
         }
         for r in cur.fetchall()
     ]

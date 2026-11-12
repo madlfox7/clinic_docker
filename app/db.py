@@ -112,6 +112,26 @@ def clean_phone(value):
     return cleaned
 
 
+PATIENT_PLACEHOLDER_PHONE = "+374 00 000000"
+
+
+def clean_person_name(value):
+    """Patient full name: clean_label (2-100) plus no C1 control characters,
+    matching the CHECK (full_name !~ '[[:cntrl:]]') on patient_profiles."""
+    cleaned = clean_label(value)
+    if cleaned is None or any(unicodedata.category(ch) == "Cc" for ch in cleaned):
+        return None
+    return cleaned
+
+
+def patient_profile_needs_update(user_id: int, full_name, phone) -> bool:
+    """True for a missing profile or the backfill placeholder written by rls.sql."""
+    return (
+        not full_name
+        or full_name == f"Patient {user_id}"
+        or phone == PATIENT_PLACEHOLDER_PHONE
+    )
+
 
 def strip_control_chars(text: str) -> str:
     """Drop C0/C1 control characters from free text, keeping newlines and tabs."""

@@ -8,16 +8,30 @@ from db import (
     MAX_EMAIL_LENGTH,
     MAX_TEXT_LENGTH,
     contains_nul,
+    has_control_char,
     db_as,
     parse_strict_int,
     record_audit_event,
     templates,
     within_length,
 )
-from routes_auth import normalize_email_query, require_user
+from routes_auth import normalize_email_query, require_user, update_patient_profile
 
 
 router = APIRouter()
+
+
+def normalize_patient_query(value: str) -> str | None:
+    """Directory search by email or name: strip, lowercase, collapse spaces.
+
+    Control characters and anything over 254 bytes are rejected.
+    """
+    if not isinstance(value, str) or contains_nul(value) or has_control_char(value):
+        return None
+    normalized = " ".join(value.split()).lower()
+    if not within_length(normalized, MAX_EMAIL_LENGTH):
+        return None
+    return normalized
 
 
 @router.get("/registrar/patients")
@@ -26,7 +40,7 @@ def registrar_patients(request: Request):
     if denied:
         return denied
     raw_query = request.query_params.get("q", "")
-    query = normalize_email_query(raw_query)
+    query = normalize_patient_query(raw_query)
     if query is None:
         return templates.TemplateResponse(
             request,
@@ -43,19 +57,21 @@ def registrar_patients(request: Request):
     cur = conn.cursor()
     cur.execute(
         """
-        SELECT u.id, u.email, u.blocked, count(s.id) AS future_count
+        SELECT u.id, u.email, u.blocked, count(s.id) AS future_count,
+               pp.full_name, pp.phone
         FROM users u
+        LEFT JOIN patient_profiles pp ON pp.user_id = u.id
         LEFT JOIN appointments a
           ON a.patient_user_id = u.id AND a.status = 'scheduled'
         LEFT JOIN slots s
           ON s.id = a.slot_id AND s.starts_at > CURRENT_TIMESTAMP
         WHERE u.role = 'patient'
-          AND (%s = '' OR u.email ILIKE %s)
-        GROUP BY u.id, u.email, u.blocked
+          AND (%s = '' OR u.email ILIKE %s OR pp.full_name ILIKE %s)
+        GROUP BY u.id, u.email, u.blocked, pp.full_name, pp.phone
         ORDER BY u.email
         LIMIT 100
         """,
-        (query, f"%{query}%"),
+        (query, f"%{query}%", f"%{query}%"),
     )
     patients = [
         {
@@ -63,6 +79,9 @@ def registrar_patients(request: Request):
             "email": row[1],
             "blocked": row[2],
             "future_count": row[3],
+            "full_name": row[4],
+            "phone": row[5],
+            "profile_url": f"/registrar/patients/{row[0]}/profile",
             "book_url": (
                 f"/registrar/patients/{row[0]}/book"
                 if not row[2]
@@ -84,6 +103,87 @@ def registrar_patients(request: Request):
             "error": request.query_params.get("error"),
         },
     )
+
+
+def _registrar_profile_page(request, user, patient_id: int, error=None, saved=False, status_code=200):
+    conn = db_as(user)
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT u.id, u.email, u.blocked, pp.full_name, pp.phone
+                FROM users u
+                JOIN patient_profiles pp ON pp.user_id = u.id
+                WHERE u.id = %s AND u.role = 'patient'
+                """,
+                (patient_id,),
+            )
+            row = cur.fetchone()
+    finally:
+        conn.close()
+    if row is None:
+        return RedirectResponse("/registrar/patients?error=patient_not_found", status_code=303)
+    return templates.TemplateResponse(
+        request,
+        "registrar_patient_profile.html",
+        {
+            "request": request,
+            "role": user["role"],
+            "patient": {
+                "id": row[0],
+                "email": row[1],
+                "blocked": row[2],
+                "full_name": row[3],
+                "phone": row[4],
+            },
+            "error": error,
+            "saved": saved,
+        },
+        status_code=status_code,
+    )
+
+
+@router.get("/registrar/patients/{patient_id}/profile")
+def registrar_patient_profile(request: Request, patient_id: str):
+    user, denied = require_user(request, "registrar")
+    if denied:
+        return denied
+    patient_id = parse_strict_int(patient_id, min_value=1)
+    if patient_id is None:
+        return RedirectResponse("/registrar/patients?error=patient_not_found", status_code=303)
+    return _registrar_profile_page(
+        request, user, patient_id, saved=request.query_params.get("saved") == "1"
+    )
+
+
+@router.post("/registrar/patients/{patient_id}/profile")
+def registrar_update_patient_profile(
+    request: Request,
+    patient_id: str,
+    full_name: str = Form(""),
+    phone: str = Form(""),
+):
+    user, denied = require_user(request, "registrar")
+    if denied:
+        return denied
+    patient_id = parse_strict_int(patient_id, min_value=1)
+    if patient_id is None:
+        return RedirectResponse("/registrar/patients?error=patient_not_found", status_code=303)
+    conn = db_as(user)
+    try:
+        with conn.cursor() as cur:
+            result = update_patient_profile(cur, patient_id, full_name, phone)
+            if result != "saved":
+                conn.rollback()
+        if result == "saved":
+            conn.commit()
+    finally:
+        conn.close()
+    if result == "unavailable":
+        return RedirectResponse("/registrar/patients?error=patient_not_found", status_code=303)
+    if result != "saved":
+        return _registrar_profile_page(request, user, patient_id, error=result, status_code=400)
+    return RedirectResponse(f"/registrar/patients/{patient_id}/profile?saved=1", status_code=303)
 
 
 @router.get("/registrar/patients/search")
@@ -238,7 +338,8 @@ def _load_calendar(cur, start_day, day_count, doctor_id, role):
                ) AS slot_time_off,
                a.id, a.starts_at, a.ends_at, a.status,
                booked_service.name,
-               public.calendar_patient_email(a.patient_user_id, a.doctor_id)
+               public.calendar_patient_email(a.patient_user_id, a.doctor_id),
+               public.calendar_patient_name(a.patient_user_id, a.doctor_id)
         FROM calendar_days cd
         LEFT JOIN holidays h ON h.day = cd.day
         LEFT JOIN slots s
@@ -309,6 +410,7 @@ def _load_calendar(cur, start_day, day_count, doctor_id, role):
                     "doctor_name": row[6],
                     "service_name": row[16],
                     "patient_email": row[17],
+                    "patient_name": row[18],
                     "starts_at": row[13],
                     "ends_at": row[14],
                     "status": row[15],
@@ -359,6 +461,7 @@ def _load_calendar(cur, start_day, day_count, doctor_id, role):
                         "doctor_name": slot["doctor_name"],
                         "service_name": slot["service_name"],
                         "patient_email": None,
+                        "patient_name": None,
                         "starts_at": slot["starts_at"],
                         "ends_at": slot["ends_at"],
                         "status": status,

@@ -1,9 +1,11 @@
 {% extends "base.html" %}
+{% from "_patient.html" import patient_label %}
 {% from "_status.html" import status_badge %}
 {% block title %}Patient history{% endblock %}
 {% block content %}
 <h1>Patient history</h1>
-<p>{{ patient.email }} — {{ doctor_name }}</p>
+<p>{{ patient_label(patient.full_name, patient.email) }} — {{ doctor_name }}</p>
+{% if patient.phone %}<p>Phone: {{ patient.phone }}</p>{% endif %}
 {% if patient.blocked %}<div class="alert alert-warning"><strong>Patient account is blocked.</strong></div>{% endif %}
 <p><a class="btn btn-outline-primary btn-sm" href="/doctor/patients">Back to my patients</a></p>
 

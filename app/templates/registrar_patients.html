@@ -15,7 +15,7 @@
 <div class="card mb-3"><div class="card-body">
 <form class="row g-2 align-items-end" method="get" action="/registrar/patients">
   <div class="col-md-8">
-  <label class="form-label w-100 mb-0">Search email
+  <label class="form-label w-100 mb-0">Search by name or email
     <input class="form-control" type="search" name="q" value="{{ query }}" maxlength="254">
   </label>
   </div>
@@ -30,24 +30,26 @@
 <div class="table-responsive">
 <table class="table table-striped table-hover align-middle mb-0">
   <thead>
-    <tr><th>Email</th><th>Status</th><th>Future appointments</th><th>Action</th></tr>
+    <tr><th>Name</th><th>Phone</th><th>Email</th><th>Status</th><th>Future appointments</th><th>Action</th></tr>
   </thead>
   <tbody>
     {% for patient in patients %}
       <tr>
+        <td>{{ patient.full_name or "—" }}</td>
+        <td>{{ patient.phone or "—" }}</td>
         <td>{{ patient.email }}</td>
         <td>{% if patient.blocked %}<span class="badge text-bg-danger">Blocked</span>{% else %}<span class="badge text-bg-success">Active</span>{% endif %}</td>
         <td>{{ patient.future_count }}</td>
         <td>
           {% if patient.book_url %}
             <a class="btn btn-primary btn-sm" href="{{ patient.book_url }}">Book</a>
-          {% else %}
-            —
           {% endif %}
+          {% if patient.full_name %}<a class="btn btn-outline-primary btn-sm" href="{{ patient.profile_url }}">Edit</a>{% endif %}
+          {% if not patient.book_url and not patient.full_name %}—{% endif %}
         </td>
       </tr>
     {% else %}
-      <tr><td colspan="4">No patients found.</td></tr>
+      <tr><td colspan="6">No patients found.</td></tr>
     {% endfor %}
   </tbody>
 </table>

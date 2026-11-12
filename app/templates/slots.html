@@ -1,4 +1,5 @@
 {% extends "base.html" %}
+{% from "_patient.html" import patient_label %}
 {% block title %}Slots: {{ doctor.full_name }}{% endblock %}
 {% block content %}
 <h1>Slots: {{ doctor.full_name }}</h1>
@@ -49,7 +50,7 @@
     </label>
     <p id="registrar-patient-selection" aria-live="polite">
       {% if selected_patient %}
-        Selected: {{ selected_patient.email }}
+        Selected: {{ patient_label(selected_patient.full_name, selected_patient.email) }}
         {% if selected_patient.blocked %} — Blocked; booking is disabled.{% else %} — Active.{% endif %}
       {% else %}
         Search for a patient and select an active account before booking.
@@ -95,7 +96,7 @@
     <p>Appointment booked successfully.</p>
     <dl class="row mb-0">
       <dt class="col-sm-3">Doctor</dt><dd class="col-sm-9">{{ booking_confirmation.doctor_name }}</dd>
-      <dt class="col-sm-3">Patient</dt><dd class="col-sm-9">{{ booking_confirmation.patient_email }}</dd>
+      <dt class="col-sm-3">Patient</dt><dd class="col-sm-9">{{ patient_label(booking_confirmation.patient_name, booking_confirmation.patient_email) }}</dd>
       <dt class="col-sm-3">Service</dt><dd class="col-sm-9">{{ booking_confirmation.service_name }}</dd>
       <dt class="col-sm-3">Date and time</dt>
       <dd class="col-sm-9">{{ booking_confirmation.starts_at.strftime("%A, %Y-%m-%d %H:%M") }}–{{ booking_confirmation.ends_at.strftime("%H:%M") }}</dd>

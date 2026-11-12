@@ -4,6 +4,7 @@ import time
 from typing import List
 from urllib.parse import urlencode
 
+import psycopg2.errors
 from psycopg2.errors import UniqueViolation
 from fastapi import APIRouter, Form, Request
 from fastapi.responses import RedirectResponse
@@ -16,12 +17,15 @@ from db import (
     MAX_EMAIL_LENGTH,
     MAX_PASSWORD_LENGTH,
     PG_INT_MAX,
+    clean_person_name,
+    clean_phone,
     contains_nul,
     db_as_guest,
     db,
     db_as,
     load_session_user,
     log,
+    patient_profile_needs_update,
     pwd,
     record_audit_event,
     templates,
@@ -166,6 +170,8 @@ def _register_page(
     error: str | None = None,
     status_code: int = 200,
     email: str = "",
+    full_name: str = "",
+    phone: str = "",
 ):
     return templates.TemplateResponse(
         request,
@@ -175,6 +181,8 @@ def _register_page(
             "role": "guest",
             "error": error,
             "email": email,
+            "full_name": full_name,
+            "phone": phone,
         },
         status_code=status_code,
     )
@@ -304,6 +312,8 @@ def register(
     email: str = Form(...),
     password: str = Form(...),
     confirm_password: str = Form(...),
+    full_name: str = Form(""),
+    phone: str = Form(""),
 ):
     user, status = load_session_user(request)
     if status == "blocked":
@@ -311,19 +321,36 @@ def register(
     if status == "ok":
         return RedirectResponse("/me", status_code=303)
 
-    if contains_nul(email, password, confirm_password):
+    if contains_nul(email, password, confirm_password, full_name, phone):
         return _register_page(request, "NUL characters are not allowed.", 400)
     normalized_email = _normalize_registration_email(email)
     if normalized_email is None:
         return _register_page(request, "Enter a valid email address.", 400, email)
+    clean_name = clean_person_name(full_name)
+    if clean_name is None:
+        return _register_page(
+            request, "Enter your full name (2–100 characters).", 400, normalized_email,
+            phone=phone if clean_phone(phone) else "",
+        )
+    cleaned_phone = clean_phone(phone)
+    if cleaned_phone is None:
+        return _register_page(
+            request,
+            "Enter a valid phone number (digits, spaces, + ( ) -, at least 5 digits).",
+            400,
+            normalized_email,
+            clean_name,
+        )
+    keep = {"full_name": clean_name, "phone": cleaned_phone}
     if has_edge_space(password) or has_edge_space(confirm_password):
-        return _register_page(request, EDGE_SPACE_ERROR, 400, normalized_email)
+        return _register_page(request, EDGE_SPACE_ERROR, 400, normalized_email, **keep)
     if not within_length(password, MAX_PASSWORD_LENGTH) or len(password) < 8:
         return _register_page(
             request,
             "Password must be 8–72 bytes and at least 8 characters.",
             400,
             normalized_email,
+            **keep,
         )
     if is_weak_password(password, normalized_email):
         return _register_page(
@@ -331,6 +358,7 @@ def register(
             "Choose a non-default password.",
             400,
             normalized_email,
+            **keep,
         )
     if password != confirm_password:
         return _register_page(
@@ -338,29 +366,35 @@ def register(
             "Passwords do not match.",
             400,
             normalized_email,
+            **keep,
         )
 
     conn = db_as_guest()
     try:
         with conn.cursor() as cur:
             cur.execute(
-                """
-                INSERT INTO users (email, password_hash, role, blocked)
-                VALUES (%s, %s, 'patient', FALSE)
-                """,
-                (normalized_email, pwd.hash(password)),
+                "SELECT public.register_patient(%s, %s, %s, %s)",
+                (normalized_email, pwd.hash(password), clean_name, cleaned_phone),
             )
+            outcome = cur.fetchone()[0]
         conn.commit()
     except UniqueViolation:
         conn.rollback()
+        outcome = "exists"
+    finally:
+        conn.close()
+    if outcome == "exists":
         return _register_page(
             request,
             "An account with this email already exists.",
             409,
             normalized_email,
+            **keep,
         )
-    finally:
-        conn.close()
+    if outcome != "created":
+        return _register_page(
+            request, "Check the registration details.", 400, normalized_email, **keep
+        )
     return RedirectResponse("/login?registered=1", status_code=303)
 
 
@@ -660,10 +694,23 @@ def me(request: Request):
     if denied:
         return denied
     upcoming_visits = []
+    profile = None
     if user["role"] == "patient":
         conn = db_as(user)
         try:
             with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT full_name, phone FROM patient_profiles WHERE user_id = %s",
+                    (user["id"],),
+                )
+                row = cur.fetchone()
+                profile = {
+                    "full_name": row[0] if row else "",
+                    "phone": row[1] if row else "",
+                    "needs_update": patient_profile_needs_update(
+                        user["id"], row[0] if row else None, row[1] if row else None
+                    ),
+                }
                 cur.execute(
                     """
                     SELECT a.id, d.full_name, svc.name, a.starts_at, a.ends_at
@@ -708,6 +755,9 @@ def me(request: Request):
             "email": user["email"],
             "role": user["role"],
             "upcoming_visits": upcoming_visits,
+            "profile": profile,
+            "profile_saved": request.query_params.get("profile_saved"),
+            "profile_error": request.query_params.get("profile_error"),
             "email_notifications": email_notifications,
             "notifications_saved": request.query_params.get("notifications_saved"),
             "notifications_error": request.query_params.get("notifications_error"),
@@ -717,6 +767,53 @@ def me(request: Request):
             "email_error": request.query_params.get("email_error"),
         },
     )
+
+
+def update_patient_profile(cur, patient_id: int, full_name, phone) -> str:
+    """Validate and store a patient's name and phone under the caller's role.
+
+    Returns "saved", "name", "phone" or "unavailable". The journal entry carries
+    only ids, never the name or the phone.
+    """
+    clean_name = clean_person_name(full_name)
+    if clean_name is None:
+        return "name"
+    cleaned_phone = clean_phone(phone)
+    if cleaned_phone is None:
+        return "phone"
+    try:
+        cur.execute(
+            "UPDATE patient_profiles SET full_name = %s, phone = %s WHERE user_id = %s",
+            (clean_name, cleaned_phone, patient_id),
+        )
+    except psycopg2.errors.CheckViolation:
+        return "invalid"
+    if cur.rowcount != 1:
+        return "unavailable"
+    record_audit_event(cur, "patient.profile.update", "patient", patient_id)
+    return "saved"
+
+
+@router.post("/me/profile")
+def update_own_profile(
+    request: Request,
+    full_name: str = Form(""),
+    phone: str = Form(""),
+):
+    user, denied = require_user(request, "patient")
+    if denied:
+        return denied
+    conn = db_as(user)
+    try:
+        with conn.cursor() as cur:
+            result = update_patient_profile(cur, user["id"], full_name, phone)
+            if result != "saved":
+                conn.rollback()
+                return RedirectResponse(f"/me?profile_error={result}", status_code=303)
+        conn.commit()
+    finally:
+        conn.close()
+    return RedirectResponse("/me?profile_saved=1", status_code=303)
 
 
 @router.post("/me/notifications")

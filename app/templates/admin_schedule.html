@@ -1,4 +1,5 @@
 {% extends "base.html" %}
+{% from "_patient.html" import patient_label %}
 {% from "_status.html" import status_badge %}
 {% block title %}Schedule management{% endblock %}
 {% block content %}
@@ -35,7 +36,7 @@
     <ul class="clinic-list">
       {% for visit in upcoming_visits %}
         <li>
-          {{ visit.patient_email }} — {{ visit.doctor_name }} —
+          {{ patient_label(visit.patient_name, visit.patient_email) }} — {{ visit.doctor_name }} —
           {{ visit.service_name }} —
           {{ visit.starts_at.strftime("%Y-%m-%d %H:%M") }}–{{ visit.ends_at.strftime("%H:%M") }}
           {{ status_badge(visit.status) }}
@@ -59,7 +60,7 @@
     <ul class="clinic-list">
       {% for visit in manual_cancel_visits %}
         <li>
-          {{ visit.patient_email }} — {{ visit.doctor_name }} —
+          {{ patient_label(visit.patient_name, visit.patient_email) }} — {{ visit.doctor_name }} —
           {{ visit.service_name }} —
           {{ visit.starts_at.strftime("%Y-%m-%d %H:%M") }}–{{ visit.ends_at.strftime("%H:%M") }}
           <form class="inline-form" method="post" action="/appointments/{{ visit.appointment_id }}/cancel" data-confirm="Cancel this appointment?">
@@ -82,7 +83,7 @@
     <ul class="clinic-list">
       {% for visit in outside_hours_visits %}
         <li>
-          {{ visit.patient_email }} — {{ visit.doctor_name }} —
+          {{ patient_label(visit.patient_name, visit.patient_email) }} — {{ visit.doctor_name }} —
           {{ visit.service_name }} —
           {{ visit.starts_at.strftime("%Y-%m-%d %H:%M") }}–{{ visit.ends_at.strftime("%H:%M") }}
           <form class="inline-form" method="post" action="/appointments/{{ visit.appointment_id }}/cancel" data-confirm="Cancel this appointment?">

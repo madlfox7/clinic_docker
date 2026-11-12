@@ -66,6 +66,19 @@ CHECK (auth_version >= 0);
 CREATE UNIQUE INDEX IF NOT EXISTS users_email_lower_unique
 ON users (lower(email));
 
+-- Patient name and phone. Grants, RLS and the only INSERT paths (register_patient,
+-- seed, backfill) are in rls.sql. The CHECKs repeat the api validators because
+-- patients and registrars update the row directly through their column grants.
+CREATE TABLE IF NOT EXISTS patient_profiles (
+  user_id INTEGER PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+  full_name TEXT NOT NULL,
+  phone TEXT NOT NULL,
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  CHECK (length(btrim(full_name)) BETWEEN 2 AND 100),
+  CHECK (full_name !~ '[[:cntrl:]]'),
+  CHECK (phone ~ '^[0-9+() -]{5,40}$')
+);
+
 CREATE TABLE IF NOT EXISTS email_change_requests (
   id BIGSERIAL PRIMARY KEY,
   user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,

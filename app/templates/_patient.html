@@ -1,0 +1,4 @@
+{#- Patient label: the name first, the email second. Both are auto-escaped. -#}
+{%- macro patient_label(name, email) -%}
+{%- if name %}{{ name }} — {% endif %}{{ email }}
+{%- endmacro -%}

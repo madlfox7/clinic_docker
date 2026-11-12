@@ -112,7 +112,7 @@ def admin_users(request: Request):
     cur = conn.cursor()
     cur.execute(
         """
-        SELECT p.id, p.email, p.blocked,
+        SELECT p.id, p.email, p.blocked, pp.full_name,
                (
                    SELECT count(*)
                    FROM appointments a
@@ -122,6 +122,7 @@ def admin_users(request: Request):
                      AND s.starts_at > CURRENT_TIMESTAMP
                ) AS future_scheduled
         FROM users p
+        LEFT JOIN patient_profiles pp ON pp.user_id = p.id
         WHERE p.role='patient'
         ORDER BY p.email
         """
@@ -131,7 +132,8 @@ def admin_users(request: Request):
             "id": row[0],
             "email": row[1],
             "blocked": row[2],
-            "future_scheduled": row[3],
+            "full_name": row[3],
+            "future_scheduled": row[4],
         }
         for row in cur.fetchall()
     ]
@@ -1069,9 +1071,11 @@ def _outside_hours_sql(alias="s"):
 def _scheduled_visit_rows(cur, where_sql, params):
     cur.execute(
         f"""
-        SELECT a.id, u.email, d.full_name, svc.name, a.starts_at, a.ends_at, a.status
+        SELECT a.id, u.email, d.full_name, svc.name, a.starts_at, a.ends_at, a.status,
+               pp.full_name
         FROM appointments a
         JOIN users u ON u.id = a.patient_user_id
+        LEFT JOIN patient_profiles pp ON pp.user_id = a.patient_user_id
         JOIN slots s ON s.id = a.slot_id
         JOIN doctors d ON d.id = s.doctor_id
         JOIN services svc ON svc.id = s.service_id
@@ -1085,6 +1089,7 @@ def _scheduled_visit_rows(cur, where_sql, params):
         {
             "appointment_id": row[0],
             "patient_email": row[1],
+            "patient_name": row[7],
             "doctor_name": row[2],
             "service_name": row[3],
             "starts_at": row[4],

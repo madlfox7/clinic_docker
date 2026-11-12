@@ -1,4 +1,5 @@
 {% extends "base.html" %}
+{% from "_patient.html" import patient_label %}
 {% from "_status.html" import status_badge %}
 {% block title %}{{ calendar_title }}{% endblock %}
 {% block content %}
@@ -66,14 +67,14 @@
           {% if event.status == "cancelled" %}
             <li class="is-cancelled">
               {{ event.starts_at.strftime("%H:%M") }}–{{ event.ends_at.strftime("%H:%M") }} —
-              {{ event.service_name }} — {{ event.patient_email or "Patient" }} — {{ status_badge("cancelled") }}
+              {{ event.service_name }} — {% if event.patient_email %}{{ patient_label(event.patient_name, event.patient_email) }}{% else %}Patient{% endif %} — {{ status_badge("cancelled") }}
               {% if event.closed_reasons %}<strong> — Closed</strong>{% endif %}
             </li>
           {% else %}
             <li>
               {{ event.starts_at.strftime("%H:%M") }}–{{ event.ends_at.strftime("%H:%M") }} —
               {{ event.service_name }} —
-              {% if event.patient_email %}{{ event.patient_email }} — {{ status_badge(event.status) }}
+              {% if event.patient_email %}{{ patient_label(event.patient_name, event.patient_email) }} — {{ status_badge(event.status) }}
               {% elif event.status == "available" %}Available
               {% elif event.status == "closed" %}Closed — {{ event.closed_reasons|join(", ") }}
               {% else %}Past{% endif %}
@@ -89,7 +90,7 @@
     <div class="card d-none d-md-block">
     <div class="table-responsive">
     <table class="table table-striped align-middle mb-0">
-      <thead><tr><th>Time</th><th>Doctor</th><th>Service</th><th>Patient email</th><th>Status</th></tr></thead>
+      <thead><tr><th>Time</th><th>Doctor</th><th>Service</th><th>Patient</th><th>Status</th></tr></thead>
       <tbody>
         {% for time in time_rows %}
           {% for event in calendar_day.cells.get(time, []) %}
@@ -97,7 +98,7 @@
               <td>{{ event.starts_at.strftime("%H:%M") }}–{{ event.ends_at.strftime("%H:%M") }}</td>
               <td>{{ event.doctor_name }}</td>
               <td>{{ event.service_name }}</td>
-              <td>{{ event.patient_email }}</td>
+              <td>{% if event.patient_email %}{{ patient_label(event.patient_name, event.patient_email) }}{% endif %}</td>
               <td>{{ status_badge(event.status) }}</td>
             </tr>
           {% endfor %}
@@ -114,7 +115,7 @@
           <li{% if event.status == "cancelled" %} class="is-cancelled"{% endif %}>
             <span class="slot-time">{{ event.starts_at.strftime("%H:%M") }}–{{ event.ends_at.strftime("%H:%M") }}</span>
             — {{ event.doctor_name }} — {{ event.service_name }}
-            {% if event.patient_email %}— {{ event.patient_email }}{% endif %}
+            {% if event.patient_email %}— {{ patient_label(event.patient_name, event.patient_email) }}{% endif %}
             — {{ status_badge(event.status) }}
           </li>
         {% endfor %}
@@ -152,7 +153,7 @@
                   {{ event.starts_at.strftime("%H:%M") }}–{{ event.ends_at.strftime("%H:%M") }}
                   {% if role == "registrar" %}<br>{{ event.doctor_name }}{% endif %}
                   <br>{{ event.service_name }}
-                  {% if event.patient_email %}<br>{{ event.patient_email }}{% endif %}
+                  {% if event.patient_email %}<br>{{ patient_label(event.patient_name, event.patient_email) }}{% endif %}
                   <br>{{ status_badge(event.status) }}
                   {% if event.closed_reasons %} — {{ event.closed_reasons|join(", ") }}{% endif %}
                 </div>
@@ -178,7 +179,7 @@
               <span class="slot-time">{{ event.starts_at.strftime("%H:%M") }}–{{ event.ends_at.strftime("%H:%M") }}</span>
               {% if role == "registrar" %}— {{ event.doctor_name }}{% endif %}
               — {{ event.service_name }}
-              {% if event.patient_email %}— {{ event.patient_email }}{% endif %}
+              {% if event.patient_email %}— {{ patient_label(event.patient_name, event.patient_email) }}{% endif %}
               — {{ status_badge(event.status) }}
               {% if event.closed_reasons %} — {{ event.closed_reasons|join(", ") }}{% endif %}
             </li>

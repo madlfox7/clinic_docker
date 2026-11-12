@@ -1,0 +1,23 @@
+{% extends "base.html" %}
+{% block title %}Patient profile{% endblock %}
+{% block content %}
+<h1>Patient profile</h1>
+<p class="text-body-secondary">Name and phone only; medical records are not shown here.</p>
+{% if saved %}<div class="alert alert-success">Profile saved.</div>{% endif %}
+{% if error == "name" %}<div class="alert alert-danger" role="alert">Enter the full name (2–100 characters).</div>
+{% elif error == "phone" %}<div class="alert alert-danger" role="alert">Enter a valid phone number (digits, spaces, + ( ) -, at least 5 digits).</div>
+{% elif error %}<div class="alert alert-danger" role="alert">Could not save the profile.</div>{% endif %}
+<div class="card mb-3"><div class="card-body">
+<dl class="row mb-3">
+  <dt class="col-sm-3">Email</dt><dd class="col-sm-9">{{ patient.email }}</dd>
+  <dt class="col-sm-3">Status</dt><dd class="col-sm-9">{% if patient.blocked %}<span class="badge text-bg-danger">Blocked</span>{% else %}<span class="badge text-bg-success">Active</span>{% endif %}</dd>
+</dl>
+<form class="row g-2 align-items-end" method="post" action="/registrar/patients/{{ patient.id }}/profile">
+  <input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}">
+  <div class="col-md-5"><label class="form-label w-100 mb-0">Full name <input class="form-control" name="full_name" type="text" minlength="2" maxlength="100" value="{{ patient.full_name }}" required></label></div>
+  <div class="col-md-4"><label class="form-label w-100 mb-0">Phone <input class="form-control" name="phone" type="tel" maxlength="40" value="{{ patient.phone }}" required></label></div>
+  <div class="col-md-3"><button class="btn btn-primary" type="submit">Save</button></div>
+</form>
+</div></div>
+<p><a href="/registrar/patients">Back to patients</a></p>
+{% endblock %}

@@ -29,7 +29,7 @@ def doctor_patients(request: Request):
     cur = conn.cursor()
     cur.execute(
         """
-        SELECT dp.id, dp.email, dp.blocked,
+        SELECT dp.id, dp.email, dp.blocked, dv.full_name,
                COUNT(a.id) AS visit_count,
                COUNT(a.id) FILTER (
                    WHERE a.status = 'scheduled' AND a.starts_at > CURRENT_TIMESTAMP
@@ -41,23 +41,25 @@ def doctor_patients(request: Request):
                    WHERE a.starts_at <= CURRENT_TIMESTAMP
                ) AS last_visit
         FROM public.doctor_patients(%s) dp
+        LEFT JOIN public.doctor_visit_patients(%s) dv ON dv.id = dp.id
         JOIN appointments a ON a.patient_user_id = dp.id
         JOIN doctors d ON d.id = a.doctor_id
         WHERE d.user_id = %s
-        GROUP BY dp.id, dp.email, dp.blocked
+        GROUP BY dp.id, dp.email, dp.blocked, dv.full_name
         ORDER BY MAX(a.starts_at) DESC, lower(dp.email), dp.id
         """,
-        (user["id"], user["id"]),
+        (user["id"], user["id"], user["id"]),
     )
     patients = [
         {
             "id": row[0],
             "email": row[1],
             "blocked": row[2],
-            "visit_count": row[3],
-            "upcoming_count": row[4],
-            "next_visit": row[5],
-            "last_visit": row[6],
+            "full_name": row[3],
+            "visit_count": row[4],
+            "upcoming_count": row[5],
+            "next_visit": row[6],
+            "last_visit": row[7],
         }
         for row in cur.fetchall()
     ]
@@ -100,11 +102,12 @@ def doctor_patient_history(request: Request, patient_id: str):
 
     cur.execute(
         """
-        SELECT id, email, blocked
-        FROM public.doctor_patients(%s)
-        WHERE id = %s
+        SELECT dp.id, dp.email, dp.blocked, dv.full_name, dv.phone
+        FROM public.doctor_patients(%s) dp
+        LEFT JOIN public.doctor_visit_patients(%s) dv ON dv.id = dp.id
+        WHERE dp.id = %s
         """,
-        (user["id"], patient_id),
+        (user["id"], user["id"], patient_id),
     )
     patient = cur.fetchone()
     if patient is None:
@@ -192,6 +195,8 @@ def doctor_patient_history(request: Request, patient_id: str):
                 "id": patient[0],
                 "email": patient[1],
                 "blocked": patient[2],
+                "full_name": patient[3],
+                "phone": patient[4],
             },
             "visits": visits,
         },
@@ -214,7 +219,7 @@ def doctor_records(request: Request, appointment_id: str):
     cur.execute(
         """
         SELECT a.id, dp.email, d.full_name, a.starts_at, a.ends_at, a.status,
-               a.starts_at <= CURRENT_TIMESTAMP AS started
+               a.starts_at <= CURRENT_TIMESTAMP AS started, dp.full_name
         FROM appointments a
         JOIN doctors d ON d.id = a.doctor_id
         JOIN public.doctor_visit_patients(%s) dp ON dp.id = a.patient_user_id
@@ -270,6 +275,7 @@ def doctor_records(request: Request, appointment_id: str):
             "appointment": {
                 "id": appointment[0],
                 "patient_email": appointment[1],
+                "patient_name": appointment[7],
                 "doctor_name": appointment[2],
                 "starts_at": appointment[3],
                 "ends_at": appointment[4],
