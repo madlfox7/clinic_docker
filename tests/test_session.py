@@ -12,7 +12,7 @@ from urllib.parse import urlparse
 
 import pytest
 
-from tests.registration import PATIENT_FIELDS, confirm_registration
+from tests.registration import PATIENT_FIELDS, confirm_registration, registration_limit_reset  # noqa: F401 (autouse)
 from tests.csrf_client import CsrfClient
 from tests.demo_secret import demo_password
 from tests.test_rls_boundary import compose_exec, compose_exec_run

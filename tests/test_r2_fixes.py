@@ -18,6 +18,7 @@ from tests.registration import (
     latest_verification_token,
     register_patient,
     registration_form,
+    registration_limit_reset,  # noqa: F401 (autouse)
     verification_messages,
 )
 

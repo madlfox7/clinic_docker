@@ -2823,6 +2823,57 @@ $function$;
 REVOKE ALL ON FUNCTION public.register_patient(text, text, text, text) FROM PUBLIC;
 GRANT EXECUTE ON FUNCTION public.register_patient(text, text, text, text) TO app_guest;
 
+-- POST /register, before the password is hashed. Limits: 20 per 15 minutes
+-- and 100 per day per source, 5 per day per email. Every accepted attempt
+-- counts, whatever the outcome (new, existing or invalid email), so the answer
+-- never depends on whether the account exists. Refused attempts are not
+-- recorded, so a bot behind the same NAT cannot extend the block.
+CREATE OR REPLACE FUNCTION public.note_registration_attempt(
+  candidate_email text,
+  candidate_source text
+)
+RETURNS boolean            -- TRUE = limited
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = pg_catalog, public, pg_temp
+AS $function$
+DECLARE
+  email_key bytea := public.digest(lower(btrim(coalesce(candidate_email, ''))), 'sha256');
+  source_key bytea := public.digest(coalesce(candidate_source, ''), 'sha256');
+BEGIN
+  PERFORM pg_advisory_xact_lock(
+    hashtextextended('registration:' || encode(source_key, 'hex'), 0));
+
+  DELETE FROM public.registration_attempts
+  WHERE requested_at < CURRENT_TIMESTAMP - INTERVAL '1 day';
+
+  IF (SELECT count(*) FROM public.registration_attempts
+      WHERE source_fingerprint = source_key
+        AND requested_at > CURRENT_TIMESTAMP - INTERVAL '15 minutes') >= 20
+     OR (SELECT count(*) FROM public.registration_attempts
+         WHERE source_fingerprint = source_key
+           AND requested_at > CURRENT_TIMESTAMP - INTERVAL '1 day') >= 100
+     OR (SELECT count(*) FROM public.registration_attempts
+         WHERE email_fingerprint = email_key
+           AND requested_at > CURRENT_TIMESTAMP - INTERVAL '1 day') >= 5 THEN
+    PERFORM public.record_auth_event(
+      'auth.rate_limited', NULL, NULL, 'registration', candidate_source);
+    RETURN TRUE;
+  END IF;
+
+  INSERT INTO public.registration_attempts (email_fingerprint, source_fingerprint)
+  VALUES (email_key, source_key);
+  RETURN FALSE;
+END;
+$function$;
+
+REVOKE ALL ON TABLE public.registration_attempts
+  FROM PUBLIC, clinic_api, app_guest, app_patient, app_doctor, app_registrar, app_admin;
+REVOKE ALL ON SEQUENCE public.registration_attempts_id_seq
+  FROM PUBLIC, clinic_api, app_guest, app_patient, app_doctor, app_registrar, app_admin;
+REVOKE ALL ON FUNCTION public.note_registration_attempt(text, text) FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION public.note_registration_attempt(text, text) TO clinic_api;
+
 -- Email confirmation after registration (tables in init.sql). The api reaches
 -- these only as clinic_api; no role has direct rights on the tables.
 

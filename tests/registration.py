@@ -7,8 +7,10 @@ import os
 import re
 
 import httpx
+import pytest
 
 from tests.csrf_client import CsrfClient
+from tests.test_rls_boundary import compose_exec
 
 BASE = os.environ.get("CLINIC_TEST_BASE", "http://localhost:8080")
 MAILPIT = os.environ.get("CLINIC_MAILPIT", "http://127.0.0.1:8025")
@@ -16,6 +18,24 @@ PATIENT_NAME = "Test Patient"
 PATIENT_PHONE = "+374 10 000111"
 PATIENT_FIELDS = {"full_name": PATIENT_NAME, "phone": PATIENT_PHONE}
 VERIFY_LINK = re.compile(r"/verify-email\?token=([0-9a-f]{64})")
+
+
+def clear_registration_attempts() -> None:
+    """Empty the POST /register rate limit table (superuser psql, tests only).
+
+    The whole suite runs from one source (the Docker gateway behind the proxy)
+    and registers far more than 20 accounts in 15 minutes; the limit itself is
+    not raised for tests and the app has no bypass.
+    """
+    compose_exec("db", ["psql", "-X", "-U", "clinic", "-d", "clinic", "-At", "-c",
+                        "DELETE FROM registration_attempts"])
+
+
+@pytest.fixture(autouse=True)
+def registration_limit_reset():
+    """Import into a test module that posts /register: fresh limit per test."""
+    clear_registration_attempts()
+    yield
 
 
 def registration_form(email: str, password: str, confirm_password: str | None = None, **fields) -> dict:
@@ -69,6 +89,7 @@ def confirm_registration(address: str) -> httpx.Response:
 
 def register_patient(c, email: str, password: str, confirm: bool = True, **fields) -> httpx.Response:
     """POST /register with name and phone; confirm the email unless told not to."""
+    clear_registration_attempts()
     created = c.post("/register", data=registration_form(email, password, **fields))
     if confirm and "registered=1" in str(created.url):
         confirm_registration(email)

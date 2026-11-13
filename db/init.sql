@@ -112,6 +112,19 @@ CREATE INDEX IF NOT EXISTS email_verification_attempts_email_idx
 CREATE INDEX IF NOT EXISTS email_verification_attempts_source_idx
   ON email_verification_attempts (source_fingerprint, requested_at);
 
+-- POST /register attempts that passed the form checks: hashes of the
+-- email and of the source only, one row per attempt, kept for one day.
+CREATE TABLE IF NOT EXISTS registration_attempts (
+  id BIGSERIAL PRIMARY KEY,
+  email_fingerprint BYTEA NOT NULL,
+  source_fingerprint BYTEA NOT NULL,
+  requested_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+CREATE INDEX IF NOT EXISTS registration_attempts_source_idx
+  ON registration_attempts (source_fingerprint, requested_at);
+CREATE INDEX IF NOT EXISTS registration_attempts_email_idx
+  ON registration_attempts (email_fingerprint, requested_at);
+
 -- Patient name and phone. Grants, RLS and the only INSERT paths (register_patient,
 -- seed, backfill) are in rls.sql. The CHECKs repeat the api validators because
 -- patients and registrars update the row directly through their column grants.
@@ -718,12 +731,38 @@ ALTER TABLE audit_events ADD CONSTRAINT audit_events_actor_check
       AND action IN ('auth.login.failure', 'auth.rate_limited')
     )
   );
-ALTER TABLE audit_events DROP CONSTRAINT IF EXISTS audit_events_reason_check;
-ALTER TABLE audit_events ADD CONSTRAINT audit_events_reason_check
-  CHECK (reason IS NULL OR reason IN (
-    'bad_credentials', 'blocked', 'login', 'password_reset', 'email_change',
-    'idle_timeout', 'absolute_timeout', 'unverified', 'email_verification'
-  ));
+-- The reasons CHECK is rebuilt only when its definition lacks the newest
+-- reason, so a normal restart does not rescan audit_events.
+DO $$
+BEGIN
+  IF EXISTS (
+    SELECT 1 FROM pg_constraint
+    WHERE conname = 'audit_events_reason_check'
+      AND conrelid = 'public.audit_events'::regclass
+      AND pg_get_constraintdef(oid) NOT LIKE '%''registration''%'
+  ) THEN
+    ALTER TABLE public.audit_events DROP CONSTRAINT audit_events_reason_check;
+  END IF;
+END
+$$;
+
+DO $$
+BEGIN
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_constraint
+    WHERE conname = 'audit_events_reason_check'
+      AND conrelid = 'public.audit_events'::regclass
+  ) THEN
+    ALTER TABLE public.audit_events
+      ADD CONSTRAINT audit_events_reason_check
+      CHECK (reason IS NULL OR reason IN (
+        'bad_credentials', 'blocked', 'login', 'password_reset', 'email_change',
+        'idle_timeout', 'absolute_timeout', 'unverified', 'email_verification',
+        'registration'
+      ));
+  END IF;
+END
+$$;
 ALTER TABLE audit_events DROP CONSTRAINT IF EXISTS audit_events_source_check;
 ALTER TABLE audit_events ADD CONSTRAINT audit_events_source_check
   CHECK (source IS NULL OR length(source) <= 64);

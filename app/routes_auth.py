@@ -389,6 +389,34 @@ def register(
             **keep,
         )
 
+    # Rate limit before bcrypt and register_patient, the same for a new and an
+    # existing email. A database failure here fails closed (503).
+    try:
+        conn = db()
+        try:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT public.note_registration_attempt(%s, %s)",
+                    (normalized_email, client_ip(request)),
+                )
+                limited = cur.fetchone()[0]
+            conn.commit()
+        finally:
+            conn.close()
+    except psycopg2.Error:
+        log.exception("registration rate limit check failed")
+        response = _register_page(
+            request, "Registration is temporarily unavailable. Try again later.", 503
+        )
+        response.headers["Retry-After"] = "60"
+        return response
+    if limited:
+        response = _register_page(
+            request, "Too many registration attempts. Try again later.", 429
+        )
+        response.headers["Retry-After"] = "900"
+        return response
+
     token = None
     conn = db_as_guest()
     try:
