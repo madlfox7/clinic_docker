@@ -49,11 +49,12 @@ def _run_init(root: pathlib.Path, **env):
                           capture_output=True, text=True, timeout=60)
 
 
-def _issue_leaf(tmp: pathlib.Path, ca_dir: pathlib.Path, name: str, san: str, days: int) -> tuple[pathlib.Path, pathlib.Path]:
+def _issue_leaf(tmp: pathlib.Path, ca_dir: pathlib.Path, name: str, san: str, days: int,
+                eku: str = "serverAuth") -> tuple[pathlib.Path, pathlib.Path]:
     key, csr, crt, ext = (tmp / f"{name}.key", tmp / f"{name}.csr", tmp / f"{name}.crt", tmp / f"{name}.ext")
     ext.write_text(
         f"subjectAltName = {san}\nbasicConstraints = critical, CA:FALSE\n"
-        "keyUsage = critical, digitalSignature\nextendedKeyUsage = serverAuth\n"
+        f"keyUsage = critical, digitalSignature\nextendedKeyUsage = {eku}\n"
         "subjectKeyIdentifier = hash\nauthorityKeyIdentifier = keyid\n"
     )
     _openssl("req", "-new", "-newkey", "ec", "-pkeyopt", "ec_paramgen_curve:P-256", "-nodes",
@@ -109,11 +110,33 @@ def test_server_and_ca_certificates_have_the_strict_extensions():
     ca = _openssl("x509", "-in", str(TLS / "ca.crt"), "-noout", "-text").stdout
     assert "X509v3 Name Constraints: critical" in ca
     constraints = ca.split("X509v3 Name Constraints: critical", 1)[1].split("X509v3", 1)[0]
+    constraints = constraints.split("Signature Algorithm", 1)[0]
     for name in ("DNS:localhost", "IP:127.0.0.1/255.255.255.255",
                  "IP:0:0:0:0:0:0:0:1/FFFF:FFFF:FFFF:FFFF:FFFF:FFFF:FFFF:FFFF"):
         assert name in constraints, constraints
-    assert constraints.count("DNS:") + constraints.count("IP:") == 3, constraints
+    permitted, _, excluded = constraints.partition("Excluded:")
+    assert "Permitted:" in permitted
+    assert permitted.count("DNS:") + permitted.count("IP:") == 3, constraints
+    assert excluded.split() == ["DNS:.localhost"], constraints
     assert "X509v3 Basic Constraints: critical\n                CA:TRUE, pathlen:0" in ca
+
+
+def test_ca_signs_server_certificates_only():
+    eku = _openssl("x509", "-in", str(TLS / "ca.crt"), "-noout", "-ext", "extendedKeyUsage").stdout
+    assert eku.split("\n", 1)[1].strip() == "TLS Web Server Authentication", eku
+    usage = _openssl("x509", "-in", str(TLS / "ca.crt"), "-noout", "-ext", "keyUsage").stdout
+    assert "critical" in usage and "Certificate Sign, CRL Sign" in usage, usage
+
+
+def test_ca_refuses_client_auth_and_localhost_subdomains(tmp_path):
+    _, sub = _issue_leaf(tmp_path, TLS, "sub", "DNS:app.localhost", 5)
+    checked = _openssl("verify", "-CAfile", str(TLS / "ca.crt"), str(sub), check=False)
+    assert checked.returncode != 0 and "excluded subtree violation" in checked.stdout + checked.stderr
+    _, leaf = _issue_leaf(tmp_path, TLS, "leaf", "DNS:localhost", 5, eku="serverAuth, clientAuth")
+    assert _openssl("verify", "-purpose", "sslserver", "-CAfile", str(TLS / "ca.crt"), str(leaf)).returncode == 0
+    # The leaf asks for clientAuth too, but the CA's EKU does not pass it on.
+    client = _openssl("verify", "-purpose", "sslclient", "-CAfile", str(TLS / "ca.crt"), str(leaf), check=False)
+    assert client.returncode != 0, client.stdout
 
 
 def test_name_constraints_refuse_a_leaf_for_another_site(tmp_path):
@@ -1053,3 +1076,18 @@ def test_env_prod_example():
     assert lines["SESSION_HTTPS_ONLY"] == "true" and lines["CLINIC_ACME_WEBROOT"] == "false"
     url = lines["PUBLIC_BASE_URL"]
     assert url.startswith("https://") and url.count(":") == 1 and url.count("/") == 2
+
+
+def test_old_ca_without_eku_is_kept_with_a_warning(tmp_path):
+    root = _script_copy(tmp_path)
+    tls = root / "secrets" / "tls"
+    _make_ca(tls, days=400, constraints="nameConstraints=critical,permitted;DNS:localhost,"
+             "permitted;IP:127.0.0.1/255.255.255.255,permitted;IP:::1/ffff:ffff:ffff:ffff:ffff:ffff:ffff:ffff")
+    ca_sha = _sha(tls / "ca.crt")
+    done = _run_init(root)
+    assert done.returncode == 0, done.stderr
+    assert "not limited to server certificates" in done.stderr
+    assert _sha(tls / "ca.crt") == ca_sha
+    fresh = _script_copy(tmp_path / "fresh")
+    done = _run_init(fresh)
+    assert done.returncode == 0 and "not limited to server certificates" not in done.stderr

@@ -74,8 +74,9 @@ CN = Clinic stand local CA
 [clinic_ca_ext]
 basicConstraints = critical, CA:TRUE, pathlen:0
 keyUsage = critical, keyCertSign, cRLSign
+extendedKeyUsage = serverAuth
 subjectKeyIdentifier = hash
-nameConstraints = critical, permitted;DNS:localhost, permitted;IP:127.0.0.1/255.255.255.255, permitted;IP:::1/ffff:ffff:ffff:ffff:ffff:ffff:ffff:ffff
+nameConstraints = critical, permitted;DNS:localhost, permitted;IP:127.0.0.1/255.255.255.255, permitted;IP:::1/ffff:ffff:ffff:ffff:ffff:ffff:ffff:ffff, excluded;DNS:.localhost
 CA_CONFIG
   openssl req -x509 -new -newkey ec -pkeyopt ec_paramgen_curve:P-256 -nodes \
     -keyout "$ca_key_new" -out "$ca_crt_new" -days 1825 -config "$ca_cfg" 2>/dev/null \
@@ -163,6 +164,9 @@ if [ "$TLS_MODE" = local ]; then
   done
   if ! openssl x509 -checkend 5184000 -noout -in "$TLS_DIR/ca.crt" >/dev/null 2>&1; then
     tls_warn "$TLS_DIR/ca.crt expires within 60 days; it is not renewed automatically."
+  fi
+  if ! openssl x509 -noout -ext extendedKeyUsage -in "$TLS_DIR/ca.crt" 2>/dev/null | grep -q "TLS Web Server Authentication"; then
+    tls_warn "$TLS_DIR/ca.crt is not limited to server certificates (made by an older version); move secrets/tls away and rerun to create a new CA"
   fi
   leaf_problem="$(tls_leaf_problem)"
   if [ -n "$leaf_problem" ]; then
