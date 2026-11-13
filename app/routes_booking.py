@@ -976,14 +976,33 @@ def my_appointments(request: Request):
     )
 
 
+DOCTOR_STATUS_FILTERS = {
+    "upcoming": "a.status = 'scheduled' AND a.starts_at > CURRENT_TIMESTAMP",
+    "past": (
+        "(a.status = 'completed'"
+        " OR (a.status = 'scheduled' AND a.starts_at <= CURRENT_TIMESTAMP))"
+    ),
+    "cancelled": "a.status = 'cancelled'",
+    "all": "TRUE",
+}
+
+
 @router.get("/doctor/appointments")
 def doctor_appointments(request: Request):
     user, denied = require_user(request, "doctor")
     if denied:
         return denied
     role = user["role"]
+    params = request.query_params
+    filter_errors = []
+    status = params.get("status", "all")
+    if status not in DOCTOR_STATUS_FILTERS:
+        filter_errors.append("invalid_filter")
+        status = "all"
+    page = parse_page(params.get("page"))
     conn = db_as(user)
     cur = conn.cursor()
+    # Visibility stays with RLS appointments_doctor and doctor_visit_patients.
     cur.execute(
         """
         SELECT a.id, dp.email, svc.name, a.starts_at, a.ends_at, a.status, dp.blocked,
@@ -994,10 +1013,30 @@ def doctor_appointments(request: Request):
         JOIN doctors d ON d.id=s.doctor_id
         JOIN public.doctor_visit_patients(%s) dp ON dp.id=a.patient_user_id
         WHERE d.user_id=%s
-        ORDER BY a.starts_at
+          AND """
+        + DOCTOR_STATUS_FILTERS[status]
+        + """
+        ORDER BY
+            CASE
+              WHEN a.status = 'scheduled'
+               AND a.starts_at > CURRENT_TIMESTAMP THEN 0
+              ELSE 1
+            END,
+            CASE
+              WHEN a.status = 'scheduled'
+               AND a.starts_at > CURRENT_TIMESTAMP THEN a.starts_at
+            END ASC,
+            CASE
+              WHEN a.status != 'scheduled'
+                OR a.starts_at <= CURRENT_TIMESTAMP THEN a.starts_at
+            END DESC,
+            a.id DESC
+        LIMIT %s OFFSET %s
         """,
-        (user["id"], user["id"]),
+        (user["id"], user["id"], MY_PAGE_SIZE + 1, (page - 1) * MY_PAGE_SIZE),
     )
+    rows = cur.fetchall()
+    has_next = len(rows) > MY_PAGE_SIZE
     items = [
         {
             "id": r[0],
@@ -1009,14 +1048,32 @@ def doctor_appointments(request: Request):
             "patient_blocked": r[6],
             "patient_name": r[7],
         }
-        for r in cur.fetchall()
+        for r in rows[:MY_PAGE_SIZE]
     ]
     cur.close()
     conn.close()
+    filters = {"status": status if status != "all" else None}
     return templates.TemplateResponse(
         request,
         "doctor_appointments.html",
-        {"request": request, "items": items, "role": role},
+        {
+            "request": request,
+            "items": items,
+            "role": role,
+            "status": status,
+            "filter_errors": filter_errors,
+            "page": page,
+            "previous_url": (
+                url_with("/doctor/appointments", {**filters, "page": page - 1})
+                if page > 1
+                else None
+            ),
+            "next_url": (
+                url_with("/doctor/appointments", {**filters, "page": page + 1})
+                if has_next
+                else None
+            ),
+        },
     )
 
 

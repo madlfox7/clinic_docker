@@ -280,7 +280,7 @@ def _calendar_navigation(path, view, selected_day, doctor_id=None, extra=None):
     }
 
 
-def _load_calendar(cur, start_day, day_count, doctor_id, role):
+def _load_calendar(cur, start_day, day_count, doctor_id, role, service_id=None, active_only=False):
     cur.execute(
         """
         WITH calendar_days AS (
@@ -318,13 +318,15 @@ def _load_calendar(cur, start_day, day_count, doctor_id, role):
                a.id, a.starts_at, a.ends_at, a.status,
                booked_service.name,
                public.calendar_patient_email(a.patient_user_id, a.doctor_id),
-               public.calendar_patient_name(a.patient_user_id, a.doctor_id)
+               public.calendar_patient_name(a.patient_user_id, a.doctor_id),
+               a.starts_at > CURRENT_TIMESTAMP AS appointment_future
         FROM calendar_days cd
         LEFT JOIN holidays h ON h.day = cd.day
         LEFT JOIN slots s
           ON s.starts_at >= cd.day::timestamp
          AND s.starts_at < (cd.day + 1)::timestamp
          AND (%s::integer IS NULL OR s.doctor_id = %s)
+         AND (%s::integer IS NULL OR s.service_id = %s)
         LEFT JOIN doctors d ON d.id = s.doctor_id
         LEFT JOIN services svc ON svc.id = s.service_id
         LEFT JOIN appointments a
@@ -343,6 +345,8 @@ def _load_calendar(cur, start_day, day_count, doctor_id, role):
             doctor_id,
             doctor_id,
             doctor_id,
+            service_id,
+            service_id,
         ),
     )
     rows = cur.fetchall()
@@ -379,6 +383,8 @@ def _load_calendar(cur, start_day, day_count, doctor_id, role):
                 "has_appointment": False,
             },
         )
+        if row[12] is not None and active_only and row[15] == "cancelled":
+            continue
         if row[12] is not None:
             if row[15] != "cancelled":
                 slot["has_appointment"] = True
@@ -394,6 +400,7 @@ def _load_calendar(cur, start_day, day_count, doctor_id, role):
                     "ends_at": row[14],
                     "status": row[15],
                     "time_off": row[11],
+                    "future": row[19],
                 },
             )
             appointment["time_off"] = appointment["time_off"] or row[11]
@@ -482,6 +489,17 @@ def registrar_appointments(request: Request):
         if doctor_id is not None:
             errors.append("invalid_doctor")
         doctor_id = None
+    status_filter = request.query_params.get("status", "all")
+    if status_filter not in ("all", "active"):
+        errors.append("invalid_status")
+        status_filter = "all"
+    raw_service_id = request.query_params.get("service_id")
+    service_id = parse_strict_int(raw_service_id, min_value=1) if raw_service_id else None
+    cur.execute("SELECT id, name FROM services ORDER BY name, id")
+    services = [{"id": row[0], "name": row[1]} for row in cur.fetchall()]
+    if raw_service_id and service_id not in {item["id"] for item in services}:
+        errors.append("invalid_service")
+        service_id = None
 
     day_count = 7 if view == "week" else 1
     start_day = (
@@ -490,7 +508,8 @@ def registrar_appointments(request: Request):
         else selected_day
     )
     calendar_days, time_rows = _load_calendar(
-        cur, start_day, day_count, doctor_id, "registrar"
+        cur, start_day, day_count, doctor_id, "registrar",
+        service_id=service_id, active_only=status_filter == "active",
     )
     cur.close()
     conn.close()
@@ -511,8 +530,15 @@ def registrar_appointments(request: Request):
             "doctor_id": doctor_id,
             "errors": errors,
             "navigation": _calendar_navigation(
-                "/registrar/appointments", view, selected_day, doctor_id
+                "/registrar/appointments", view, selected_day, doctor_id,
+                {
+                    "status": status_filter if status_filter != "all" else None,
+                    "service_id": service_id,
+                },
             ),
+            "services": services,
+            "service_id": service_id,
+            "status_filter": status_filter,
             "requests": [],
             "doctor": None,
             "reschedule_error": request.query_params.get("reschedule_error") == "1",

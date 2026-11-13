@@ -988,3 +988,74 @@ def test_old_volume_check_is_upgraded_once_and_reschedule_works():
     # a second start leaves the extended CHECK alone (same constraint, no rebuild)
     _run_migrate()
     assert _change_check() == (oid, definition)
+
+
+# --- 2. Registrar calendar and doctor appointment list ------------------------
+
+def test_registrar_calendar_status_service_filters_and_actions():
+    s = _Setup(times=("10:00", "11:00"))
+    cancelled = _book_sql(s.targets[0], _user_id(PAT2), "cancelled")
+    try:
+        with _client() as reg, _client() as doc:
+            _login(reg, REG)
+            _login(doc, DOC)
+            base = {"view": "day", "day": s.day, "doctor_id": str(s.doctor)}
+            page = reg.get("/registrar/appointments", params=base)
+            assert page.status_code == 200
+            assert f'href="/appointments/{s.old}/reschedule"' in page.text
+            assert f'action="/appointments/{s.old}/cancel"' in page.text
+            assert f"/appointments/{cancelled}/reschedule" not in page.text
+            assert "cancelled</span>" in page.text
+            active = reg.get("/registrar/appointments", params={**base, "status": "active"})
+            assert "cancelled</span>" not in active.text
+            assert f'href="/appointments/{s.old}/reschedule"' in active.text
+            assert "status=active" in active.text
+            week = reg.get("/registrar/appointments", params={**base, "view": "week", "service_id": "1"})
+            assert f'href="/appointments/{s.old}/reschedule"' in week.text
+            assert "service_id=1" in week.text
+            other_service = reg.get("/registrar/appointments", params={**base, "service_id": str(NO_SUCH_ID)})
+            assert other_service.status_code == 200 and "Invalid service" in other_service.text
+            for bad in ({"status": "x' OR 1=1"}, {"service_id": "1 OR 1=1"}):
+                bad_page = reg.get("/registrar/appointments", params={**base, **bad})
+                assert bad_page.status_code == 200 and "Traceback" not in bad_page.text
+            doctor_view = doc.get("/doctor/calendar", params={"view": "day", "day": s.day})
+            assert "/reschedule" not in doctor_view.text
+            cancel = reg.post(f"/appointments/{s.old}/cancel")
+            assert cancel.status_code == 200 and _status(s.old) == "cancelled"
+    finally:
+        s.cleanup()
+
+
+def test_doctor_appointment_list_filters_and_pages():
+    doctor = _doctor_id(DOC)
+    pat = _user_id(PAT)
+    day = _free_days(1)[0]
+    slots = [_make_slot(doctor, f"{day} {hour:02d}:{minute:02d}")
+             for hour in range(0, 13) for minute in (0, 30)][:25]
+    try:
+        visits = [_book_sql(slot, pat) for slot in slots]
+        _psql(f"UPDATE appointments SET status = 'cancelled' WHERE id = {visits[-1]}")
+        with _client() as doc, _client() as doc2:
+            _login(doc, DOC)
+            _login(doc2, DOC2)
+            upcoming = doc.get("/doctor/appointments", params={"status": "upcoming"})
+            ids1 = [int(x) for x in re.findall(r'href="/doctor/appointments/(\d+)/records"', upcoming.text)]
+            assert len(ids1) == 20 and "page=2" in upcoming.text
+            second = doc.get("/doctor/appointments", params={"status": "upcoming", "page": "2"})
+            ids2 = [int(x) for x in re.findall(r'href="/doctor/appointments/(\d+)/records"', second.text)]
+            assert not set(ids1) & set(ids2)
+            assert set(visits[:-1]) <= set(ids1 + ids2)
+            assert visits[-1] not in ids1 + ids2
+            cancelled = doc.get("/doctor/appointments", params={"status": "cancelled"})
+            assert f"/doctor/appointments/{visits[-1]}/records" in cancelled.text
+            past = doc.get("/doctor/appointments", params={"status": "past"})
+            assert not set(visits) & {int(x) for x in re.findall(
+                r'href="/doctor/appointments/(\d+)/records"', past.text)}
+            for bad in ({"status": "nope"}, {"page": "0"}, {"page": "abc"}, {"page": "501"}):
+                page = doc.get("/doctor/appointments", params=bad)
+                assert page.status_code == 200, bad
+            other = doc2.get("/doctor/appointments", params={"status": "upcoming"})
+            assert not set(visits) & {int(x) for x in re.findall(
+                r'href="/doctor/appointments/(\d+)/records"', other.text)}
+    finally:
+        _cleanup_slots(slots)

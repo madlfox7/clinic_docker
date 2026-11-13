@@ -2,6 +2,17 @@
 {% from "_patient.html" import patient_label %}
 {% from "_status.html" import status_badge %}
 {% block title %}{{ calendar_title }}{% endblock %}
+{% macro registrar_actions(event) -%}
+  {%- if role == "registrar" and event.id and event.status == "scheduled" and event.future %}
+    <span class="calendar-actions">
+      <a class="btn btn-outline-primary btn-sm" href="/appointments/{{ event.id }}/reschedule">Reschedule</a>
+      <form class="inline-form" method="post" action="/appointments/{{ event.id }}/cancel" data-confirm="Cancel this appointment?">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}">
+        <button class="btn btn-outline-danger btn-sm" type="submit">Cancel</button>
+      </form>
+    </span>
+  {%- endif %}
+{%- endmacro %}
 {% block content %}
 
 <h1>{{ calendar_title }}</h1>
@@ -15,7 +26,9 @@
     {% if error == "invalid_day" %}<div class="alert alert-warning">Invalid date; showing today.</div>
     {% elif error == "day_out_of_range" %}<div class="alert alert-warning">Date must be between years 1900 and 2100; showing today.</div>
     {% elif error == "invalid_view" %}<div class="alert alert-warning">Invalid calendar view; showing day view.</div>
-    {% elif error == "invalid_doctor" %}<div class="alert alert-warning">Invalid doctor; showing all doctors.</div>{% endif %}
+    {% elif error == "invalid_doctor" %}<div class="alert alert-warning">Invalid doctor; showing all doctors.</div>
+    {% elif error == "invalid_status" %}<div class="alert alert-warning">Invalid status filter; showing all appointments.</div>
+    {% elif error == "invalid_service" %}<div class="alert alert-warning">Invalid service; showing all services.</div>{% endif %}
   {% endfor %}
 {% endif %}
 
@@ -35,6 +48,22 @@
         {% for item in doctors %}
           <option value="{{ item.id }}" {% if doctor_id == item.id %}selected{% endif %}>{{ item.full_name }}</option>
         {% endfor %}
+      </select>
+    </label></div>
+  {% endif %}
+  {% if role == "registrar" %}
+    <div class="col-sm-6 col-md-3"><label class="form-label w-100 mb-0">Service
+      <select class="form-select" name="service_id">
+        <option value="">All services</option>
+        {% for item in services %}
+          <option value="{{ item.id }}" {% if service_id == item.id %}selected{% endif %}>{{ item.name }}</option>
+        {% endfor %}
+      </select>
+    </label></div>
+    <div class="col-sm-6 col-md-3"><label class="form-label w-100 mb-0">Show
+      <select class="form-select" name="status">
+        <option value="all" {% if status_filter == "all" %}selected{% endif %}>All, with cancelled</option>
+        <option value="active" {% if status_filter == "active" %}selected{% endif %}>Hide cancelled</option>
       </select>
     </label></div>
   {% endif %}
@@ -100,7 +129,7 @@
               <td>{{ event.doctor_name }}</td>
               <td>{{ event.service_name }}</td>
               <td>{% if event.patient_email %}{{ patient_label(event.patient_name, event.patient_email) }}{% endif %}</td>
-              <td>{{ status_badge(event.status) }}</td>
+              <td>{{ status_badge(event.status) }} {{ registrar_actions(event) }}</td>
             </tr>
           {% endfor %}
         {% else %}
@@ -117,7 +146,7 @@
             <span class="slot-time">{{ event.starts_at.strftime("%H:%M") }}–{{ event.ends_at.strftime("%H:%M") }}</span>
             — {{ event.doctor_name }} — {{ event.service_name }}
             {% if event.patient_email %}— {{ patient_label(event.patient_name, event.patient_email) }}{% endif %}
-            — {{ status_badge(event.status) }}
+            — {{ status_badge(event.status) }} {{ registrar_actions(event) }}
           </li>
         {% endfor %}
       {% else %}
@@ -157,6 +186,7 @@
                   {% if event.patient_email %}<br>{{ patient_label(event.patient_name, event.patient_email) }}{% endif %}
                   <br>{{ status_badge(event.status) }}
                   {% if event.closed_reasons %} — {{ event.closed_reasons|join(", ") }}{% endif %}
+                  {{ registrar_actions(event) }}
                 </div>
               {% endfor %}
             </td>
@@ -183,6 +213,7 @@
               {% if event.patient_email %}— {{ patient_label(event.patient_name, event.patient_email) }}{% endif %}
               — {{ status_badge(event.status) }}
               {% if event.closed_reasons %} — {{ event.closed_reasons|join(", ") }}{% endif %}
+              {{ registrar_actions(event) }}
             </li>
           {% endfor %}
         {% endfor %}
