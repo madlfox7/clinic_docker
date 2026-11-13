@@ -3,11 +3,13 @@
 {% block content %}
 <h1>Clinic settings</h1>
 {% if saved == "1" %}<div class="alert alert-success">Clinic settings saved.</div>
-{% elif saved == "session" %}<div class="alert alert-success">Session timeout saved.</div>{% endif %}
+{% elif saved == "session" %}<div class="alert alert-success">Session timeout saved.</div>
+{% elif saved == "deadline" %}<div class="alert alert-success">Change deadline saved.</div>{% endif %}
 {% if error == "invalid_address" %}<div class="alert alert-danger" role="alert">Address can be empty, but not longer than 300 characters or contain control characters.</div>
 {% elif error == "invalid_text" %}<div class="alert alert-danger" role="alert">Text fields cannot contain a NUL character.</div>
 {% elif error == "invalid_phone" %}<div class="alert alert-danger" role="alert">Enter a phone number using digits, spaces, and +()- only.</div>
-{% elif error == "invalid_idle" %}<div class="alert alert-danger" role="alert">Session timeout must be a whole number of minutes from {{ idle_min }} to {{ idle_max }}.</div>{% endif %}
+{% elif error == "invalid_idle" %}<div class="alert alert-danger" role="alert">Session timeout must be a whole number of minutes from {{ idle_min }} to {{ idle_max }}.</div>
+{% elif error == "invalid_deadline" %}<div class="alert alert-danger" role="alert">The change deadline must be a whole number of hours from {{ deadline_min }} to {{ deadline_max }}.</div>{% endif %}
 <div class="card auth-card ms-0"><div class="card-body">
 <form method="post" action="/admin/settings">
   <input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}">
@@ -23,6 +25,15 @@
   <div class="mb-3"><label class="form-label w-100">Idle timeout, minutes <input class="form-control" type="number" name="idle_minutes" min="{{ idle_min }}" max="{{ idle_max }}" step="1" required value="{{ idle_minutes }}"></label>
   <div class="form-text">Users are signed out after this many minutes without activity ({{ idle_min }}–{{ idle_max }}). Sessions also end {{ absolute_hours }} hours after sign-in.</div></div>
   <button class="btn btn-primary" type="submit">Save session timeout</button>
+</form>
+</div></div>
+<h2 class="h4 mt-4">Patient changes</h2>
+<div class="card auth-card ms-0"><div class="card-body">
+<form method="post" action="/admin/settings/change-deadline">
+  <input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}">
+  <div class="mb-3"><label class="form-label w-100">Change deadline, hours <input class="form-control" type="number" name="deadline_hours" min="{{ deadline_min }}" max="{{ deadline_max }}" step="1" required value="{{ deadline_hours }}"></label>
+  <div class="form-text">Patients can cancel or reschedule up to N hours before the visit ({{ deadline_min }}–{{ deadline_max }}; 0 = until the start). Staff are not limited.</div></div>
+  <button class="btn btn-primary" type="submit">Save change deadline</button>
 </form>
 </div></div>
 {% endblock %}

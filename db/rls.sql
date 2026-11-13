@@ -1947,6 +1947,25 @@ WHERE email IS DISTINCT FROM lower(btrim(email));
 
 DROP POLICY IF EXISTS patient_appointments ON public.appointments;
 DROP POLICY IF EXISTS doctor_appointments ON public.appointments;
+-- The moment after which a patient can no longer cancel or move a visit:
+-- clinic local time (starts_at is TIMESTAMP without zone, so the session
+-- TimeZone must not matter) plus the admin-set deadline. NULL (no settings
+-- row) makes every comparison NULL, so the patient UPDATE policy fails closed.
+CREATE OR REPLACE FUNCTION public.patient_change_cutoff()
+RETURNS timestamp
+LANGUAGE sql
+STABLE
+SET search_path = pg_catalog, public, pg_temp
+AS $function$
+  SELECT (CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Yerevan')
+         + make_interval(hours => cs.patient_change_deadline_hours)
+  FROM public.clinic_settings AS cs
+  WHERE cs.id = 1
+$function$;
+REVOKE ALL ON FUNCTION public.patient_change_cutoff() FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION public.patient_change_cutoff()
+  TO app_patient, app_registrar, app_admin;
+
 DROP POLICY IF EXISTS registrar_appointments ON public.appointments;
 DROP POLICY IF EXISTS admin_appointments ON public.appointments;
 DROP POLICY IF EXISTS admin_cancel ON public.appointments;
@@ -1986,6 +2005,9 @@ CREATE POLICY appointments_patient_update ON public.appointments
   USING (
     patient_user_id = current_setting('app.user_id', true)::int
     AND status = 'scheduled'
+    -- Patients cancel or move a visit only before the change deadline. This
+    -- also filters SELECT ... FOR UPDATE, so the app checks the deadline first.
+    AND starts_at > public.patient_change_cutoff()
     AND public.current_patient_is_active()
   )
   WITH CHECK (
@@ -2548,6 +2570,56 @@ $function$;
 
 REVOKE ALL ON FUNCTION public.set_session_idle_minutes(integer) FROM PUBLIC;
 GRANT EXECUTE ON FUNCTION public.set_session_idle_minutes(integer) TO app_admin;
+
+-- The patient change deadline changes only here, written like
+-- set_session_idle_minutes: admin check, range check, update and journal entry
+-- with old and new value in one transaction; app_admin has no UPDATE grant on
+-- the column.
+CREATE OR REPLACE FUNCTION public.set_patient_change_deadline_hours(new_hours integer)
+RETURNS integer
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = pg_catalog, public, pg_temp
+AS $function$
+DECLARE
+  actor_id integer := NULLIF(current_setting('app.user_id', true), '')::integer;
+  current_hours integer;
+BEGIN
+  IF current_setting('role', true) IS DISTINCT FROM 'app_admin'
+     OR NOT EXISTS (
+       SELECT 1 FROM public.users
+       WHERE id = actor_id AND role = 'admin' AND NOT blocked
+     ) THEN
+    RAISE EXCEPTION 'invalid admin context' USING ERRCODE = '42501';
+  END IF;
+  IF new_hours IS NULL OR new_hours NOT BETWEEN 0 AND 48 THEN
+    RAISE EXCEPTION 'patient change deadline must be between 0 and 48 hours'
+      USING ERRCODE = '22023';
+  END IF;
+  SELECT patient_change_deadline_hours INTO current_hours
+  FROM public.clinic_settings
+  WHERE id = 1
+  FOR UPDATE;
+  IF NOT FOUND THEN
+    RAISE EXCEPTION 'clinic settings row is missing';
+  END IF;
+  IF current_hours = new_hours THEN
+    RETURN current_hours;
+  END IF;
+  UPDATE public.clinic_settings SET patient_change_deadline_hours = new_hours WHERE id = 1;
+  INSERT INTO public.audit_events (
+    actor_user_id, actor_role, action, target_type, target_id, old_value, new_value
+  )
+  VALUES (
+    actor_id, 'admin', 'clinic.change_deadline.update', 'clinic', 1,
+    current_hours, new_hours
+  );
+  RETURN new_hours;
+END;
+$function$;
+
+REVOKE ALL ON FUNCTION public.set_patient_change_deadline_hours(integer) FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION public.set_patient_change_deadline_hours(integer) TO app_admin;
 
 -- Medical text encryption: the api encrypts plaintext rows left in an older
 -- volume, rewrites legacy fe1 packets (not bound to their row) as row-bound

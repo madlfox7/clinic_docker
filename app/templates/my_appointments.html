@@ -5,9 +5,11 @@
 <h1>My appointments</h1>
 <p><a class="btn btn-outline-primary btn-sm" href="/my/records">My medical records</a></p>
 {% if cancelled %}<div class="alert alert-success">Appointment cancelled.</div>{% endif %}
-{% if cancel_error %}<div class="alert alert-warning">Appointment could not be cancelled. It may not belong to you or may already be cancelled.</div>
+{% if cancel_error == "too_late" %}<div class="alert alert-warning">Appointments can be cancelled online up to {{ deadline_hours }} hours before the visit. Please call the clinic.</div>
+{% elif cancel_error %}<div class="alert alert-warning">Appointment could not be cancelled. It may not belong to you or may already be cancelled.</div>
 {% endif %}
-{% if reschedule_error %}<div class="alert alert-warning">Appointment could not be rescheduled. It may not belong to you, may already be cancelled or may have started.</div>{% endif %}
+{% if reschedule_error == "too_late" %}<div class="alert alert-warning">Appointments can be rescheduled online up to {{ deadline_hours }} hours before the visit. Please call the clinic.</div>
+{% elif reschedule_error %}<div class="alert alert-warning">Appointment could not be rescheduled. It may not belong to you, may already be cancelled or may have started.</div>{% endif %}
 {% if reschedule_confirmation %}
   <div class="card border-success mb-3">
     <div class="card-body">
@@ -61,6 +63,7 @@
 </form>
 </div></div>
 {% if items %}
+{% if deadline_hours > 0 %}<p class="text-muted">You can cancel or reschedule online up to {{ deadline_hours }} hours before the visit.</p>{% endif %}
 <ul class="clinic-list">
   {% for a in items %}
     <li{% if a.status == "cancelled" %} class="is-cancelled"{% endif %}>
@@ -73,6 +76,8 @@
           <button class="btn btn-outline-danger btn-sm" type="submit">Cancel appointment</button>
         </form>
         <a class="btn btn-outline-primary btn-sm" href="/appointments/{{ a.id }}/reschedule">Reschedule</a>
+      {% elif a.late %}
+        <span class="text-muted">Online changes closed ({{ deadline_hours }} h before the visit). Call the clinic to cancel or reschedule.</span>
       {% endif %}
       {% if a.notes %}
         <div class="mt-2">Report / diagnosis:

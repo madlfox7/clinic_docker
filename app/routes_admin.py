@@ -38,7 +38,7 @@ from db import (
 )
 from date_filters import date_range, range_bounds, url_with
 from mailer import deliver_appointment_emails, smtp_ready
-from session_config import ABSOLUTE_HOURS, IDLE_MAX, IDLE_MIN
+from session_config import ABSOLUTE_HOURS, DEADLINE_MAX, DEADLINE_MIN, IDLE_MAX, IDLE_MIN
 from routes_auth import (
     _normalize_registration_email,
     deliver_password_reset,
@@ -71,7 +71,8 @@ AUDIT_ACTIONS = (
     "appointment.complete", "appointment.reschedule",
     "auth.login.failure", "auth.login.success", "auth.logout",
     "auth.rate_limited", "auth.session_expired",
-    "clinic.session_idle.update", "clinic.settings.update",
+    "clinic.change_deadline.update", "clinic.session_idle.update",
+    "clinic.settings.update",
     "doctor.activate", "doctor.deactivate", "doctor.invite", "doctor.update",
     "medical.note.save", "medical.patient_history.view",
     "medical.prescription.add", "medical.records.view",
@@ -1076,7 +1077,8 @@ def admin_settings(request: Request):
     conn = db_as(admin_user)
     cur = conn.cursor()
     cur.execute(
-        "SELECT address, phone, session_idle_minutes FROM clinic_settings WHERE id = 1"
+        "SELECT address, phone, session_idle_minutes, patient_change_deadline_hours"
+        " FROM clinic_settings WHERE id = 1"
     )
     row = cur.fetchone()
     cur.close()
@@ -1095,6 +1097,9 @@ def admin_settings(request: Request):
             "idle_min": IDLE_MIN,
             "idle_max": IDLE_MAX,
             "absolute_hours": ABSOLUTE_HOURS,
+            "deadline_hours": row[3],
+            "deadline_min": DEADLINE_MIN,
+            "deadline_max": DEADLINE_MAX,
             "saved": request.query_params.get("saved"),
             "error": request.query_params.get("error"),
         },
@@ -1161,6 +1166,28 @@ def update_session_settings(request: Request, idle_minutes: str = Form("")):
     finally:
         conn.close()
     return RedirectResponse("/admin/settings?saved=session", status_code=303)
+
+
+@router.post("/admin/settings/change-deadline")
+def update_change_deadline(request: Request, deadline_hours: str = Form("")):
+    admin_user, denied = require_user(request, "admin")
+    if denied:
+        return denied
+    hours = parse_strict_int(deadline_hours, DEADLINE_MIN, DEADLINE_MAX)
+    if hours is None:
+        return RedirectResponse("/admin/settings?error=invalid_deadline", status_code=303)
+    conn = db_as(admin_user)
+    try:
+        with conn:
+            with conn.cursor() as cur:
+                # The DEFINER function checks the admin, updates the value and
+                # journals old and new values in the same transaction.
+                cur.execute("SELECT public.set_patient_change_deadline_hours(%s)", (hours,))
+    except (psycopg2.errors.CheckViolation, psycopg2.errors.InvalidParameterValue):
+        return RedirectResponse("/admin/settings?error=invalid_deadline", status_code=303)
+    finally:
+        conn.close()
+    return RedirectResponse("/admin/settings?saved=deadline", status_code=303)
 
 
 def _purge_slots_without_scheduled(cur, where_sql, params):

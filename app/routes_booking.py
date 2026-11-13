@@ -658,7 +658,8 @@ def cancel_appointment(request: Request, appointment_id: str):
     cur.execute(
         """
          SELECT s.doctor_id, s.service_id, a.patient_user_id,
-              s.starts_at > CURRENT_TIMESTAMP AS is_future, a.status
+              s.starts_at > CURRENT_TIMESTAMP AS is_future, a.status,
+              a.starts_at > public.patient_change_cutoff() AS before_deadline
         FROM appointments a
         JOIN slots s ON s.id=a.slot_id
          WHERE a.id=%s
@@ -673,7 +674,7 @@ def cancel_appointment(request: Request, appointment_id: str):
             return RedirectResponse("/my?cancel_error=1", status_code=303)
         return RedirectResponse("/doctors", status_code=303)
 
-    doctor_id, service_id, patient_user_id, is_future, appointment_status = appointment
+    doctor_id, service_id, patient_user_id, is_future, appointment_status, before_deadline = appointment
     if appointment_status != "scheduled":
         cur.close()
         conn.close()
@@ -699,6 +700,12 @@ def cancel_appointment(request: Request, appointment_id: str):
             cur.close()
             conn.close()
             return RedirectResponse("/my?cancel_error=1", status_code=303)
+        if not before_deadline:
+            # Own, scheduled and still ahead, but inside the change deadline
+            # (the patient UPDATE policy would refuse it anyway).
+            cur.close()
+            conn.close()
+            return RedirectResponse("/my?cancel_error=too_late", status_code=303)
         cur.execute(
             """
             UPDATE appointments a
@@ -706,10 +713,7 @@ def cancel_appointment(request: Request, appointment_id: str):
             WHERE a.id=%s
               AND a.patient_user_id=%s
               AND a.status='scheduled'
-              AND EXISTS (
-                  SELECT 1 FROM slots s
-                  WHERE s.id=a.slot_id AND s.starts_at > CURRENT_TIMESTAMP
-              )
+              AND a.starts_at > public.patient_change_cutoff()
             """,
             (appointment_id, user["id"]),
         )
@@ -862,8 +866,11 @@ def my_appointments(request: Request):
     cur.execute(
         """
          SELECT a.id, d.full_name, svc.name, a.starts_at, a.ends_at, a.status,
-              a.starts_at > CURRENT_TIMESTAMP AS cancellable,
-              s.duration_minutes, s.buffer_minutes
+              (a.status = 'scheduled'
+               AND a.starts_at > public.patient_change_cutoff()) AS cancellable,
+              s.duration_minutes, s.buffer_minutes,
+              (a.status = 'scheduled' AND a.starts_at > CURRENT_TIMESTAMP
+               AND NOT (a.starts_at > public.patient_change_cutoff())) AS late
          FROM appointments a
          JOIN slots s ON s.id=a.slot_id
          JOIN doctors d ON d.id=s.doctor_id
@@ -891,6 +898,9 @@ def my_appointments(request: Request):
         query_args,
     )
     rows = cur.fetchall()
+    cur.execute("SELECT patient_change_deadline_hours FROM clinic_settings WHERE id = 1")
+    deadline_row = cur.fetchone()
+    deadline_hours = deadline_row[0] if deadline_row else 0
     has_next = len(rows) > MY_PAGE_SIZE
     items = [
         {
@@ -903,6 +913,7 @@ def my_appointments(request: Request):
             "cancellable": r[6],
             "duration_minutes": r[7],
             "buffer_minutes": r[8],
+            "late": r[9],
             "notes": [],
             "prescriptions": [],
         }
@@ -971,6 +982,7 @@ def my_appointments(request: Request):
             "cancelled": cancelled,
             "cancel_error": cancel_error,
             "reschedule_error": reschedule_error,
+            "deadline_hours": deadline_hours,
             "filter_errors": filter_errors,
             "filters": filters,
             "doctors": doctors,
@@ -1125,7 +1137,8 @@ def _load_reschedulable(cur, user, appointment_id, lock=False):
     cur.execute(
         """
         SELECT a.id, a.slot_id, a.doctor_id, s.service_id, a.patient_user_id,
-               a.starts_at, a.ends_at, d.full_name, svc.name, a.reserved_ends_at
+               a.starts_at, a.ends_at, d.full_name, svc.name, a.reserved_ends_at,
+               a.starts_at > public.patient_change_cutoff() AS before_deadline
         FROM appointments a
         JOIN slots s ON s.id = a.slot_id
         JOIN doctors d ON d.id = a.doctor_id
@@ -1152,6 +1165,7 @@ def _load_reschedulable(cur, user, appointment_id, lock=False):
         "doctor_name": row[7],
         "service_name": row[8],
         "reserved_ends_at": row[9],
+        "before_deadline": row[10],
     }
 
 
@@ -1174,6 +1188,8 @@ def reschedule_form(request: Request, appointment_id: str):
         visit = _load_reschedulable(cur, user, appointment_id)
         if visit is None:
             return _reschedule_denied(role)
+        if role == "patient" and not visit["before_deadline"]:
+            return RedirectResponse("/my?reschedule_error=too_late", status_code=303)
         limit_reached = False
         if role == "patient":
             cur.execute("SELECT public.own_reschedules_last_day()")
@@ -1296,19 +1312,33 @@ def reschedule_appointment(
     conn = db_as(user)
     cur = conn.cursor()
     try:
-        # 1. owner of the visit, without a lock (patients: own visits only)
+        # 1. owner of the visit, without a lock (patients: own visits only).
+        # The patient deadline is checked here, before the advisory lock and the
+        # daily limit: inside the deadline the UPDATE policy also hides the row
+        # from SELECT ... FOR UPDATE in step 3, so it could not be told apart
+        # there. too_late is only ever given for an own open visit.
         if role == "patient":
             cur.execute(
-                "SELECT patient_user_id FROM appointments WHERE id = %s AND patient_user_id = %s",
+                """
+                SELECT patient_user_id,
+                       (status = 'scheduled' AND starts_at > CURRENT_TIMESTAMP) AS open,
+                       starts_at > public.patient_change_cutoff() AS before_deadline
+                FROM appointments
+                WHERE id = %s AND patient_user_id = %s
+                """,
                 (appointment_id, user["id"]),
             )
         else:
             cur.execute(
-                "SELECT patient_user_id FROM appointments WHERE id = %s", (appointment_id,)
+                "SELECT patient_user_id, TRUE, TRUE FROM appointments WHERE id = %s",
+                (appointment_id,),
             )
         owner = cur.fetchone()
         if not owner:
             return _reschedule_denied(role)
+        if owner[1] and not owner[2]:
+            conn.rollback()
+            return RedirectResponse("/my?reschedule_error=too_late", status_code=303)
         patient_id = owner[0]
         # 2. one patient at a time, as in booking
         cur.execute(

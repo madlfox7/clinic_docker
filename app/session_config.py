@@ -14,6 +14,10 @@ IDLE_FALLBACK_MINUTES = 30
 # Same range as the clinic_settings_session_idle_check constraint.
 IDLE_MIN = 5
 IDLE_MAX = 120
+# Patient cancel/reschedule deadline in hours.
+# Same range as clinic_settings_change_deadline_check.
+DEADLINE_MIN = 0
+DEADLINE_MAX = 48
 # "seen" is rewritten (and the cookie re-sent) at most once a minute.
 SESSION_TOUCH_SECONDS = 60
 # Timestamps further in the future than this are treated as a forged or legacy cookie.

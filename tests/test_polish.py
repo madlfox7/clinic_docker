@@ -8,6 +8,7 @@ import uuid
 from pathlib import Path
 
 import httpx
+import pytest
 
 from tests.csrf_client import CsrfClient
 from tests.registration import (
@@ -21,7 +22,9 @@ from tests.registration import (
 from tests.test_ux_filters import (
     ADMIN,
     DOC,
+    DOC2,
     PAT,
+    PAT2,
     PASSWORD,
     REG,
     _Setup,
@@ -30,7 +33,12 @@ from tests.test_ux_filters import (
     _make_slot,
     _psql,
     _psql_try,
+    _run_migrate,
     _user_id,
+    _as_role,
+    _cleanup_slots,
+    _status,
+    age_patient_reschedules,
 )
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -569,3 +577,326 @@ def test_login_page_always_offers_the_resend_form_to_guests():
     source = (ROOT / "app" / "routes_auth.py").read_text()
     assert "Please confirm your email before signing in" not in source
     assert source.count("LOGIN_FAILED") >= 3
+
+
+
+# --- 3. Patient cancel and reschedule deadline --------------------------------
+
+YEREVAN_NOW = "(CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Yerevan')"
+
+
+@pytest.fixture(autouse=True)
+def deadline_two_hours():
+    _psql("UPDATE clinic_settings SET patient_change_deadline_hours = 2 WHERE id = 1")
+    age_patient_reschedules()
+    yield
+    _psql("UPDATE clinic_settings SET patient_change_deadline_hours = 2 WHERE id = 1")
+
+
+class _Near:
+    """Slots and visits a set number of minutes from now (clinic time); every
+    start is tried at a few offsets so a seeded slot or visit never collides."""
+
+    def __init__(self):
+        self.slots = []
+
+    def slot(self, minutes: int, doctor=DOC) -> int:
+        doctor_id = _doctor_id(doctor)
+        for step in range(0, 30, 3):
+            starts = f"date_trunc('minute', {YEREVAN_NOW} + make_interval(mins => {minutes + step}))"
+            done = _psql_try(
+                "INSERT INTO slots (doctor_id, service_id, starts_at, ends_at, duration_minutes, buffer_minutes) "
+                f"SELECT {doctor_id}, svc.id, {starts}, {starts} + make_interval(mins => svc.duration_minutes "
+                "+ svc.buffer_minutes), svc.duration_minutes, svc.buffer_minutes FROM services svc "
+                "WHERE svc.id = 1 RETURNING id"
+            )
+            if done.returncode == 0:
+                slot_id = int(done.stdout.split()[0])
+                self.slots.append(slot_id)
+                return slot_id
+        pytest.fail(f"could not place a test slot {minutes} min ahead")
+
+    def visit(self, minutes: int, patient=PAT, doctor=DOC) -> int:
+        patient_id = _user_id(patient)
+        for _ in range(6):
+            slot_id = self.slot(minutes, doctor)
+            done = _psql_try(
+                "INSERT INTO appointments (slot_id, patient_user_id, doctor_id, starts_at, ends_at, "
+                "reserved_ends_at, status) "
+                f"SELECT s.id, {patient_id}, s.doctor_id, s.starts_at, "
+                "s.starts_at + make_interval(mins => s.duration_minutes), s.ends_at, 'scheduled' "
+                f"FROM slots s WHERE s.id = {slot_id} RETURNING id"
+            )
+            if done.returncode == 0:
+                return int(done.stdout.split()[0])
+            minutes += 5
+        pytest.fail(f"could not book a test visit {minutes} min ahead")
+
+    def cleanup(self):
+        _cleanup_slots(self.slots)
+
+
+def _patient_sql(appointment_id: int, sql: str, timezone: str | None = None) -> list[str]:
+    """Run sql as app_patient (pat@) in a rolled-back transaction; return its rows."""
+    tz = f"SET LOCAL TimeZone = '{timezone}'; " if timezone else ""
+    done = _psql_try(
+        f"BEGIN; SET LOCAL ROLE app_patient; {tz}"
+        f"SELECT set_config('app.user_id', '{_user_id(PAT)}', true) AS marker_user; {sql}; ROLLBACK;"
+    )
+    assert done.returncode == 0, done.stderr
+    lines = [line for line in done.stdout.splitlines() if line.strip()]
+    return lines[1:]
+
+
+def _events(action: str, appointment_id: int) -> int:
+    return int(_psql(
+        f"SELECT count(*) FROM audit_events WHERE action = '{action}' AND target_id = {appointment_id}"
+    )[0])
+
+
+def _mail_count(address: str) -> int:
+    found = httpx.get(f"{MAILPIT}/api/v1/search", params={"query": f'to:"{address}"'}, timeout=5)
+    found.raise_for_status()
+    return int(found.json().get("messages_count") or 0)
+
+
+def _own_reschedules() -> str:
+    return _patient_sql(0, "SELECT public.own_reschedules_last_day()")[-1]
+
+
+def test_deadline_column_and_check(deadline_two_hours):
+    assert _psql(
+        "SELECT column_default || '|' || is_nullable FROM information_schema.columns "
+        "WHERE table_name = 'clinic_settings' AND column_name = 'patient_change_deadline_hours'"
+    ) == ["2|NO"]
+    definition = _psql(
+        "SELECT pg_get_constraintdef(oid) FROM pg_constraint "
+        "WHERE conname = 'clinic_settings_change_deadline_check'"
+    )[0]
+    assert "patient_change_deadline_hours >= 0" in definition and "patient_change_deadline_hours <= 48" in definition
+    bad = _psql_try("UPDATE clinic_settings SET patient_change_deadline_hours = 49 WHERE id = 1")
+    assert bad.returncode != 0 and "clinic_settings_change_deadline_check" in bad.stderr
+    config = (ROOT / "app" / "session_config.py").read_text()
+    assert "DEADLINE_MIN = 0\n" in config and "DEADLINE_MAX = 48\n" in config
+
+
+def test_patient_cannot_cancel_inside_the_deadline(deadline_two_hours):
+    near = _Near()
+    try:
+        visit = near.visit(60)
+        assert _psql(f"SELECT starts_at > public.patient_change_cutoff() FROM appointments WHERE id = {visit}") == ["f"]
+        mails = _mail_count(PAT)
+        with _client() as pat:
+            _login(pat, PAT)
+            my = pat.get("/my", params={"status": "all"})
+            assert f'action="/appointments/{visit}/cancel"' not in my.text
+            assert f'href="/appointments/{visit}/reschedule"' not in my.text
+            assert "Online changes closed (2 h before the visit)" in my.text
+            assert "up to 2 hours before the visit" in my.text
+            refused = pat.post(f"/appointments/{visit}/cancel", follow_redirects=False)
+            assert refused.headers["location"] == "/my?cancel_error=too_late"
+            shown = pat.get(refused.headers["location"])
+            assert "can be cancelled online up to 2 hours" in shown.text
+        assert _status(visit) == "scheduled"
+        assert _events("appointment.cancel", visit) == 0
+        assert _mail_count(PAT) == mails
+    finally:
+        near.cleanup()
+
+
+def test_reschedule_inside_the_deadline_is_refused_before_the_lock_live_for_update(deadline_two_hours):
+    """Б1: inside the deadline the UPDATE policy also hides the row from
+    SELECT ... FOR UPDATE, so too_late must be decided before step 3."""
+    near = _Near()
+    try:
+        visit = near.visit(60)
+        target = near.slot(300)
+        later = near.visit(240)
+        # live PostgreSQL behaviour the route relies on
+        assert _patient_sql(visit, f"SELECT id FROM appointments WHERE id = {visit}") == [str(visit)]
+        assert _patient_sql(visit, f"SELECT id FROM appointments WHERE id = {visit} FOR UPDATE") == []
+        assert _patient_sql(later, f"SELECT id FROM appointments WHERE id = {later} FOR UPDATE") == [str(later)]
+        before_count = _own_reschedules()
+        max_id = int(_psql("SELECT max(id) FROM appointments")[0])
+        with _client() as pat:
+            _login(pat, PAT)
+            got = pat.get(f"/appointments/{visit}/reschedule", follow_redirects=False)
+            assert got.headers["location"] == "/my?reschedule_error=too_late"
+            posted = pat.post(f"/appointments/{visit}/reschedule", data={"slot_id": str(target)},
+                              follow_redirects=False)
+            assert posted.headers["location"] == "/my?reschedule_error=too_late"
+            shown = pat.get(posted.headers["location"])
+            assert "can be rescheduled online up to 2 hours" in shown.text
+        assert _status(visit) == "scheduled"
+        assert int(_psql("SELECT max(id) FROM appointments")[0]) == max_id
+        assert _own_reschedules() == before_count
+        assert _events("appointment.reschedule", visit) == 0
+        assert _psql(f"SELECT count(*) FROM audit_events WHERE action = 'appointment.reschedule' "
+                     f"AND old_value = {visit}") == ["0"]
+    finally:
+        near.cleanup()
+
+
+def test_patient_can_cancel_and_move_outside_the_deadline(deadline_two_hours):
+    near = _Near()
+    try:
+        to_cancel = near.visit(180)
+        to_move = near.visit(240)
+        target = near.slot(400)
+        with _client() as pat:
+            _login(pat, PAT)
+            my = pat.get("/my", params={"status": "all"})
+            assert f'action="/appointments/{to_cancel}/cancel"' in my.text
+            done = pat.post(f"/appointments/{to_cancel}/cancel", follow_redirects=False)
+            assert done.headers["location"] == "/my?cancelled=1"
+            moved = pat.post(f"/appointments/{to_move}/reschedule", data={"slot_id": str(target)},
+                             follow_redirects=False)
+            assert moved.status_code == 303 and "rescheduled=1" in moved.headers["location"], moved.headers
+        assert _status(to_cancel) == "cancelled"
+        assert _status(to_move) == "cancelled"
+    finally:
+        near.cleanup()
+
+
+def test_database_refuses_late_and_past_patient_updates_in_any_session_zone(deadline_two_hours):
+    near = _Near()
+    try:
+        late = near.visit(60)
+        ok = near.visit(180)
+        past = near.visit(-180)
+        update = "WITH u AS (UPDATE appointments SET status = 'cancelled' WHERE id = {id} RETURNING id) SELECT count(*) FROM u"
+        assert _patient_sql(late, update.format(id=late)) == ["0"]
+        assert _patient_sql(past, update.format(id=past)) == ["0"]
+        assert _patient_sql(ok, update.format(id=ok)) == ["1"]
+        for zone in ("Pacific/Kiritimati", "Etc/GMT+12"):
+            assert _patient_sql(late, update.format(id=late), timezone=zone) == ["0"]
+        # one transaction, so CURRENT_TIMESTAMP is the same for every zone
+        cutoffs = _patient_sql(0, "SELECT public.patient_change_cutoff(); "
+                                  "SET LOCAL TimeZone = 'Pacific/Kiritimati'; SELECT public.patient_change_cutoff(); "
+                                  "SET LOCAL TimeZone = 'Etc/GMT+12'; SELECT public.patient_change_cutoff()")
+        assert len(cutoffs) == 3 and len(set(cutoffs)) == 1, cutoffs
+    finally:
+        near.cleanup()
+
+
+def test_staff_are_not_limited_by_the_patient_deadline(deadline_two_hours):
+    near = _Near()
+    try:
+        by_reg = near.visit(60)
+        moved_by_reg = near.visit(70, patient=PAT2)
+        target = near.slot(320)
+        with _client() as reg:
+            _login(reg, REG)
+            done = reg.post(f"/appointments/{by_reg}/cancel", follow_redirects=False)
+            assert "cancelled=1" in done.headers["location"], done.headers
+            moved = reg.post(f"/appointments/{moved_by_reg}/reschedule", data={"slot_id": str(target)},
+                             follow_redirects=False)
+            assert moved.status_code == 303 and "error" not in moved.headers["location"], moved.headers
+        by_admin = near.visit(60, patient=PAT, doctor=DOC2)
+        with _client() as admin:
+            _login(admin, ADMIN)
+            done = admin.post(f"/appointments/{by_admin}/cancel", follow_redirects=False)
+            assert done.headers["location"] == "/admin/schedule?visit_cancelled=1"
+        assert _status(by_reg) == _status(moved_by_reg) == _status(by_admin) == "cancelled"
+    finally:
+        near.cleanup()
+
+
+def test_deadline_zero_lets_the_patient_cancel_until_the_start(deadline_two_hours):
+    near = _Near()
+    try:
+        visit = near.visit(60)
+        _psql("UPDATE clinic_settings SET patient_change_deadline_hours = 0 WHERE id = 1")
+        with _client() as pat:
+            _login(pat, PAT)
+            my = pat.get("/my", params={"status": "all"})
+            assert "You can cancel or reschedule online up to" not in my.text
+            done = pat.post(f"/appointments/{visit}/cancel", follow_redirects=False)
+            assert done.headers["location"] == "/my?cancelled=1"
+        assert _status(visit) == "cancelled"
+    finally:
+        near.cleanup()
+
+
+def test_too_late_is_only_given_for_an_own_visit(deadline_two_hours):
+    near = _Near()
+    try:
+        foreign = near.visit(60, patient=PAT2)
+        target = near.slot(300)
+        with _client() as pat:
+            _login(pat, PAT)
+            cancel = pat.post(f"/appointments/{foreign}/cancel", follow_redirects=False)
+            assert cancel.headers["location"] == "/my?cancel_error=1"
+            got = pat.get(f"/appointments/{foreign}/reschedule", follow_redirects=False)
+            assert got.headers["location"] == "/my?reschedule_error=1"
+            posted = pat.post(f"/appointments/{foreign}/reschedule", data={"slot_id": str(target)},
+                              follow_redirects=False)
+            assert posted.headers["location"] == "/my?reschedule_error=1"
+        assert _status(foreign) == "scheduled"
+    finally:
+        near.cleanup()
+
+
+def _deadline_events() -> list[str]:
+    return _psql(
+        "SELECT old_value || '>' || new_value FROM audit_events "
+        "WHERE action = 'clinic.change_deadline.update' ORDER BY id"
+    )
+
+
+def test_admin_sets_the_deadline_through_the_journalled_function(deadline_two_hours):
+    before = len(_deadline_events())
+    with _client() as admin:
+        _login(admin, ADMIN)
+        page = admin.get("/admin/settings")
+        assert 'action="/admin/settings/change-deadline"' in page.text and 'name="deadline_hours"' in page.text
+        saved = admin.post("/admin/settings/change-deadline", data={"deadline_hours": "6"}, follow_redirects=False)
+        assert saved.headers["location"] == "/admin/settings?saved=deadline"
+        assert _psql("SELECT patient_change_deadline_hours FROM clinic_settings")[0] == "6"
+        for bad in ("49", "abc", "-1", ""):
+            refused = admin.post("/admin/settings/change-deadline", data={"deadline_hours": bad},
+                                 follow_redirects=False)
+            assert refused.headers["location"] == "/admin/settings?error=invalid_deadline", bad
+        audit = admin.get("/admin/audit", params={"action": "clinic.change_deadline.update"})
+        assert audit.status_code == 200 and "clinic.change_deadline.update" in audit.text
+    assert _deadline_events()[before:] == ["2>6"]
+    for email in (REG, PAT):
+        with _client() as c:
+            _login(c, email)
+            assert c.post("/admin/settings/change-deadline", data={"deadline_hours": "3"},
+                          follow_redirects=False).status_code == 403
+    for role, user in (("app_registrar", REG), ("app_patient", PAT)):
+        denied = _as_role(role, _user_id(user), "SELECT public.set_patient_change_deadline_hours(3)")
+        assert denied.returncode != 0 and "permission denied" in denied.stderr
+    no_admin = _as_role("app_admin", _user_id(REG), "SELECT public.set_patient_change_deadline_hours(3)")
+    assert no_admin.returncode != 0 and "invalid admin context" in no_admin.stderr
+    assert _psql("SELECT has_column_privilege('app_admin', 'clinic_settings', "
+                 "'patient_change_deadline_hours', 'UPDATE')") == ["f"]
+    assert _psql("SELECT patient_change_deadline_hours FROM clinic_settings")[0] == "6"
+
+
+def test_deadline_migration_is_idempotent_and_cutoff_grants_are_narrow(deadline_two_hours):
+    query = ("SELECT conname || '|' || oid FROM pg_constraint WHERE conname IN "
+             "('clinic_settings_change_deadline_check', 'audit_events_change_values_check') ORDER BY conname")
+    before = _psql(query)
+    assert len(before) == 2
+    _run_migrate()
+    assert _psql(query) == before
+    assert _psql("SELECT pg_get_constraintdef(oid) LIKE '%clinic.change_deadline.update%' FROM pg_constraint "
+                 "WHERE conname = 'audit_events_change_values_check'") == ["t"]
+    assert _psql("SELECT prosecdef FROM pg_proc WHERE proname = 'patient_change_cutoff'") == ["f"]
+    for role in ("app_guest", "app_doctor"):
+        denied = _as_role(role, 0, "SELECT public.patient_change_cutoff()")
+        assert denied.returncode != 0 and "permission denied" in denied.stderr, role
+    for role, user in (("app_patient", PAT), ("app_registrar", REG), ("app_admin", ADMIN)):
+        allowed = _as_role(role, _user_id(user), "SELECT public.patient_change_cutoff()")
+        assert allowed.returncode == 0, (role, allowed.stderr)
+    assert _psql("SELECT has_function_privilege('public', 'public.patient_change_cutoff()', 'EXECUTE')") == ["f"]
+
+
+def test_reschedule_checks_the_deadline_before_the_lock():
+    source = (ROOT / "app" / "routes_booking.py").read_text()
+    body = source[source.index("def reschedule_appointment("):]
+    body = body[:body.index("\n@router.")] if "\n@router." in body else body
+    assert body.index("reschedule_error=too_late") < body.index("pg_advisory_xact_lock")
+    assert body.index("reschedule_error=too_late") < body.index("_load_reschedulable(cur, user, appointment_id, lock=True)")

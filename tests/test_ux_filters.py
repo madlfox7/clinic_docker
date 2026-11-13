@@ -987,7 +987,7 @@ def test_old_volume_check_is_upgraded_once_and_reschedule_works():
     """Б6: a volume whose CHECK lacks appointment.reschedule is fixed on start."""
     _psql(
         "ALTER TABLE audit_events DROP CONSTRAINT audit_events_change_values_check; "
-        "DELETE FROM audit_events WHERE action = 'appointment.reschedule'; "
+        "DELETE FROM audit_events WHERE action IN ('appointment.reschedule', 'clinic.change_deadline.update'); "
         "ALTER TABLE audit_events ADD CONSTRAINT audit_events_change_values_check CHECK ("
         "(old_value IS NULL AND new_value IS NULL) OR action = 'clinic.session_idle.update')"
     )
@@ -995,6 +995,7 @@ def test_old_volume_check_is_upgraded_once_and_reschedule_works():
     _run_migrate()
     oid, definition = _change_check()
     assert "appointment.reschedule" in definition
+    assert "clinic.change_deadline.update" in definition
     s = _Setup()
     try:
         with _client() as pat:

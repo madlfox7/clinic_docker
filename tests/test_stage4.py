@@ -126,14 +126,27 @@ def first_doctor_id(html: str) -> str:
 
 
 def open_free_slot_page(c: httpx.Client) -> tuple[str, str]:
+	"""First free slot starting more than 3 hours from now (clinic time), so a
+	patient can still cancel or move it inside the default 2 h change deadline.
+	Days are tried forward via ?day=, at most 14 days; times come from the DB."""
 	doctors = c.get("/doctors")
 	assert doctors.status_code == 200
-	for doc_id in re.findall(r'href="/doctors/(\d+)/slots"', doctors.text):
-		page = c.get(f"/doctors/{doc_id}/slots")
-		ids = slot_ids(page.text)
-		if ids:
-			return doc_id, ids[0]
-	pytest.fail("no free slots left; reset volume or cancel leftover bookings")
+	doctor_ids = re.findall(r'href="/doctors/(\d+)/slots"', doctors.text)
+	today = date.fromisoformat(psql("SELECT CURRENT_DATE"))
+	for offset in range(15):
+		day = (today + timedelta(days=offset)).isoformat()
+		for doc_id in doctor_ids:
+			page = c.get(f"/doctors/{doc_id}/slots", params={"day": day})
+			ids = slot_ids(page.text)
+			if not ids:
+				continue
+			late_enough = psql(
+				"SELECT id FROM slots WHERE id IN (" + ",".join(str(int(i)) for i in ids) + ") "
+				"AND starts_at > LOCALTIMESTAMP + INTERVAL '3 hours' ORDER BY starts_at, id LIMIT 1"
+			)
+			if late_enough:
+				return doc_id, late_enough
+	pytest.fail("no free slot more than 3 hours ahead within 14 days; reset volume or cancel leftover bookings")
 
 
 def test_guest_sees_doctors_but_not_slots():

@@ -178,6 +178,25 @@ BEGIN
 END
 $$;
 
+-- Patients may cancel or reschedule up to this many hours before the visit
+-- (0-48, default 2; 0 = until the start). Staff are not limited by it.
+-- Changed only through public.set_patient_change_deadline_hours (journalled).
+ALTER TABLE clinic_settings
+  ADD COLUMN IF NOT EXISTS patient_change_deadline_hours INTEGER NOT NULL DEFAULT 2;
+DO $$
+BEGIN
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_constraint
+    WHERE conname = 'clinic_settings_change_deadline_check'
+      AND conrelid = 'public.clinic_settings'::regclass
+  ) THEN
+    ALTER TABLE public.clinic_settings
+      ADD CONSTRAINT clinic_settings_change_deadline_check
+      CHECK (patient_change_deadline_hours BETWEEN 0 AND 48);
+  END IF;
+END
+$$;
+
 
 CREATE TABLE IF NOT EXISTS doctors (
   id SERIAL PRIMARY KEY,
@@ -771,11 +790,12 @@ CREATE INDEX IF NOT EXISTS audit_events_rate_limited_idx
   ON audit_events (created_at)
   WHERE action = 'auth.rate_limited';
 
--- Old and new value: the session idle timeout change, and a reschedule
--- (old and new appointment id; new_value is always the target).
+-- Old and new value: the session idle timeout and patient change deadline
+-- changes, and a reschedule (old and new appointment id; new_value is always
+-- the target).
 ALTER TABLE audit_events ADD COLUMN IF NOT EXISTS old_value INTEGER;
 ALTER TABLE audit_events ADD COLUMN IF NOT EXISTS new_value INTEGER;
--- upgrade older volumes: the CHECK without appointment.reschedule is dropped
+-- upgrade older volumes: the CHECK without clinic.change_deadline.update is dropped
 -- once and recreated; an up-to-date CHECK is left alone (no scan on start).
 DO $$
 BEGIN
@@ -783,7 +803,7 @@ BEGIN
     SELECT 1 FROM pg_constraint
     WHERE conname = 'audit_events_change_values_check'
       AND conrelid = 'public.audit_events'::regclass
-      AND pg_get_constraintdef(oid) NOT LIKE '%appointment.reschedule%'
+      AND pg_get_constraintdef(oid) NOT LIKE '%clinic.change_deadline.update%'
   ) THEN
     ALTER TABLE public.audit_events DROP CONSTRAINT audit_events_change_values_check;
   END IF;
@@ -802,6 +822,7 @@ BEGIN
       CHECK (
         (old_value IS NULL AND new_value IS NULL)
         OR action = 'clinic.session_idle.update'
+        OR action = 'clinic.change_deadline.update'
         OR (
           action = 'appointment.reschedule'
           AND target_type = 'appointment'
