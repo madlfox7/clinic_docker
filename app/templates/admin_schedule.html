@@ -40,7 +40,7 @@
           {{ visit.service_name }} —
           {{ visit.starts_at.strftime("%Y-%m-%d %H:%M") }}–{{ visit.ends_at.strftime("%H:%M") }}
           {{ status_badge(visit.status) }}
-          <form class="inline-form" method="post" action="/appointments/{{ visit.appointment_id }}/cancel" data-confirm="Cancel this appointment?">
+          <form class="inline-form" method="post" action="/appointments/{{ visit.appointment_id }}/cancel" data-confirm="Cancel the appointment: {{ visit.service_name }} with {{ visit.doctor_name }} on {{ visit.starts_at|visit_when }} for {{ visit.patient_name or 'this patient' }}?">
   <input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}">
             <button class="btn btn-outline-danger btn-sm" type="submit">Cancel this appointment</button>
           </form>
@@ -63,7 +63,7 @@
           {{ patient_label(visit.patient_name, visit.patient_email) }} — {{ visit.doctor_name }} —
           {{ visit.service_name }} —
           {{ visit.starts_at.strftime("%Y-%m-%d %H:%M") }}–{{ visit.ends_at.strftime("%H:%M") }}
-          <form class="inline-form" method="post" action="/appointments/{{ visit.appointment_id }}/cancel" data-confirm="Cancel this appointment?">
+          <form class="inline-form" method="post" action="/appointments/{{ visit.appointment_id }}/cancel" data-confirm="Cancel the appointment: {{ visit.service_name }} with {{ visit.doctor_name }} on {{ visit.starts_at|visit_when }} for {{ visit.patient_name or 'this patient' }}?">
   <input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}">
             <button class="btn btn-outline-danger btn-sm" type="submit">Cancel appointment</button>
           </form>
@@ -86,7 +86,7 @@
           {{ patient_label(visit.patient_name, visit.patient_email) }} — {{ visit.doctor_name }} —
           {{ visit.service_name }} —
           {{ visit.starts_at.strftime("%Y-%m-%d %H:%M") }}–{{ visit.ends_at.strftime("%H:%M") }}
-          <form class="inline-form" method="post" action="/appointments/{{ visit.appointment_id }}/cancel" data-confirm="Cancel this appointment?">
+          <form class="inline-form" method="post" action="/appointments/{{ visit.appointment_id }}/cancel" data-confirm="Cancel the appointment: {{ visit.service_name }} with {{ visit.doctor_name }} on {{ visit.starts_at|visit_when }} for {{ visit.patient_name or 'this patient' }}?">
   <input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}">
             <button class="btn btn-outline-danger btn-sm" type="submit">Cancel appointment</button>
           </form>

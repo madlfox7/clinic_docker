@@ -161,7 +161,7 @@
           <span class="badge text-bg-secondary">Booked</span>
           {% if s.closed %}<strong>Clinic closed — staff action required.</strong>{% endif %}
           {% if not s.past %}
-            <form method="post" action="/appointments/{{ s.appointment_id }}/cancel" data-confirm="Cancel this appointment?">
+            <form method="post" action="/appointments/{{ s.appointment_id }}/cancel" data-confirm="Cancel the appointment: {{ selected_service.name }} with {{ doctor.full_name }} on {{ s.starts_at|visit_when }}?">
   <input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}">
               <button class="btn btn-outline-danger" type="submit">Cancel appointment</button>
             </form>
@@ -179,7 +179,7 @@
         Closed — unavailable
       {% else %}
         {% if role == "registrar" %}
-          <form method="post" action="/slots/{{ s.id }}/book">
+          <form method="post" action="/slots/{{ s.id }}/book" data-confirm="Book {{ selected_service.name }} with {{ doctor.full_name }} on {{ s.starts_at|visit_when }} for {patient}?" data-confirm-patient="1">
   <input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}">
           <input type="hidden" name="service_id" value="{{ selected_service.id }}">
           <input type="hidden" name="patient_email"
@@ -192,7 +192,7 @@
         {% elif role == "admin" %}
           <span class="badge text-bg-success">Available</span>
         {% else %}
-          <form method="post" action="/slots/{{ s.id }}/book">
+          <form method="post" action="/slots/{{ s.id }}/book" data-confirm="Book {{ selected_service.name }} with {{ doctor.full_name }} on {{ s.starts_at|visit_when }}?">
   <input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}">
             <input type="hidden" name="service_id" value="{{ selected_service.id }}">
             <button class="btn btn-primary" type="submit">Book appointment</button>

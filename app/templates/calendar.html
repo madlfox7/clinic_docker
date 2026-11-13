@@ -6,7 +6,7 @@
   {%- if role == "registrar" and event.id and event.status == "scheduled" and event.future %}
     <span class="calendar-actions">
       <a class="btn btn-outline-primary btn-sm" href="/appointments/{{ event.id }}/reschedule">Reschedule</a>
-      <form class="inline-form" method="post" action="/appointments/{{ event.id }}/cancel" data-confirm="Cancel this appointment?">
+      <form class="inline-form" method="post" action="/appointments/{{ event.id }}/cancel" data-confirm="Cancel the appointment: {{ event.service_name }} with {{ event.doctor_name }} on {{ event.starts_at|visit_when }}?">
         <input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}">
         <button class="btn btn-outline-danger btn-sm" type="submit">Cancel</button>
       </form>

@@ -36,7 +36,13 @@
   // Plain confirmations: <form data-confirm="..."> or <button data-confirm="...">.
   document.querySelectorAll("form[data-confirm]").forEach((form) => {
     form.addEventListener("submit", (event) => {
-      if (!window.confirm(form.dataset.confirm)) event.preventDefault();
+      let message = form.dataset.confirm;
+      // {patient} only on the registrar booking form (data-confirm-patient="1").
+      if (form.dataset.confirmPatient === "1") {
+        const field = form.querySelector('input[name="patient_email"]');
+        message = message.split("{patient}").join(field && field.value ? field.value : "the selected patient");
+      }
+      if (!window.confirm(message)) event.preventDefault();
     });
   });
   document.querySelectorAll("button[data-confirm]").forEach((button) => {

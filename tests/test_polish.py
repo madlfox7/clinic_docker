@@ -1,5 +1,6 @@
 """16_polish: error pages, confirmations, neutral registration, one login
 answer, patient cancel/reschedule deadline."""
+import html
 import os
 import re
 import subprocess
@@ -9,7 +10,19 @@ from pathlib import Path
 import httpx
 
 from tests.csrf_client import CsrfClient
-from tests.test_ux_filters import _psql, _psql_try
+from tests.test_ux_filters import (
+    ADMIN,
+    DOC,
+    PAT,
+    REG,
+    _Setup,
+    _doctor_id,
+    _login,
+    _make_slot,
+    _psql,
+    _psql_try,
+    _user_id,
+)
 
 ROOT = Path(__file__).resolve().parents[1]
 BASE = os.environ.get("CLINIC_TEST_BASE", "http://localhost:8080")
@@ -95,3 +108,151 @@ def test_nginx_unavailable_page_names_match():
     dockerfile = (ROOT / "docker" / "proxy" / "Dockerfile").read_text()
     assert "COPY docker/proxy/errors/clinic-unavailable.html /etc/nginx/clinic/errors/" in dockerfile
 
+
+# --- 1. Confirmations ----------------------------------------------------------
+
+FORM_TAG = re.compile(r"<form\b[^>]*>", re.S)
+
+
+def _forms(page: str, action_pattern: str) -> list[str]:
+    return [tag for tag in FORM_TAG.findall(page) if re.search(f'action="{action_pattern}"', tag)]
+
+
+def _attr(tag: str, name: str):
+    found = re.search(rf'\s{name}="([^"]*)"', tag)
+    return html.unescape(found.group(1)) if found else None
+
+
+def _when(sql_value: str) -> str:
+    """visit_when (start only) for an SQL timestamp expression, from the database."""
+    return _psql(f"SELECT to_char({sql_value}, 'Dy, DD Mon YYYY HH24:MI')")[0]
+
+
+def _names(slot_id: int) -> tuple[str, str, str]:
+    doctor, service, when = _psql(
+        "SELECT d.full_name || '|' || svc.name || '|' || to_char(s.starts_at, 'Dy, DD Mon YYYY HH24:MI') "
+        f"FROM slots s JOIN doctors d ON d.id = s.doctor_id JOIN services svc ON svc.id = s.service_id "
+        f"WHERE s.id = {slot_id}"
+    )[0].split("|")
+    return doctor, service, when
+
+
+def test_patient_and_registrar_booking_forms_ask_with_visit_details():
+    s = _Setup(times=("10:00", "12:00", "13:00"))
+    try:
+        doctor, service, when = _names(s.targets[0])
+        with _client() as pat, _client() as reg:
+            _login(pat, PAT)
+            _login(reg, REG)
+            params = {"service_id": "1", "day": s.day, "view": "day"}
+            page = pat.get(f"/doctors/{s.doctor}/slots", params=params).text
+            booking = _forms(page, r"/slots/\d+/book")
+            assert len(booking) == 2, booking
+            for tag in booking:
+                message = _attr(tag, "data-confirm")
+                assert message and message.startswith(f"Book {service} with {doctor} on "), tag
+                assert _attr(tag, "data-confirm-patient") is None
+            target_tag = _forms(page, f"/slots/{s.targets[0]}/book")[0]
+            assert _attr(target_tag, "data-confirm") == f"Book {service} with {doctor} on {when}?"
+            page = reg.get(f"/doctors/{s.doctor}/slots", params=params).text
+            target_tag = _forms(page, f"/slots/{s.targets[0]}/book")[0]
+            assert _attr(target_tag, "data-confirm") == f"Book {service} with {doctor} on {when} for {{patient}}?"
+            assert _attr(target_tag, "data-confirm-patient") == "1"
+            # the registrar's cancel form for the booked old visit
+            old_doctor, old_service, old_when = _names(s.old_slot)
+            cancel = _forms(page, f"/appointments/{s.old}/cancel")[0]
+            assert _attr(cancel, "data-confirm") == \
+                f"Cancel the appointment: {old_service} with {old_doctor} on {old_when}?"
+    finally:
+        s.cleanup()
+    templates = (ROOT / "app" / "templates")
+    flagged = [p.name for p in templates.glob("*.html") if "data-confirm-patient" in p.read_text()]
+    assert flagged == ["slots.html"], flagged
+    assert (templates / "slots.html").read_text().count("data-confirm-patient") == 1
+
+
+def test_cancel_and_reschedule_forms_carry_visit_details_everywhere():
+    s = _Setup(times=("10:00", "12:00"))
+    try:
+        doctor, service, when = _names(s.old_slot)
+        _, _, new_when = _names(s.targets[0])
+        cancel_text = f"Cancel the appointment: {service} with {doctor} on {when}?"
+        with _client() as pat, _client() as reg, _client() as admin:
+            _login(pat, PAT)
+            _login(reg, REG)
+            _login(admin, ADMIN)
+            my = pat.get("/my", params={"from": s.day, "to": s.day}).text
+            assert _attr(_forms(my, f"/appointments/{s.old}/cancel")[0], "data-confirm") == cancel_text
+            form = pat.get(f"/appointments/{s.old}/reschedule", params={"day": s.day, "view": "day"}).text
+            move = _forms(form, f"/appointments/{s.old}/reschedule")[0]
+            assert _attr(move, "data-confirm") == \
+                f"Move the appointment ({service} with {doctor}) from {when} to {new_when}?"
+            for view in ("day", "week"):
+                cal = reg.get("/registrar/appointments", params={"day": s.day, "view": view}).text
+                tags = _forms(cal, f"/appointments/{s.old}/cancel")
+                assert tags and _attr(tags[0], "data-confirm") == cancel_text, view
+            schedule = admin.get("/admin/schedule").text
+            tags = _forms(schedule, f"/appointments/{s.old}/cancel")
+            assert tags
+            for tag in tags:
+                assert _attr(tag, "data-confirm") == \
+                    f"Cancel the appointment: {service} with {doctor} on {when} for Narek Hakobyan?"
+    finally:
+        s.cleanup()
+    for template in (ROOT / "app" / "templates").glob("*.html"):
+        text = template.read_text()
+        assert 'data-confirm="Cancel this appointment?"' not in text, template.name
+        assert 'data-confirm="Move the appointment to this time?"' not in text, template.name
+
+
+def test_confirm_text_is_escaped():
+    name = f'Check & "X" <b> {uuid.uuid4().hex[:6]}'
+    service_id = int(_psql(
+        "INSERT INTO services (name, duration_minutes, buffer_minutes, active) "
+        f"VALUES ('{name}', 30, 0, TRUE) RETURNING id"
+    )[0])
+    doctor = _doctor_id(DOC)
+    slot = None
+    try:
+        _psql(f"INSERT INTO doctor_services (doctor_id, service_id) VALUES ({doctor}, {service_id})")
+        day = _psql("SELECT (CURRENT_DATE + 450)::text")[0]
+        slot = _make_slot(doctor, f"{day} 09:00", service_id)
+        with _client() as pat:
+            _login(pat, PAT)
+            page = pat.get(f"/doctors/{doctor}/slots",
+                           params={"service_id": str(service_id), "day": day, "view": "day"}).text
+        tag = _forms(page, f"/slots/{slot}/book")[0]
+        assert "&amp;" in tag and ("&#34;" in tag or "&quot;" in tag) and "&lt;b&gt;" in tag
+        assert "<b>" not in tag
+        assert _attr(tag, "data-confirm").startswith(f"Book {name} with ")
+    finally:
+        if slot:
+            _psql(f"DELETE FROM slots WHERE id = {slot}")
+        _psql(f"DELETE FROM doctor_services WHERE service_id = {service_id}; "
+              f"DELETE FROM services WHERE id = {service_id}")
+
+
+def test_confirmation_is_not_a_control_csrf_and_methods_stay():
+    s = _Setup(times=("10:00", "12:00"))
+    try:
+        with _client() as pat:
+            _login(pat, PAT)
+            assert pat.post(f"/slots/{s.targets[0]}/book", data={"service_id": "1"}, csrf=False).status_code == 403
+            assert pat.get(f"/slots/{s.targets[0]}/book").status_code == 405
+            assert pat.get(f"/appointments/{s.old}/cancel").status_code == 405
+            assert _psql(f"SELECT count(*) FROM appointments WHERE slot_id = {s.targets[0]}") == ["0"]
+            assert _psql(f"SELECT status FROM appointments WHERE id = {s.old}") == ["scheduled"]
+            # without the browser dialog the POST works as before
+            booked = pat.post(f"/slots/{s.targets[0]}/book", data={"service_id": "1"},
+                              follow_redirects=False)
+            assert booked.status_code == 303 and "booked=1" in booked.headers["location"]
+    finally:
+        s.cleanup()
+
+
+def test_app_js_fills_patient_only_with_the_flag_and_without_html():
+    script = (ROOT / "app" / "static" / "app.js").read_text()
+    for banned in ("innerHTML", "eval(", "new Function"):
+        assert banned not in script
+    assert 'split("{patient}")' in script
+    assert 'form.dataset.confirmPatient === "1"' in script

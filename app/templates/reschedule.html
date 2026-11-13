@@ -43,7 +43,7 @@
   {% for s in day.slots %}
     <li class="slot-free">
       <span class="slot-time">{{ s.starts_at.strftime("%H:%M") }}–{{ s.ends_at.strftime("%H:%M") }}</span>
-      <form class="inline-form" method="post" action="/appointments/{{ visit.id }}/reschedule" data-confirm="Move the appointment to this time?">
+      <form class="inline-form" method="post" action="/appointments/{{ visit.id }}/reschedule" data-confirm="Move the appointment ({{ visit.service_name }} with {{ visit.doctor_name }}) from {{ visit.starts_at|visit_when }} to {{ s.starts_at|visit_when }}?">
         <input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}">
         <input type="hidden" name="slot_id" value="{{ s.id }}">
         <button class="btn btn-primary btn-sm" type="submit">Move here</button>

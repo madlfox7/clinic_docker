@@ -68,7 +68,7 @@
       {{ a.starts_at|visit_when(a.ends_at) }} {{ status_badge(a.status) }}
       — {{ a.duration_minutes }} min service{% if a.buffer_minutes %} + {{ a.buffer_minutes }} min buffer{% endif %}
       {% if a.status == "scheduled" and a.cancellable %}
-        <form class="inline-form" method="post" action="/appointments/{{ a.id }}/cancel" data-confirm="Cancel this appointment?">
+        <form class="inline-form" method="post" action="/appointments/{{ a.id }}/cancel" data-confirm="Cancel the appointment: {{ a.service_name }} with {{ a.doctor_name }} on {{ a.starts_at|visit_when }}?">
   <input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}">
           <button class="btn btn-outline-danger btn-sm" type="submit">Cancel appointment</button>
         </form>

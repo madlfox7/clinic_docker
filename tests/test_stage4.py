@@ -553,7 +553,7 @@ def test_book_cancel_frees_slot_for_other_patient():
 		assert new_ids, "cancel button missing after book"
 		appointment_id = new_ids.pop()
 		assert "min service" in mine.text
-		assert 'data-confirm="Cancel this appointment?"' in mine.text
+		assert 'data-confirm="Cancel the appointment: ' in mine.text
 		other_confirmation = pat2.get(
 			f"/my?booked=1&appointment_id={appointment_id}"
 		)
