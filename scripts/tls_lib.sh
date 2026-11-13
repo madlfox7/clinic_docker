@@ -132,10 +132,14 @@ tls_name_matches() {
 #   provided: first block of the fullchain is the leaf, the rest are
 #             intermediates; trust = CLINIC_TLS_CA_FILE (host only) or the
 #             system store.
+# Optional KEY_LABEL CERT_LABEL name the files in messages (the paths the
+# user gave, when KEY and CERT are private working copies).
 tls_check_pair() {
-  [ -s "$1" ] || tls_fail "$1 is missing or empty"
-  [ -s "$2" ] || tls_fail "$2 is missing or empty"
-  tls_pair_matches "$2" "$1" || tls_fail "$1: key does not match certificate $2"
+  key_label="${3:-$1}"
+  cert_label="${4:-$2}"
+  [ -s "$1" ] || tls_fail "$key_label is missing or empty"
+  [ -s "$2" ] || tls_fail "$cert_label is missing or empty"
+  tls_pair_matches "$2" "$1" || tls_fail "$key_label: key does not match certificate $cert_label"
   tls_tmp leaf_only
   tls_tmp chain_rest
   awk -v leaf="$leaf_only" -v rest="$chain_rest" '
@@ -143,21 +147,21 @@ tls_check_pair() {
     n == 1 { print > leaf; next }
     n > 1 { print > rest }
   ' "$2"
-  [ -s "$leaf_only" ] || tls_fail "$2 has no certificate"
+  [ -s "$leaf_only" ] || tls_fail "$cert_label has no certificate"
   if ! openssl x509 -checkend 0 -noout -in "$leaf_only" >/dev/null 2>&1; then
-    tls_fail "$2 has expired"
+    tls_fail "$cert_label has expired"
   fi
   if ! openssl x509 -checkend 604800 -noout -in "$leaf_only" >/dev/null 2>&1; then
-    tls_fail "$2 expires within 7 days; renew it first"
+    tls_fail "$cert_label expires within 7 days; renew it first"
   fi
   if ! openssl x509 -checkend 1814400 -noout -in "$leaf_only" >/dev/null 2>&1; then
-    tls_warn "$2 expires within 21 days"
+    tls_warn "$cert_label expires within 21 days"
   fi
   tls_name_matches "$leaf_only" "$URL_HOST" \
-    || tls_fail "$URL_HOST (PUBLIC_BASE_URL) is not in certificate SAN of $2"
+    || tls_fail "$URL_HOST (PUBLIC_BASE_URL) is not in certificate SAN of $cert_label"
   if [ "$TLS_MODE" = local ]; then
     openssl verify -x509_strict -CAfile "$TLS_DIR/ca.crt" "$leaf_only" >/dev/null 2>&1 \
-      || tls_fail "$2 does not verify against $TLS_DIR/ca.crt"
+      || tls_fail "$cert_label does not verify against $TLS_DIR/ca.crt"
     return 0
   fi
   set -- "$leaf_only"

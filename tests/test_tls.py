@@ -852,7 +852,7 @@ exit 0
         real = shutil.which("openssl")
         wrapper = bin_dir / "openssl"
         wrapper.write_text(f"""#!/bin/sh
-if [ "$1" = s_client ]; then cat {served}; exit 0; fi
+if [ "$1" = s_client ]; then echo "$*" >> {tmp_path / "s_client.calls"}; cat {served}; exit 0; fi
 exec {real} "$@"
 """)
         wrapper.chmod(0o755)
@@ -1125,3 +1125,33 @@ def test_build_context_leaves_out_secrets():
     for service in ("api", "proxy"):
         image = json.loads(_compose("config", "--format", "json").stdout)["services"][service]
         assert image["build"]["context"] == str(ROOT)
+
+
+def test_reload_names_the_files_the_user_gave(tmp_path):
+    root = _reload_copy(tmp_path)
+    tls = root / "secrets" / "tls"
+    env, calls = _fake_bin(tmp_path)
+    key_a, crt_a = _issue_leaf(tmp_path, tls, "a", "DNS:localhost, IP:127.0.0.1, IP:::1", 90)
+    key_b, _ = _issue_leaf(tmp_path, tls, "b", "DNS:localhost, IP:127.0.0.1, IP:::1", 90)
+    done = _run_reload(root, pathlib.Path("b.key"), pathlib.Path("a.crt"), env, cwd=str(tmp_path))
+    assert done.returncode != 0, done.stdout
+    assert "b.key: key does not match certificate a.crt" in done.stderr, done.stderr
+    assert ".tmp." not in done.stderr
+    done = _run_reload(root, pathlib.Path("missing.key"), pathlib.Path("a.crt"), env, cwd=str(tmp_path))
+    assert done.returncode != 0 and "cannot read missing.key" in done.stderr, done.stderr
+
+
+@pytest.mark.parametrize("bind, expected", [
+    ("", "127.0.0.1:8450"), ("0.0.0.0", "127.0.0.1:8450"), ("127.0.0.1", "127.0.0.1:8450"),
+    ("192.0.2.10", "192.0.2.10:8450"), ("::", "[::1]:8450"), ("2001:db8::5", "[2001:db8::5]:8450"),
+])
+def test_reload_checks_the_serial_where_the_proxy_is_published(tmp_path, bind, expected):
+    root = _reload_copy(tmp_path)
+    tls = root / "secrets" / "tls"
+    key, crt = _issue_leaf(tmp_path, tls, "new", "DNS:localhost, IP:127.0.0.1, IP:::1", 90)
+    env, _ = _fake_bin(tmp_path, served=crt)
+    env["CLINIC_PROXY_BIND"] = bind
+    done = _run_reload(root, key, crt, env)
+    assert done.returncode == 0, done.stderr
+    assert f"served serial" in done.stdout and expected in done.stdout, done.stdout
+    assert f"-connect {expected}" in (tmp_path / "s_client.calls").read_text()
