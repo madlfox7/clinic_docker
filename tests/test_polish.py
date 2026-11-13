@@ -10,10 +10,19 @@ from pathlib import Path
 import httpx
 
 from tests.csrf_client import CsrfClient
+from tests.registration import (
+    account_notices,
+    clear_registration_attempts,
+    confirm_registration,
+    registration_form,
+    registration_limit_reset,  # noqa: F401 (autouse)
+    verification_messages,
+)
 from tests.test_ux_filters import (
     ADMIN,
     DOC,
     PAT,
+    PASSWORD,
     REG,
     _Setup,
     _doctor_id,
@@ -256,3 +265,217 @@ def test_app_js_fills_patient_only_with_the_flag_and_without_html():
         assert banned not in script
     assert 'split("{patient}")' in script
     assert 'form.dataset.confirmPatient === "1"' in script
+
+
+# --- 2. Neutral registration -------------------------------------------------
+
+NEW_PASSWORD = "Neutral-Check-2026!"
+RESET_LINK = re.compile(r"/reset-password\?token=([0-9a-f]{64})")
+
+
+def _unique(prefix: str) -> str:
+    return f"{prefix}-{uuid.uuid4().hex[:10]}@example.com"
+
+
+def _drop_user(email: str) -> None:
+    _psql(
+        f"DELETE FROM audit_events WHERE actor_user_id = (SELECT id FROM users WHERE email = '{email}') "
+        f"OR (target_type IN ('user', 'patient') AND target_id = (SELECT id FROM users WHERE email = '{email}')); "
+        f"DELETE FROM login_attempts WHERE email_fingerprint = public.digest('{email}', 'sha256'); "
+        f"DELETE FROM password_reset_attempts WHERE email_fingerprint = public.digest('{email}', 'sha256'); "
+        f"DELETE FROM email_verification_attempts WHERE email_fingerprint = public.digest('{email}', 'sha256'); "
+        f"DELETE FROM users WHERE email = '{email}'"
+    )
+
+
+def _account_state(email: str) -> str:
+    return _psql(
+        "SELECT u.password_hash || '|' || u.auth_version || '|' || coalesce(u.email_verified_at::text, '') "
+        "|| '|' || (SELECT count(*) FROM password_reset_tokens t WHERE t.user_id = u.id) "
+        "|| '|' || (SELECT count(*) FROM password_reset_tokens t WHERE t.user_id = u.id AND t.used_at IS NULL) "
+        "|| '|' || (SELECT count(*) FROM email_verification_tokens t WHERE t.user_id = u.id) "
+        "|| '|' || (SELECT count(*) FROM email_verification_tokens t WHERE t.user_id = u.id AND t.used_at IS NULL) "
+        f"FROM users u WHERE u.email = '{email}'"
+    )[0]
+
+
+def _register_raw(c, email: str, password: str = NEW_PASSWORD) -> httpx.Response:
+    return c.post("/register", data=registration_form(email, password), follow_redirects=False)
+
+
+def _shape(response: httpx.Response) -> tuple:
+    headers = sorted((k, v) for k, v in response.headers.items() if k.lower() != "date")
+    return response.status_code, response.headers.get("location"), response.content, headers
+
+
+def _reset_tokens(address: str) -> list[str]:
+    found = httpx.get(f"{MAILPIT}/api/v1/search",
+                      params={"query": f'to:"{address}" subject:"Reset your clinic password"'}, timeout=5)
+    found.raise_for_status()
+    tokens = []
+    for summary in found.json().get("messages") or []:
+        message = httpx.get(f"{MAILPIT}/api/v1/message/{summary.get('ID') or summary.get('Id')}", timeout=5)
+        match = RESET_LINK.search(message.json().get("Text") or "")
+        if match:
+            tokens.append(match.group(1))
+    return tokens
+
+
+def test_taken_and_new_email_get_the_same_answer_and_the_owner_a_notice():
+    httpx.delete(f"{MAILPIT}/api/v1/messages", timeout=5)
+    fresh = _unique("neutral-new")
+    fresh2 = _unique("neutral-new2")
+    before = _account_state(PAT)
+    try:
+        with _client(follow_redirects=False) as c:
+            c.get("/register")
+            taken = _register_raw(c, PAT)
+            new = _register_raw(c, fresh)
+            assert taken.status_code == 303 and taken.headers["location"] == "/login?registered=1"
+            assert _shape(taken) == _shape(new)
+            spaced = _register_raw(c, "  " + PAT.upper())
+            new2 = _register_raw(c, fresh2)
+            assert _shape(spaced) == _shape(new2) == _shape(taken)
+            assert ("set-cookie" in taken.headers) == ("set-cookie" in new.headers)
+        notices = account_notices(PAT)
+        assert len(notices) == 2
+        for notice in notices:
+            text = notice.get("Text") or ""
+            assert "/forgot-password" in text and "/login" in text
+            assert "token=" not in text and "Narek" not in text and "Hakobyan" not in text
+        assert verification_messages(PAT) == []
+        assert len(verification_messages(fresh)) == 1
+        assert _account_state(PAT) == before
+        # the new account still confirms and signs in as before
+        confirm_registration(fresh)
+        with _client() as c:
+            done = c.post("/login", data={"email": fresh, "password": NEW_PASSWORD})
+            assert done.url.path == "/me", done.url
+    finally:
+        _drop_user(fresh)
+        _drop_user(fresh2)
+
+
+def test_registration_on_a_taken_email_does_not_cancel_a_live_reset_link():
+    httpx.delete(f"{MAILPIT}/api/v1/messages", timeout=5)
+    email = _unique("neutral-reset")
+    try:
+        with _client(follow_redirects=False) as c:
+            assert _register_raw(c, email).status_code == 303
+            confirm_registration(email)
+            assert c.post("/forgot-password", data={"email": email}).status_code == 303
+            tokens = _reset_tokens(email)
+            assert len(tokens) == 1
+            assert _register_raw(c, email).headers["location"] == "/login?registered=1"
+        with _client() as c:
+            page = c.get("/reset-password", params={"token": tokens[0]})
+            assert page.status_code == 200 and 'name="new_password"' in page.text
+    finally:
+        _drop_user(email)
+
+
+def test_unconfirmed_account_gets_a_notice_and_the_owner_takes_it_back_by_reset():
+    httpx.delete(f"{MAILPIT}/api/v1/messages", timeout=5)
+    email = _unique("neutral-unconfirmed")
+    p1, p2, p3 = "First-Owner-2026!", "Second-Try-2026!", "Real-Owner-2026!"
+    try:
+        with _client(follow_redirects=False) as c:
+            assert _register_raw(c, email, p1).status_code == 303
+            before = _account_state(email)
+            again = _register_raw(c, email, p2)
+            assert again.headers["location"] == "/login?registered=1"
+        assert _account_state(email) == before
+        assert len(verification_messages(email)) == 1
+        assert len(account_notices(email)) == 1
+        with _client() as c:
+            assert "sent=1" in str(c.post("/forgot-password", data={"email": email}).url)
+            token = _reset_tokens(email)[0]
+            done = c.post("/reset-password", data={"token": token, "new_password": p3, "confirm_password": p3})
+            assert done.status_code == 200, done.status_code
+        assert _psql(f"SELECT email_verified_at IS NOT NULL FROM users WHERE email = '{email}'") == ["t"]
+        with _client() as c:
+            assert c.post("/login", data={"email": email, "password": p1}).status_code == 401
+            assert c.post("/login", data={"email": email, "password": p3}).url.path == "/me"
+    finally:
+        _drop_user(email)
+
+
+def test_blocked_patient_and_staff_get_the_same_answer_and_a_notice():
+    httpx.delete(f"{MAILPIT}/api/v1/messages", timeout=5)
+    blocked = _unique("neutral-blocked")
+    fresh = _unique("neutral-fresh")
+    try:
+        with _client(follow_redirects=False) as c:
+            assert _register_raw(c, blocked).status_code == 303
+            confirm_registration(blocked)
+            _psql(f"UPDATE users SET blocked = TRUE WHERE email = '{blocked}'")
+            new = _register_raw(c, fresh)
+            for email in (blocked, DOC):
+                answer = _register_raw(c, email)
+                assert _shape(answer) == _shape(new), email
+                assert len(account_notices(email)) == 1, email
+    finally:
+        _drop_user(blocked)
+        _drop_user(fresh)
+
+
+def test_taken_email_limit_five_notices_then_429():
+    httpx.delete(f"{MAILPIT}/api/v1/messages", timeout=5)
+    clear_registration_attempts()
+    with _client(follow_redirects=False) as c:
+        codes = [_register_raw(c, PAT).status_code for _ in range(6)]
+    assert codes == [303] * 5 + [429], codes
+    assert len(account_notices(PAT)) == 5
+    clear_registration_attempts()
+
+
+def test_smtp_failure_is_the_same_for_new_and_taken_email_and_logs_one_line():
+    fresh = _unique("neutral-smtp")
+    script = f"""
+import json
+from starlette.requests import Request
+import routes_auth
+import smtplib
+
+def boom(*args, **kwargs):
+    raise smtplib.SMTPRecipientsRefused({{args[0] if args else "x": (550, b"no")}})
+
+routes_auth.send_email_verification = boom
+routes_auth.send_existing_account_notice = boom
+
+def request(path):
+    return Request({{"type": "http", "method": "POST", "path": path, "headers": [],
+                    "query_string": b"", "client": ("10.200.0.9", 4000), "session": {{}},
+                    "server": ("test", 80), "scheme": "http"}})
+
+answers = []
+for email in ({fresh!r}, {PAT!r}):
+    r = routes_auth.register(request("/register"), email=email, password={NEW_PASSWORD!r},
+                             confirm_password={NEW_PASSWORD!r}, full_name="Smtp Down", phone="+374 10 101010")
+    answers.append([r.status_code, r.headers["location"]])
+print(json.dumps(answers))
+"""
+    try:
+        completed = subprocess.run(
+            ["docker", "compose", "exec", "-T", "api", "python", "-"],
+            input=script, cwd=ROOT, capture_output=True, text=True,
+        )
+        assert completed.returncode == 0, completed.stderr[-2000:]
+        import json
+        answers = json.loads(completed.stdout.strip().splitlines()[-1])
+        assert answers == [[303, "/login?registered=1&mail=failed"]] * 2, answers
+        output = completed.stdout + completed.stderr
+        assert output.count("could not send registration email (SMTPRecipientsRefused)") == 2, output
+        for leak in (fresh, PAT, "send_existing_account_notice", "send_email_verification", "Traceback"):
+            assert leak not in output, leak
+    finally:
+        _drop_user(fresh)
+        clear_registration_attempts()
+
+
+def test_register_route_and_login_page_have_no_taken_answer():
+    source = (ROOT / "app" / "routes_auth.py").read_text()
+    body = source[source.index("def register(\n"):source.index('@router.post("/login")')]
+    assert "already exists" not in body and "409" not in body
+    assert "exc_info" not in body and "log.exception" not in body[body.index("send_existing_account_notice"):]
+    assert "Account created" not in (ROOT / "app" / "templates" / "login.html").read_text()

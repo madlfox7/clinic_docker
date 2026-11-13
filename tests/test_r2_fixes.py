@@ -434,7 +434,7 @@ def test_registration_mails_once_and_sign_in_waits_for_confirmation():
         with _client() as guest:
             created = register_patient(guest, email, REG_PASSWORD, confirm=False, full_name=name)
             assert "registered=1" in str(created.url)
-            assert "sign-in will be available after confirmation" in created.text
+            assert "sign-in becomes available after confirmation" in created.text
         messages = verification_messages(email)
         assert len(messages) == 1
         assert [to["Address"] for to in messages[0]["To"]] == [email]

@@ -195,6 +195,26 @@ def send_password_reset(recipient: str, token: str) -> None:
     )
 
 
+def send_existing_account_notice(recipient: str) -> None:
+    """Registration with an address that already has an account. No token,
+    no name: only links to the normal sign-in and reset pages."""
+    base_url = os.environ.get("PUBLIC_BASE_URL", "http://localhost:8080").strip().rstrip("/")
+    if not base_url or any(char in base_url for char in "\r\n"):
+        raise ValueError("invalid public base URL")
+    send_account_message(
+        recipient,
+        "Your clinic account",
+        "Someone tried to create a new clinic account with this email address.\n"
+        "This address already has an account, so nothing was changed.\n\n"
+        f"Sign in: {base_url}/login\n"
+        f"Forgot your password? Request a reset link: {base_url}/forgot-password\n"
+        "If you started registration earlier but did not confirm it, the reset link\n"
+        "also confirms your email.\n\n"
+        "If this was not you, ignore this message: your password has not changed.\n"
+        "If you cannot sign in, contact the clinic.\n",
+    )
+
+
 def send_email_verification(recipient: str, full_name: str | None, token: str) -> None:
     """Confirmation link after registration. The name goes only into the body."""
     if any(char in token for char in "\r\n"):

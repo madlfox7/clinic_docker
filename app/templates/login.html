@@ -14,7 +14,7 @@
 {% else %}
 {% if error %}<div class="alert alert-danger" role="alert">{{ error }}</div>{% endif %}
 {% if expired %}<div class="alert alert-warning" role="alert">Your session has expired. Please sign in again.</div>{% endif %}
-{% if registered %}<div class="alert alert-success">Account created. Open the confirmation email and follow the link; sign-in will be available after confirmation.</div>{% endif %}
+{% if registered %}<div class="alert alert-success">Check your email for the next step. If you are new here, open the confirmation link; sign-in becomes available after confirmation.</div>{% endif %}
 {% if notice == "mail_failed" %}<div class="alert alert-warning" role="alert">The confirmation email could not be sent. Request a new link below.</div>
 {% elif notice == "verified" %}<div class="alert alert-success">Email confirmed. You can sign in now.</div>
 {% elif notice == "resent" %}<div class="alert alert-info">If this email belongs to an unconfirmed account, we sent a new link.</div>{% endif %}

@@ -10,7 +10,7 @@ from pathlib import Path
 import httpx
 import pytest
 
-from tests.registration import PATIENT_FIELDS, confirm_registration, registration_limit_reset  # noqa: F401 (autouse)
+from tests.registration import PATIENT_FIELDS, account_notices, confirm_registration, registration_limit_reset  # noqa: F401 (autouse)
 from tests.csrf_client import CsrfClient
 from tests.demo_secret import demo_password
 from tests.field_key import PROBE_PACKET, decrypt, is_packet, seal_pending, sql_packet
@@ -415,7 +415,8 @@ def test_weak_passwords_are_rejected_without_creating_users():
 				"confirm_password": spaced_password,
 			},
 		)
-		assert duplicate.status_code == 409
+		assert duplicate.status_code == 200 and "registered=1" in str(duplicate.url)
+		assert len(account_notices(stored_email)) == 1
 		spaced_login = guest.post(
 			"/login",
 			data={"email": stored_email, "password": spaced_password},
@@ -905,7 +906,7 @@ def test_patient_recovers_password_without_admin_reset():
 					"confirm_password": password,
 				},
 			)
-			assert "Account created." in registered.text
+			assert "Check your email for the next step." in registered.text
 			user_id = int(psql(f"SELECT id FROM users WHERE email = '{email}'"))
 			confirm_registration(email)
 			login(admin, ADMIN)
@@ -1098,7 +1099,7 @@ def test_owner_confirms_email_change_on_both_addresses():
 					"confirm_password": password,
 				},
 			)
-			assert "Account created." in registered.text
+			assert "Check your email for the next step." in registered.text
 			user_id = int(psql(f"SELECT id FROM users WHERE email = '{email}'"))
 			confirm_registration(email)
 			assert "Role: patient" in owner.post(
@@ -3788,8 +3789,8 @@ def test_public_registration_is_patient_only_and_can_book(request):
 		)
 		assert created.status_code == 200
 		assert "/login?registered=1" in str(created.url)
-		assert "Account created." in created.text
-		assert "sign-in will be available after confirmation" in created.text
+		assert "Check your email for the next step." in created.text
+		assert "sign-in becomes available after confirmation" in created.text
 		confirm_registration(email)
 		user_id = int(
 			psql(f"SELECT id FROM users WHERE email = '{email}'")
@@ -3806,8 +3807,8 @@ def test_public_registration_is_patient_only_and_can_book(request):
 				"confirm_password": password,
 			},
 		)
-		assert duplicate.status_code == 409
-		assert "already exists" in duplicate.text
+		assert duplicate.status_code == 200 and "/login?registered=1" in str(duplicate.url)
+		assert len(account_notices(email)) == 1
 		assert psql(f"SELECT count(*) FROM users WHERE lower(email) = '{email}'") == "1"
 
 		login_response = guest.post(
@@ -3888,8 +3889,8 @@ def test_public_registration_is_patient_only_and_can_book(request):
 				"confirm_password": password,
 			},
 		)
-		assert reregister.status_code == 409
-		assert "already exists" in reregister.text
+		assert reregister.status_code == 200 and "/login?registered=1" in str(reregister.url)
+		assert len(account_notices(email)) >= 1
 		assert psql(f"SELECT count(*) FROM users WHERE lower(email) = '{email}'") == "1"
 
 		try:

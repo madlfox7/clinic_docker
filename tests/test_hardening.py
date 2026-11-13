@@ -141,7 +141,7 @@ def test_email_limit_five_per_day():
     try:
         with _client(follow_redirects=False) as c:
             codes = [_register(c, email).status_code for _ in range(6)]
-        assert codes == [303, 409, 409, 409, 409, 429], codes
+        assert codes == [303, 303, 303, 303, 303, 429], codes
         assert _attempts() == 5
     finally:
         _drop_users(email)

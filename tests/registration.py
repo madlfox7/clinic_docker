@@ -68,6 +68,23 @@ def verification_messages(address: str) -> list[dict]:
     return found
 
 
+def account_notices(address: str) -> list[dict]:
+    """"Your clinic account" notices (registration on a taken email), newest first."""
+    response = httpx.get(
+        f"{MAILPIT}/api/v1/search",
+        params={"query": f'to:"{address}" subject:"Your clinic account"'},
+        timeout=5,
+    )
+    response.raise_for_status()
+    found = []
+    for summary in response.json().get("messages") or []:
+        message_id = summary.get("ID") or summary.get("Id")
+        message = httpx.get(f"{MAILPIT}/api/v1/message/{message_id}", timeout=5)
+        message.raise_for_status()
+        found.append(message.json())
+    return found
+
+
 def latest_verification_token(address: str) -> str:
     for message in verification_messages(address):
         match = VERIFY_LINK.search(message.get("Text") or "")

@@ -36,6 +36,7 @@ from date_filters import clean_search, escape_like
 from mailer import (
     send_account_message,
     send_email_verification,
+    send_existing_account_notice,
     send_password_changed,
     send_password_reset,
     smtp_ready,
@@ -435,24 +436,22 @@ def register(
         outcome = "exists"
     finally:
         conn.close()
-    if outcome == "exists":
-        return _register_page(
-            request,
-            "An account with this email already exists.",
-            409,
-            normalized_email,
-            **keep,
-        )
-    if outcome != "created" or not token:
+    if outcome not in ("created", "exists") or (outcome == "created" and not token):
         return _register_page(
             request, "Check the registration details.", 400, normalized_email, **keep
         )
-    # The account, profile and token stay even if the mail fails; the login
-    # page then says so and offers a new link.
+    # The same answer for a new and an existing email (always a redirect): the owner of an
+    # existing account gets a notice instead of a confirmation link. A new
+    # account, profile and token stay even if the mail fails.
     try:
-        send_email_verification(normalized_email, clean_name, token)
-    except Exception:
-        log.exception("could not send email confirmation")
+        if outcome == "created":
+            send_email_verification(normalized_email, clean_name, token)
+        else:
+            send_existing_account_notice(normalized_email)
+    except Exception as exc:
+        # One line for both branches, no stack: a traceback would name the
+        # mail function (new or taken email), SMTPRecipientsRefused the address.
+        log.warning("could not send registration email (%s)", type(exc).__name__)
         return RedirectResponse("/login?registered=1&mail=failed", status_code=303)
     return RedirectResponse("/login?registered=1", status_code=303)
 
