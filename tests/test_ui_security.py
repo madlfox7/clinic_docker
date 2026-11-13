@@ -18,7 +18,7 @@ ROOT = Path(__file__).resolve().parents[1]
 TEMPLATES = ROOT / "app" / "templates"
 STATIC = ROOT / "app" / "static"
 BOOTSTRAP = STATIC / "vendor" / "bootstrap" / "bootstrap.min.css"
-BASE = os.environ.get("CLINIC_TEST_BASE", "http://localhost:8080")
+BASE = os.environ.get("CLINIC_TEST_BASE", "https://localhost:8450")
 PASSWORD = demo_password()
 
 CSP = (

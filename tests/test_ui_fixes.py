@@ -13,7 +13,7 @@ from tests.demo_secret import demo_password
 ROOT = Path(__file__).resolve().parents[1]
 PASSWORD = demo_password()
 
-BASE = os.environ.get("CLINIC_TEST_BASE", "http://localhost:8080")
+BASE = os.environ.get("CLINIC_TEST_BASE", "https://localhost:8450")
 
 
 def _client(**kwargs):

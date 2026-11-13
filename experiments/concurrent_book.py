@@ -10,7 +10,7 @@ from pathlib import Path
 import httpx
 
 ROOT = Path(__file__).resolve().parents[1]
-BASE = os.environ.get("CLINIC_TEST_BASE", "http://localhost:8080")
+BASE = os.environ.get("CLINIC_TEST_BASE", "https://localhost:8450")
 PASSWORD = (ROOT / "secrets" / "demo_password").read_text(encoding="utf-8").strip()
 ACCOUNTS = [
     ("pat@clinic.local", PASSWORD),

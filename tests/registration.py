@@ -12,7 +12,7 @@ import pytest
 from tests.csrf_client import CsrfClient
 from tests.test_rls_boundary import compose_exec
 
-BASE = os.environ.get("CLINIC_TEST_BASE", "http://localhost:8080")
+BASE = os.environ.get("CLINIC_TEST_BASE", "https://localhost:8450")
 MAILPIT = os.environ.get("CLINIC_MAILPIT", "http://127.0.0.1:8025")
 PATIENT_NAME = "Test Patient"
 PATIENT_PHONE = "+374 10 000111"

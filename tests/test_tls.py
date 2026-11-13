@@ -310,7 +310,15 @@ def _client_can_speak_tls11(client: ssl.SSLContext) -> bool:
 
 
 def test_certificate_is_checked_against_the_stand_ca_only():
-    system_only = ssl.create_default_context()
+    # The compiled-in system store, not SSL_CERT_FILE (which points at the stand CA).
+    paths = ssl.get_default_verify_paths()
+    system_only = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+    loaded = False
+    for cafile, capath in ((paths.openssl_cafile, None), (None, paths.openssl_capath)):
+        if (cafile and os.path.isfile(cafile)) or (capath and os.path.isdir(capath)):
+            system_only.load_verify_locations(cafile=cafile, capath=capath)
+            loaded = True
+    assert loaded, paths
     with pytest.raises(ssl.SSLCertVerificationError):
         _handshake("localhost", system_only)
     status, _, _ = _https_get("/login")
@@ -338,3 +346,28 @@ def test_tls_server_config_statics():
     ciphers = re.search(r"ssl_ciphers ([^;]+);", tls_server).group(1).split(":")
     assert ciphers and all(c.startswith("ECDHE-") and ("GCM" in c or "CHACHA20" in c) for c in ciphers), ciphers
     assert _compose("run", "--rm", "--no-deps", "-T", "proxy", "nginx", "-t").returncode == 0
+
+
+# --- 4. Tests verify certificates ----------------------------------------------
+
+def test_no_test_or_experiment_disables_certificate_checks():
+    forbidden = re.compile(r"verify\s*=\s*False|CERT_NONE|check_hostname\s*=\s*False|_create_unverified_context")
+    me = pathlib.Path(__file__).resolve()
+    hits = []
+    for top in ("tests", "experiments"):
+        for path in (ROOT / top).rglob("*.py"):
+            if path.resolve() == me or ".venv" in path.parts:
+                continue
+            for number, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
+                if forbidden.search(line):
+                    hits.append(f"{path.relative_to(ROOT)}:{number}")
+    assert not hits, hits
+
+
+def test_default_test_base_is_https():
+    for path in [*(ROOT / "tests").glob("*.py"), ROOT / "experiments" / "concurrent_book.py"]:
+        text = path.read_text(encoding="utf-8")
+        assert 'CLINIC_TEST_BASE", ' + '"http://' not in text, path
+    assert 'CLINIC_TEST_BASE:-https://localhost:8450' in (ROOT / "tests" / "run_tests.sh").read_text()
+    makefile = (ROOT / "Makefile").read_text()
+    assert "TEST_BASE ?= https://localhost:8450" in makefile and "SSL_CERT_FILE=$(TEST_CA)" in makefile

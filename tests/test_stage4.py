@@ -23,7 +23,7 @@ from tests.clinical_notes import (
 
 ROOT = Path(__file__).resolve().parents[1]
 
-BASE = os.environ.get("CLINIC_TEST_BASE", "http://localhost:8080")
+BASE = os.environ.get("CLINIC_TEST_BASE", "https://localhost:8450")
 MAILPIT = os.environ.get("CLINIC_MAILPIT", "http://127.0.0.1:8025")
 PASSWORD = demo_password()
 

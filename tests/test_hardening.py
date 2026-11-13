@@ -40,7 +40,7 @@ from tests.test_ux_filters import (
 )
 
 ROOT = Path(__file__).resolve().parents[1]
-BASE = os.environ.get("CLINIC_TEST_BASE", "http://localhost:8080")
+BASE = os.environ.get("CLINIC_TEST_BASE", "https://localhost:8450")
 REG_PASSWORD = "Limit-Check-2026!"
 CSRF_VALUE = re.compile(r'name="csrf_token" value="[^"]*"')
 

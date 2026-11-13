@@ -1,5 +1,6 @@
 """Session limits: id-only cookie, idle timeout from clinic settings, 12 h absolute limit."""
 import base64
+import ipaddress
 import json
 import os
 import re
@@ -18,7 +19,7 @@ from tests.demo_secret import demo_password
 from tests.test_rls_boundary import compose_exec, compose_exec_run
 
 ROOT = Path(__file__).resolve().parents[1]
-BASE = os.environ.get("CLINIC_TEST_BASE", "http://localhost:8080")
+BASE = os.environ.get("CLINIC_TEST_BASE", "https://localhost:8450")
 PASSWORD = demo_password()
 PAT = "pat@clinic.local"
 DOC = "doc@clinic.local"
@@ -44,11 +45,22 @@ def _psql_run(sql: str) -> subprocess.CompletedProcess:
     )
 
 
+def _jar_domain() -> str:
+    # http.cookiejar files cookies from a dotless host name (localhost) under
+    # "<host>.local"; IP addresses and dotted names are kept as they are.
+    host = urlparse(BASE).hostname
+    try:
+        ipaddress.ip_address(host)
+        return host
+    except ValueError:
+        return host if "." in host else host + ".local"
+
+
 def _client(cookie=None, follow=False):
     c = CsrfClient(base_url=BASE, follow_redirects=follow, timeout=10.0)
     if cookie:
         # Same domain the server's Set-Cookie lands on, so updates replace it.
-        c.cookies.set("session", cookie, domain=urlparse(BASE).hostname, path="/")
+        c.cookies.set("session", cookie, domain=_jar_domain(), path="/")
     return c
 
 

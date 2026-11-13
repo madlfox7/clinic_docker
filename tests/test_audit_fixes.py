@@ -15,7 +15,7 @@ from tests.demo_secret import demo_password
 from tests.field_key import seal_pending, sql_packet
 
 ROOT = Path(__file__).resolve().parents[1]
-BASE = os.environ.get("CLINIC_TEST_BASE", "http://localhost:8080")
+BASE = os.environ.get("CLINIC_TEST_BASE", "https://localhost:8450")
 PASSWORD = demo_password()
 PAT = "pat@clinic.local"
 PAT2 = "pat2@clinic.local"

@@ -4,7 +4,9 @@
 
 COMPOSE ?= docker compose
 PYTHON ?= python3
-TEST_BASE ?= http://localhost:8080
+TEST_BASE ?= https://localhost:8450
+# CA the tests verify the stand certificate against (SSL_CERT_FILE for pytest only).
+TEST_CA ?= secrets/tls/ca.crt
 TEST_MAILPIT ?= http://127.0.0.1:8025
 # Compose project the tests inspect (docker compose exec ...); empty = default.
 TEST_PROJECT ?=
@@ -64,7 +66,7 @@ help:
 	@echo "  clean    remove containers and networks; data is kept"
 	@echo "  logs     follow the logs of all services"
 	@echo "  ps       list the containers"
-	@echo "  test     run the test suite (TEST_BASE, TEST_MAILPIT, TEST_PROJECT, PYTHON, PYTEST_ARGS)"
+	@echo "  test     run the test suite (TEST_BASE, TEST_CA, TEST_MAILPIT, TEST_PROJECT, PYTHON, PYTEST_ARGS)"
 	@echo "  reset    WIPES THE DATABASE: down -v, then start (asks first; CONFIRM=yes skips)"
 	@echo "  fclean   WIPES THE DATABASE: down -v --rmi local --remove-orphans for this project only (asks first; CONFIRM=yes skips)"
 
@@ -96,5 +98,5 @@ ps:
 	$(COMPOSE) ps
 
 test:
-	$(if $(TEST_PROJECT),COMPOSE_PROJECT_NAME=$(TEST_PROJECT)) CLINIC_TEST_BASE=$(TEST_BASE) CLINIC_MAILPIT=$(TEST_MAILPIT) \
+	$(if $(TEST_PROJECT),COMPOSE_PROJECT_NAME=$(TEST_PROJECT)) CLINIC_TEST_BASE=$(TEST_BASE) CLINIC_MAILPIT=$(TEST_MAILPIT) SSL_CERT_FILE=$(TEST_CA) \
 		$(PYTHON) -m pytest $(PYTEST_ARGS) $(TEST_FILES)

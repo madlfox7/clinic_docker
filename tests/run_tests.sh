@@ -11,7 +11,7 @@ if ! command -v docker >/dev/null 2>&1; then
 fi
 
 TEST_PYTHON=python3
-TEST_BASE_URL="${CLINIC_TEST_BASE:-http://localhost:8080}"
+TEST_BASE_URL="${CLINIC_TEST_BASE:-https://localhost:8450}"
 if { [ ! -x "$VENV_DIR/bin/python" ] || [ ! -f "$VENV_DIR/bin/activate" ]; } \
   && python3 -m venv "$VENV_DIR" >/dev/null 2>&1 \
   && [ -x "$VENV_DIR/bin/python" ] && [ -f "$VENV_DIR/bin/activate" ]; then
@@ -31,13 +31,17 @@ else
 fi
 
 ./scripts/init_secrets.sh
+# Only after pip install: pip must keep using the system trust store for PyPI.
+# From here on urllib (readiness) and httpx (pytest) verify the stand
+# certificate against the stand CA and nothing else.
+export SSL_CERT_FILE="$ROOT_DIR/secrets/tls/ca.crt"
 echo "Starting the local clinic stack (database volume will be preserved)..."
 docker compose up -d --build
 
 echo "Waiting for $TEST_BASE_URL ..."
 ready=false
 for attempt in $(seq 1 30); do
-  if CLINIC_TEST_BASE="$TEST_BASE_URL" "$TEST_PYTHON" -c 'import os, urllib.request; urllib.request.urlopen(os.environ["CLINIC_TEST_BASE"] + "/", timeout=1)' >/dev/null 2>&1; then
+  if CLINIC_TEST_BASE="$TEST_BASE_URL" "$TEST_PYTHON" -c 'import os, urllib.request; urllib.request.urlopen(os.environ["CLINIC_TEST_BASE"] + "/login", timeout=1)' >/dev/null 2>&1; then
     ready=true
     break
   fi

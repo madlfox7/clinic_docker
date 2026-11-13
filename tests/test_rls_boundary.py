@@ -14,7 +14,7 @@ ROOT = Path(__file__).resolve().parents[1]
 PATIENT_A = "pat@clinic.local"
 DOCTOR = "doc@clinic.local"
 ADMIN = "admin@clinic.local"
-TEST_BASE = os.environ.get("CLINIC_TEST_BASE", "http://localhost:8080")
+TEST_BASE = os.environ.get("CLINIC_TEST_BASE", "https://localhost:8450")
 
 
 def compose_exec_run(service: str, command: list[str], *, input_text: str = "",

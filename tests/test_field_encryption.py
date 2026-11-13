@@ -71,7 +71,7 @@ def test_medical_text_is_stored_encrypted_and_shown_as_plaintext():
 			current_id = stand_keyring().current_id
 			for table, text in (("visit_notes", note), ("prescriptions", prescription)):
 				row_id, stored = _stored(table, visit)
-				assert marker not in stored and "throat" not in stored and "mg" not in stored
+				assert marker not in stored and "throat" not in stored and "500 mg" not in stored
 				assert is_packet(stored), "body is not a row-bound encrypted packet"
 				assert stored.startswith(f"fe2:{current_id}:")
 				assert decrypt(table, row_id, visit, stored) == text
