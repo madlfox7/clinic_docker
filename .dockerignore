@@ -1,0 +1,5 @@
+# Never part of a build context: keys, certificates, local settings, venvs.
+secrets/
+acme-webroot/
+.env
+.venv*/

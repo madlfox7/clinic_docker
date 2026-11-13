@@ -1115,3 +1115,13 @@ def test_reissued_leaf_is_marked_for_a_proxy_reload(tmp_path):
     start = makefile.split("define start_stack", 1)[1].split("endef", 1)[0]
     assert start.index("up --build -d") < start.index("secrets/tls/.leaf_reissued")
     assert "$(COMPOSE) exec -T proxy nginx -s reload && rm -f secrets/tls/.leaf_reissued" in start
+
+
+def test_build_context_leaves_out_secrets():
+    lines = [line.strip() for line in (ROOT / ".dockerignore").read_text().splitlines()
+             if line.strip() and not line.startswith("#")]
+    for needed in ("secrets/", "acme-webroot/", ".env", ".venv*/"):
+        assert needed in lines, lines
+    for service in ("api", "proxy"):
+        image = json.loads(_compose("config", "--format", "json").stdout)["services"][service]
+        assert image["build"]["context"] == str(ROOT)
