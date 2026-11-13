@@ -7,6 +7,7 @@
 {% if cancelled %}<div class="alert alert-success">Appointment cancelled.</div>{% endif %}
 {% if cancel_error %}<div class="alert alert-warning">Appointment could not be cancelled. It may not belong to you or may already be cancelled.</div>
 {% endif %}
+{% if filter_errors %}<div class="alert alert-warning">Some filters were not valid and were ignored.</div>{% endif %}
 {% if booking_confirmation %}
   <div class="card border-success mb-3">
     <div class="card-body">
@@ -23,12 +24,35 @@
     </div>
   </div>
 {% endif %}
+<div class="card mb-3"><div class="card-body">
+<form class="row g-2 align-items-end" method="get" action="/my">
+  <div class="col-sm-6 col-md-3"><label class="form-label w-100 mb-0">Show
+    <select class="form-select" name="status">
+      <option value="upcoming" {% if filters.status == "upcoming" %}selected{% endif %}>Upcoming</option>
+      <option value="past" {% if filters.status == "past" %}selected{% endif %}>Past</option>
+      <option value="cancelled" {% if filters.status == "cancelled" %}selected{% endif %}>Cancelled</option>
+      <option value="all" {% if filters.status == "all" %}selected{% endif %}>All</option>
+    </select>
+  </label></div>
+  <div class="col-sm-6 col-md-3"><label class="form-label w-100 mb-0">Doctor
+    <select class="form-select" name="doctor_id">
+      <option value="">All doctors</option>
+      {% for d in doctors %}
+        <option value="{{ d.id }}" {% if filters.doctor_id == d.id %}selected{% endif %}>{{ d.full_name }}</option>
+      {% endfor %}
+    </select>
+  </label></div>
+  <div class="col-sm-6 col-md-2"><label class="form-label w-100 mb-0">From <input class="form-control" type="date" name="from" value="{{ filters.from or '' }}"></label></div>
+  <div class="col-sm-6 col-md-2"><label class="form-label w-100 mb-0">To <input class="form-control" type="date" name="to" value="{{ filters.to or '' }}"></label></div>
+  <div class="col-md-2"><button class="btn btn-primary w-100" type="submit">Show</button></div>
+</form>
+</div></div>
 {% if items %}
 <ul class="clinic-list">
   {% for a in items %}
     <li{% if a.status == "cancelled" %} class="is-cancelled"{% endif %}>
       {{ a.doctor_name }} — {{ a.service_name }} —
-      {{ a.starts_at }} - {{ a.ends_at }} {{ status_badge(a.status) }}
+      {{ a.starts_at|visit_when(a.ends_at) }} {{ status_badge(a.status) }}
       — {{ a.duration_minutes }} min service{% if a.buffer_minutes %} + {{ a.buffer_minutes }} min buffer{% endif %}
       {% if a.status == "scheduled" and a.cancellable %}
         <form class="inline-form" method="post" action="/appointments/{{ a.id }}/cancel" data-confirm="Cancel this appointment?">
@@ -49,6 +73,16 @@
     </li>
   {% endfor %}
 </ul>
+{% elif doctors %}
+<div class="alert alert-secondary">No appointments match these filters.</div>
+{% else %}
+<div class="alert alert-secondary">No appointments yet.</div>
 {% endif %}
-{% if not items %}<div class="alert alert-secondary">No appointments yet.</div>{% endif %}
+{% if previous_url or next_url %}
+<nav class="d-flex gap-2 align-items-center" aria-label="Pages">
+  {% if previous_url %}<a class="btn btn-outline-primary btn-sm" href="{{ previous_url }}">Previous</a>{% endif %}
+  <span class="text-body-secondary">Page {{ page }}</span>
+  {% if next_url %}<a class="btn btn-outline-primary btn-sm" href="{{ next_url }}">Next</a>{% endif %}
+</nav>
+{% endif %}
 {% endblock %}

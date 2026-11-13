@@ -18,6 +18,7 @@ from tests.test_stage4 import (
 	PAT2,
 	REG,
 	_drop_visit,
+	my_visit_url,
 	_past_visit,
 	client,
 	login,
@@ -90,7 +91,7 @@ def test_medical_text_is_stored_encrypted_and_shown_as_plaintext():
 				doctor.get(record_url).text,
 				doctor.get(f"/doctor/patients/{patient_id}").text,
 				pat.get("/my/records").text,
-				pat.get("/my").text,
+				pat.get(my_visit_url(visit)).text,
 			):
 				assert note in page and prescription in page
 				assert "fe2:" not in page and "fe1:" not in page
@@ -279,7 +280,7 @@ def test_packet_moved_to_another_row_does_not_decrypt():
 				original = psql(f"SELECT body FROM {table} WHERE id = {row_id}")
 				psql(f"UPDATE {table} SET body = '{foreign}' WHERE id = {row_id}")
 				try:
-					for page in (doctor.get(b_url), pat_b.get("/my/records"), pat_b.get("/my")):
+					for page in (doctor.get(b_url), pat_b.get("/my/records"), pat_b.get(my_visit_url(visit_b))):
 						assert page.status_code == 500
 						assert "could not be decrypted" in page.text
 						assert text_a not in page.text and rx_a not in page.text

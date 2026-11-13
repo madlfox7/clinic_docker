@@ -17,7 +17,14 @@ from db import (
     templates,
     within_length,
 )
-from date_filters import calendar_state, day_start, url_with
+from date_filters import (
+    calendar_state,
+    date_range,
+    day_start,
+    parse_page,
+    range_bounds,
+    url_with,
+)
 from field_crypto import decrypt_body
 from mailer import deliver_appointment_emails
 from routes_auth import _login_doctor_id, _normalize_registration_email, require_user
@@ -747,16 +754,98 @@ def cancel_appointment(request: Request, appointment_id: str):
     )
 
 
+MY_PAGE_SIZE = 20
+MY_STATUS_FILTERS = {
+    "upcoming": "a.status = 'scheduled' AND a.starts_at > CURRENT_TIMESTAMP",
+    "past": (
+        "(a.status = 'completed'"
+        " OR (a.status = 'scheduled' AND a.starts_at <= CURRENT_TIMESTAMP))"
+    ),
+    "cancelled": "a.status = 'cancelled'",
+    "all": "TRUE",
+}
+
+
+def _load_my_confirmation(cur, patient_id, appointment_id):
+    """Booking/reschedule card: loaded on its own, never from the filtered page."""
+    cur.execute(
+        """
+        SELECT d.full_name, svc.name, a.starts_at, a.ends_at,
+               s.duration_minutes, s.buffer_minutes
+        FROM appointments a
+        JOIN slots s ON s.id = a.slot_id
+        JOIN doctors d ON d.id = s.doctor_id
+        JOIN services svc ON svc.id = s.service_id
+        WHERE a.id = %s
+          AND a.patient_user_id = %s
+          AND a.status = 'scheduled'
+        """,
+        (appointment_id, patient_id),
+    )
+    row = cur.fetchone()
+    if not row:
+        return None
+    return {
+        "doctor_name": row[0],
+        "service_name": row[1],
+        "starts_at": row[2],
+        "ends_at": row[3],
+        "duration_minutes": row[4],
+        "buffer_minutes": row[5],
+    }
+
+
 @router.get("/my")
 def my_appointments(request: Request):
     user, denied = require_user(request, "patient")
     if denied:
         return denied
     role = user["role"]
-    cancelled = request.query_params.get("cancelled")
-    cancel_error = request.query_params.get("cancel_error")
+    params = request.query_params
+    cancelled = params.get("cancelled")
+    cancel_error = params.get("cancel_error")
+    reschedule_error = params.get("reschedule_error")
+    filter_errors = []
+
+    status = params.get("status", "upcoming")
+    if status not in MY_STATUS_FILTERS:
+        filter_errors.append("invalid_filter")
+        status = "upcoming"
+    raw_doctor_id = params.get("doctor_id")
+    doctor_id = None
+    if raw_doctor_id:
+        doctor_id = parse_strict_int(raw_doctor_id, min_value=1)
+        if doctor_id is None:
+            filter_errors.append("invalid_filter")
+    from_day, to_day, range_errors = date_range(request)
+    filter_errors.extend(range_errors)
+    range_from, range_to = range_bounds(from_day, to_day)
+    page = parse_page(params.get("page"))
+
     conn = db_as(user)
     cur = conn.cursor()
+    cur.execute(
+        """
+        SELECT DISTINCT d.id, d.full_name
+        FROM appointments a
+        JOIN doctors d ON d.id = a.doctor_id
+        WHERE a.patient_user_id = %s
+        ORDER BY d.full_name, d.id
+        """,
+        (user["id"],),
+    )
+    doctors = [{"id": row[0], "full_name": row[1]} for row in cur.fetchall()]
+
+    # Fixed SQL fragments only; every user value goes in as a parameter.
+    where = ["a.patient_user_id = %s", MY_STATUS_FILTERS[status]]
+    query_args = [user["id"]]
+    if doctor_id is not None:
+        where.append("a.doctor_id = %s")
+        query_args.append(doctor_id)
+    if range_from is not None:
+        where.append("a.starts_at >= %s AND a.starts_at < %s")
+        query_args.extend([range_from, range_to])
+    query_args.extend([MY_PAGE_SIZE + 1, (page - 1) * MY_PAGE_SIZE])
     cur.execute(
         """
          SELECT a.id, d.full_name, svc.name, a.starts_at, a.ends_at, a.status,
@@ -766,7 +855,9 @@ def my_appointments(request: Request):
          JOIN slots s ON s.id=a.slot_id
          JOIN doctors d ON d.id=s.doctor_id
           JOIN services svc ON svc.id=s.service_id
-         WHERE a.patient_user_id=%s
+         WHERE """
+        + " AND ".join(where)
+        + """
          ORDER BY
               CASE
                 WHEN a.status = 'scheduled'
@@ -782,9 +873,12 @@ def my_appointments(request: Request):
                   OR a.starts_at <= CURRENT_TIMESTAMP THEN a.starts_at
               END DESC,
               a.id DESC
+         LIMIT %s OFFSET %s
          """,
-         (user["id"],),
+        query_args,
     )
+    rows = cur.fetchall()
+    has_next = len(rows) > MY_PAGE_SIZE
     items = [
         {
             "id": r[0],
@@ -796,41 +890,45 @@ def my_appointments(request: Request):
             "cancellable": r[6],
             "duration_minutes": r[7],
             "buffer_minutes": r[8],
+            "notes": [],
+            "prescriptions": [],
         }
-        for r in cur.fetchall()
+        for r in rows[:MY_PAGE_SIZE]
     ]
     items_by_id = {item["id"]: item for item in items}
-    for item in items:
-        item["notes"] = []
-        item["prescriptions"] = []
-    cur.execute(
-        """
-        SELECT 'notes', appointment_id, id, body FROM visit_notes
-        UNION ALL
-        SELECT 'prescriptions', appointment_id, id, body FROM prescriptions
-        ORDER BY 2, 3
-        """
-    )
-    for kind, appointment_id, record_id, body in cur.fetchall():
-        item = items_by_id.get(appointment_id)
-        if item is not None:
-            item[kind].append((record_id, appointment_id, body))
+    if items_by_id:
+        # Records of this page only, filtered by patient as well as by RLS.
+        page_ids = list(items_by_id)
+        cur.execute(
+            """
+            SELECT 'notes', appointment_id, id, body FROM visit_notes
+            WHERE appointment_id = ANY(%s) AND patient_user_id = %s
+            UNION ALL
+            SELECT 'prescriptions', appointment_id, id, body FROM prescriptions
+            WHERE appointment_id = ANY(%s) AND patient_user_id = %s
+            ORDER BY 2, 3
+            """,
+            (page_ids, user["id"], page_ids, user["id"]),
+        )
+        for kind, appointment_id, record_id, body in cur.fetchall():
+            item = items_by_id.get(appointment_id)
+            if item is not None:
+                item[kind].append((record_id, appointment_id, body))
     booking_confirmation = None
-    raw_confirmation_id = request.query_params.get("appointment_id")
+    reschedule_confirmation = None
+    raw_confirmation_id = params.get("appointment_id")
     confirmation_id = (
         parse_strict_int(raw_confirmation_id, min_value=1)
         if raw_confirmation_id is not None
         else None
     )
-    if request.query_params.get("booked") == "1" and confirmation_id is not None:
-        booking_confirmation = next(
-            (
-                item
-                for item in items
-                if item["id"] == confirmation_id and item["status"] == "scheduled"
-            ),
-            None,
-        )
+    if confirmation_id is not None:
+        if params.get("booked") == "1":
+            booking_confirmation = _load_my_confirmation(cur, user["id"], confirmation_id)
+        elif params.get("rescheduled") == "1":
+            reschedule_confirmation = _load_my_confirmation(
+                cur, user["id"], confirmation_id
+            )
     # Same read event as /my/records, once per page and only when bodies will be shown.
     if any(item["notes"] or item["prescriptions"] for item in items):
         record_audit_event(cur, "medical.records.view", "patient", user["id"])
@@ -842,6 +940,12 @@ def my_appointments(request: Request):
         item["prescriptions"] = [
             decrypt_body("prescriptions", *row) for row in item["prescriptions"]
         ]
+    filters = {
+        "status": status,
+        "doctor_id": doctor_id,
+        "from": from_day.isoformat() if from_day and params.get("from") else None,
+        "to": to_day.isoformat() if to_day and params.get("to") else None,
+    }
     return templates.TemplateResponse(
         request,
         "my_appointments.html",
@@ -850,8 +954,18 @@ def my_appointments(request: Request):
             "items": items,
             "role": role,
             "booking_confirmation": booking_confirmation,
+            "reschedule_confirmation": reschedule_confirmation,
             "cancelled": cancelled,
             "cancel_error": cancel_error,
+            "reschedule_error": reschedule_error,
+            "filter_errors": filter_errors,
+            "filters": filters,
+            "doctors": doctors,
+            "page": page,
+            "previous_url": (
+                url_with("/my", {**filters, "page": page - 1}) if page > 1 else None
+            ),
+            "next_url": url_with("/my", {**filters, "page": page + 1}) if has_next else None,
         },
     )
 

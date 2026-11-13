@@ -235,3 +235,96 @@ def test_registrar_can_hide_taken_slots():
             assert "Booked" not in only_free.text and f"/slots/{free}/book" in only_free.text
     finally:
         _cleanup_slots([taken, free])
+
+
+# --- 3. /my: filters, pagination, readable dates ------------------------------
+
+def _my_ids(html: str) -> list[int]:
+    return [int(x) for x in re.findall(r'action="/appointments/(\d+)/cancel"', html)]
+
+
+def _records_view_count(patient_id: int) -> int:
+    return int(_psql(
+        "SELECT count(*) FROM audit_events WHERE action = 'medical.records.view' "
+        f"AND target_type = 'patient' AND target_id = {patient_id}"
+    )[0])
+
+
+def test_my_pagination_records_and_readable_dates():
+    pat = _user_id(PAT)
+    doctor = _doctor_id(DOC)
+    day = _free_days(1)[0]
+    slots = [
+        _make_slot(doctor, f"{day} {hour:02d}:{minute:02d}")
+        for hour in range(0, 13) for minute in (0, 30)
+    ][:25]
+    try:
+        visits = [_book_sql(slot, pat) for slot in slots]
+        _psql(
+            "INSERT INTO visit_notes (appointment_id, doctor_id, patient_user_id, body) "
+            f"SELECT a.id, a.doctor_id, a.patient_user_id, {sql_packet('visit_notes', 'ux-page-note')} "
+            f"FROM appointments a WHERE a.id = {visits[0]}"
+        )
+        seal_pending()
+        with _client() as c:
+            _login(c, PAT)
+            params = {"status": "upcoming", "from": day, "to": day}
+            before = _records_view_count(pat)
+            first = c.get("/my", params=params)
+            assert first.status_code == 200
+            first_ids = _my_ids(first.text)
+            assert len(first_ids) == 20
+            assert "ux-page-note" in first.text
+            assert _records_view_count(pat) == before + 1
+            assert not RAW_DATETIME.search(first.text)
+            assert re.search(r"\w{3}, \d{2} \w{3} \d{4} \d{2}:\d{2}\u2013\d{2}:\d{2}", first.text)
+            assert "page=2" in first.text and "Next" in first.text
+            second = c.get("/my", params={**params, "page": "2"})
+            second_ids = _my_ids(second.text)
+            assert len(second_ids) == 5
+            assert "ux-page-note" not in second.text
+            assert _records_view_count(pat) == before + 1
+            assert sorted(first_ids + second_ids) == sorted(visits)
+            assert "Next" not in second.text
+            for bad in ({"page": "0"}, {"page": "501"}, {"page": "x"}, {"status": "nope"},
+                        {"from": "2026-02-30"}, {"from": day, "to": "1990-01-01"},
+                        {"doctor_id": "1'--"}):
+                page = c.get("/my", params=bad)
+                assert page.status_code == 200, bad
+                assert "Traceback" not in page.text
+            assert "were not valid" in c.get("/my", params={"status": "nope"}).text
+            cancelled = c.get("/my", params={"status": "cancelled", "from": day, "to": day})
+            assert "No appointments match these filters." in cancelled.text
+            too_wide = c.get("/my", params={"status": "all", "from": "2025-01-01", "to": "2026-12-31"})
+            assert "were not valid" in too_wide.text
+    finally:
+        _cleanup_slots(slots)
+
+
+def test_my_filters_never_show_other_patients():
+    pat2 = _user_id(PAT2)
+    doctor2 = _doctor_id(DOC2)
+    day = _free_days(1)[0]
+    slot = _make_slot(doctor2, f"{day} 06:00")
+    try:
+        foreign = _book_sql(slot, pat2)
+        with _client() as c, _client() as other:
+            _login(c, PAT)
+            _login(other, PAT2)
+            for status in ("upcoming", "past", "cancelled", "all"):
+                for extra in ({}, {"doctor_id": str(doctor2)}, {"from": day, "to": day}):
+                    page = c.get("/my", params={"status": status, **extra})
+                    assert page.status_code == 200
+                    assert foreign not in _my_ids(page.text)
+                    assert PAT2 not in page.text
+            empty = c.get("/my", params={"status": "all", "doctor_id": str(doctor2),
+                                         "from": day, "to": day})
+            assert _my_ids(empty.text) == []
+            assert foreign in _my_ids(other.get("/my", params={"from": day, "to": day}).text)
+            confirmation = c.get("/my", params={"booked": "1", "appointment_id": str(foreign)})
+            assert "Appointment confirmed" not in confirmation.text
+            own = other.get("/my", params={"booked": "1", "appointment_id": str(foreign),
+                                           "status": "past"})
+            assert "Appointment confirmed" in own.text
+    finally:
+        _cleanup_slots([slot])

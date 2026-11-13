@@ -105,6 +105,12 @@ def logout(c: httpx.Client) -> None:
 	assert response.status_code == 200 and response.url.path == "/", response.status_code
 
 
+def my_visit_url(appointment_id) -> str:
+	"""/my filtered to the visit's own day, so pagination never hides it."""
+	day = psql(f"SELECT starts_at::date FROM appointments WHERE id = {int(appointment_id)}")
+	return f"/my?status=all&from={day}&to={day}"
+
+
 def slot_ids(html: str) -> list[str]:
 	return re.findall(r'action="/slots/(\d+)/book"', html)
 
@@ -1346,7 +1352,7 @@ def test_medical_records_follow_visit_status_in_ui():
 			)
 			assert "error=record_unavailable" in str(foreign.url)
 
-			my = pat.get("/my").text
+			my = pat.get(my_visit_url(appointment_id)).text
 			assert "Report / diagnosis:" in my and diagnosis in my
 			assert "Prescription:" in my and prescription in my
 			assert f"foreign-{marker}" not in my
@@ -1354,7 +1360,7 @@ def test_medical_records_follow_visit_status_in_ui():
 			cancelled = pat.post(f"/appointments/{appointment_id}/cancel")
 			assert "cancelled=1" in str(cancelled.url)
 
-			my = pat.get("/my").text
+			my = pat.get(my_visit_url(appointment_id)).text
 			assert diagnosis in my and prescription in my
 			read_only = doctor.get(record_url)
 			assert diagnosis in read_only.text and prescription in read_only.text
@@ -1363,7 +1369,7 @@ def test_medical_records_follow_visit_status_in_ui():
 			for record_type, body in (("note", late_note), ("prescription", late_prescription)):
 				blocked = doctor.post(record_url, data={"record_type": record_type, "body": body})
 				assert "error=record_unavailable" in str(blocked.url)
-			my = pat.get("/my").text
+			my = pat.get(my_visit_url(appointment_id)).text
 			assert late_note not in my and late_prescription not in my
 			assert psql(
 				f"SELECT count(*) FROM visit_notes WHERE appointment_id = {appointment_id}"
@@ -1564,7 +1570,7 @@ def test_records_on_completed_visit_and_survive_status_change():
 				f"SELECT count(*) FROM visit_notes WHERE appointment_id = {visit}"
 			) == "2"
 
-			my = pat.get("/my").text
+			my = pat.get(my_visit_url(visit)).text
 			assert '<span class="badge status-badge text-bg-success">completed</span>' in my
 			assert f"before-{marker}" in my and f"after-{marker}" in my
 
@@ -1861,7 +1867,7 @@ def test_admin_can_cancel_future_appointments_separately_from_block():
 			admin.post(f"/admin/users/{user_id}/unblock")
 			login(pat, PAT)
 			assert appointment_id not in appointment_ids(pat.get("/my").text)
-			assert '<span class="badge status-badge text-bg-secondary">cancelled</span>' in pat.get("/my").text
+			assert '<span class="badge status-badge text-bg-secondary">cancelled</span>' in pat.get(my_visit_url(appointment_id)).text
 			assert "/admin/users" in cancelled.url.path
 		finally:
 			if user_id:

@@ -66,9 +66,7 @@ def date_range(request, max_days=MAX_FILTER_RANGE_DAYS):
     from_day, from_error = parse_iso_day(request.query_params.get("from"))
     to_day, to_error = parse_iso_day(request.query_params.get("to"))
     if from_error or to_error:
-        errors.append("invalid_range")
-        from_day = None if from_error else from_day
-        to_day = None if to_error else to_day
+        return None, None, ["invalid_range"]
     if from_day and to_day:
         if to_day < from_day or (to_day - from_day).days > max_days:
             errors.append("invalid_range")
