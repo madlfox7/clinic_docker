@@ -51,10 +51,17 @@ define confirm_wipe
 fi
 endef
 
+# A server certificate reissued by init_secrets.sh is written into the same
+# files the running proxy has mounted; nginx only reads them on (re)load, so
+# a proxy that "up" did not recreate is reloaded here (graceful, plan 5.6).
 define start_stack
 cp -n .env.example .env
 ./scripts/init_secrets.sh
 $(COMPOSE) up --build -d
+@if [ -e secrets/tls/.leaf_reissued ]; then \
+	echo "$(COMPOSE) exec -T proxy nginx -s reload   (new server certificate)"; \
+	$(COMPOSE) exec -T proxy nginx -s reload && rm -f secrets/tls/.leaf_reissued; \
+fi
 endef
 
 help:

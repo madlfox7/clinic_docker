@@ -1100,3 +1100,18 @@ def test_old_ca_without_eku_is_kept_with_a_warning(tmp_path):
     fresh = _script_copy(tmp_path / "fresh")
     done = _run_init(fresh)
     assert done.returncode == 0 and "not limited to server certificates" not in done.stderr
+
+
+def test_reissued_leaf_is_marked_for_a_proxy_reload(tmp_path):
+    root = _script_copy(tmp_path)
+    done = _run_init(root)
+    assert done.returncode == 0, done.stderr
+    marker = root / "secrets" / "tls" / ".leaf_reissued"
+    assert marker.exists() and "nginx -s reload" in done.stdout
+    marker.unlink()
+    again = _run_init(root)
+    assert again.returncode == 0 and not marker.exists() and "nginx -s reload" not in again.stdout
+    makefile = (ROOT / "Makefile").read_text()
+    start = makefile.split("define start_stack", 1)[1].split("endef", 1)[0]
+    assert start.index("up --build -d") < start.index("secrets/tls/.leaf_reissued")
+    assert "$(COMPOSE) exec -T proxy nginx -s reload && rm -f secrets/tls/.leaf_reissued" in start

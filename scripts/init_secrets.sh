@@ -141,6 +141,9 @@ LEAF_CONFIG
   fi
   tls_write_live "$leaf_key_new" "$leaf_crt_new"
   echo "created $TLS_DIR/server.key, $TLS_DIR/server.crt (localhost, 127.0.0.1, ::1; $leaf_days days)"
+  # A running proxy keeps the old pair in memory until nginx reloads.
+  : > "$TLS_DIR/.leaf_reissued"
+  echo "        a running proxy needs: docker compose exec proxy nginx -s reload (make start does it)"
 }
 
 tls_settings
