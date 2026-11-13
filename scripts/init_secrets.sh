@@ -136,14 +136,19 @@ LEAF_CONFIG
     || tls_fail "the new server certificate does not verify against $TLS_DIR/ca.crt"
   tls_pair_matches "$leaf_crt_new" "$leaf_key_new" \
     || tls_fail "the new server key does not match its certificate"
+  had_leaf=no
   if [ -e "$TLS_DIR/server.key" ] || [ -e "$TLS_DIR/server.crt" ]; then
+    had_leaf=yes
     tls_backup_live
   fi
   tls_write_live "$leaf_key_new" "$leaf_crt_new"
   echo "created $TLS_DIR/server.key, $TLS_DIR/server.crt (localhost, 127.0.0.1, ::1; $leaf_days days)"
-  # A running proxy keeps the old pair in memory until nginx reloads.
-  : > "$TLS_DIR/.leaf_reissued"
-  echo "        a running proxy needs: docker compose exec proxy nginx -s reload (make start does it)"
+  # Only a replaced pair can be stale in a running proxy (it keeps the old
+  # pair in memory until nginx reloads); the first pair has no proxy yet.
+  if [ "$had_leaf" = yes ]; then
+    : > "$TLS_DIR/.leaf_reissued"
+    echo "        a running proxy needs: docker compose exec proxy nginx -s reload (make start does it)"
+  fi
 }
 
 tls_settings

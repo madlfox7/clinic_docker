@@ -152,7 +152,7 @@ def test_init_secrets_is_idempotent_and_never_mounts_ca_files(tmp_path):
     assert first.returncode == 0, first.stderr
     tls = root / "secrets" / "tls"
     before = {p.name: _sha(p) for p in tls.iterdir() if p.is_file()}
-    assert set(before) == {"ca.key", "ca.crt", "server.key", "server.crt", ".leaf_reissued"}
+    assert set(before) == {"ca.key", "ca.crt", "server.key", "server.crt"}
     second = _run_init(root)
     assert second.returncode == 0, second.stderr
     assert {p.name: _sha(p) for p in tls.iterdir() if p.is_file()} == before
@@ -1104,19 +1104,72 @@ def test_old_ca_without_eku_is_kept_with_a_warning(tmp_path):
     assert done.returncode == 0 and "not limited to server certificates" not in done.stderr
 
 
-def test_reissued_leaf_is_marked_for_a_proxy_reload(tmp_path):
+def test_only_a_replaced_leaf_is_marked_for_a_proxy_reload(tmp_path):
     root = _script_copy(tmp_path)
-    done = _run_init(root)
-    assert done.returncode == 0, done.stderr
-    marker = root / "secrets" / "tls" / ".leaf_reissued"
-    assert marker.exists() and "nginx -s reload" in done.stdout
+    tls = root / "secrets" / "tls"
+    marker = tls / ".leaf_reissued"
+    first = _run_init(root)
+    assert first.returncode == 0, first.stderr
+    # First pair on an empty secrets/tls: no proxy can hold an older one.
+    assert not marker.exists() and "nginx -s reload" not in first.stdout
+    key, crt = _issue_leaf(tmp_path, tls, "short", "DNS:localhost, IP:127.0.0.1, IP:::1", 10)
+    (tls / "server.key").write_bytes(key.read_bytes())
+    (tls / "server.crt").write_bytes(crt.read_bytes())
+    replaced = _run_init(root)
+    assert replaced.returncode == 0, replaced.stderr
+    assert marker.exists() and "nginx -s reload" in replaced.stdout
     marker.unlink()
     again = _run_init(root)
     assert again.returncode == 0 and not marker.exists() and "nginx -s reload" not in again.stdout
-    makefile = (ROOT / "Makefile").read_text()
-    start = makefile.split("define start_stack", 1)[1].split("endef", 1)[0]
-    assert start.index("up --build -d") < start.index("secrets/tls/.leaf_reissued")
-    assert "$(COMPOSE) exec -T proxy nginx -s reload && rm -f secrets/tls/.leaf_reissued" in start
+
+
+def _make_start_copy(tmp_path: pathlib.Path, reload_failures: int) -> tuple[pathlib.Path, pathlib.Path, pathlib.Path]:
+    """Repository copy with a fake COMPOSE whose `nginx -s reload` fails the
+    first reload_failures times (as while entrypoint.d still runs)."""
+    root = _script_copy(tmp_path / "repo")
+    shutil.copy2(ROOT / "Makefile", root / "Makefile")
+    shutil.copy2(ROOT / ".env.example", root / ".env.example")
+    calls = tmp_path / "compose.calls"
+    count = tmp_path / "reload.count"
+    count.write_text("0")
+    compose = tmp_path / "fake-compose"
+    compose.write_text(f"""#!/bin/sh
+echo "$*" >> {calls}
+case "$*" in
+  *"nginx -s reload"*)
+    n=$(cat {count}); n=$((n + 1)); echo $n > {count}
+    [ "$n" -gt {reload_failures} ] || exit 1 ;;
+esac
+exit 0
+""")
+    compose.chmod(0o755)
+    assert _run_init(root).returncode == 0
+    (root / "secrets" / "tls" / ".leaf_reissued").touch()
+    return root, compose, count
+
+
+def _make_start(root: pathlib.Path, compose: pathlib.Path) -> subprocess.CompletedProcess:
+    env = {k: v for k, v in os.environ.items() if not k.startswith("CLINIC_") and k != "PUBLIC_BASE_URL"}
+    return subprocess.run(["make", "-s", "start", f"COMPOSE={compose}"], cwd=root, env=env,
+                          capture_output=True, text=True, timeout=120)
+
+
+def test_make_start_retries_the_reload_until_the_proxy_is_ready(tmp_path):
+    root, compose, count = _make_start_copy(tmp_path, reload_failures=3)
+    done = _make_start(root, compose)
+    assert done.returncode == 0, done.stderr
+    assert count.read_text().strip() == "4"
+    assert not (root / "secrets" / "tls" / ".leaf_reissued").exists()
+    assert "warning" not in done.stderr
+
+
+def test_make_start_warns_but_does_not_fail_when_the_reload_never_works(tmp_path):
+    root, compose, count = _make_start_copy(tmp_path, reload_failures=100)
+    done = _make_start(root, compose)
+    assert done.returncode == 0, done.stderr
+    assert count.read_text().strip() == "10"
+    assert (root / "secrets" / "tls" / ".leaf_reissued").exists()
+    assert "the proxy did not reload" in done.stderr and "nginx -s reload" in done.stderr
 
 
 def test_build_context_leaves_out_secrets():

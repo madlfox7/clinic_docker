@@ -60,7 +60,17 @@ cp -n .env.example .env
 $(COMPOSE) up --build -d
 @if [ -e secrets/tls/.leaf_reissued ]; then \
 	echo "$(COMPOSE) exec -T proxy nginx -s reload   (new server certificate)"; \
-	$(COMPOSE) exec -T proxy nginx -s reload && rm -f secrets/tls/.leaf_reissued; \
+	reloaded=no; \
+	for attempt in 1 2 3 4 5 6 7 8 9 10; do \
+		if $(COMPOSE) exec -T proxy nginx -s reload >/dev/null 2>&1; then reloaded=yes; break; fi; \
+		sleep 1; \
+	done; \
+	if [ "$$reloaded" = yes ]; then \
+		rm -f secrets/tls/.leaf_reissued; \
+	else \
+		echo "warning the proxy did not reload; it may still serve the old certificate." >&2; \
+		echo "        Run: $(COMPOSE) exec proxy nginx -s reload  (or restart the proxy)" >&2; \
+	fi; \
 fi
 endef
 
