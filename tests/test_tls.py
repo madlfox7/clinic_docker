@@ -10,7 +10,9 @@ import socket
 import ssl
 import subprocess
 import threading
+import time
 
+import httpx
 import pytest
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
@@ -341,6 +343,9 @@ def test_tls_server_config_statics():
                    "include /etc/nginx/clinic/security_headers.conf;",
                    "include /etc/nginx/clinic/clinic_locations.conf;"):
         assert needed in tls_server, needed
+    http_server = conf.split("listen 8443 ssl;", 1)[0].rsplit("server {", 1)[0].split("server {", 1)[1]
+    assert "proxy_pass" not in http_server and "hsts.conf" not in http_server
+    assert "include /tmp/nginx/clinic/hsts.conf;" in tls_server
     everything = conf + (ROOT / "docker" / "proxy" / "clinic_locations.conf").read_text()
     assert "ssl_stapling" not in everything and "limit_req" not in everything
     ciphers = re.search(r"ssl_ciphers ([^;]+);", tls_server).group(1).split(":")
@@ -371,3 +376,140 @@ def test_default_test_base_is_https():
     assert 'CLINIC_TEST_BASE:-https://localhost:8450' in (ROOT / "tests" / "run_tests.sh").read_text()
     makefile = (ROOT / "Makefile").read_text()
     assert "TEST_BASE ?= https://localhost:8450" in makefile and "SSL_CERT_FILE=$(TEST_CA)" in makefile
+
+
+# --- 2.3-2.5 HTTP redirect and HSTS ---------------------------------------------
+
+def _proxy_env() -> dict:
+    config = json.loads(_compose("config", "--format", "json").stdout)
+    return config["services"]["proxy"]["environment"]
+
+
+def _origin() -> str:
+    return _proxy_env()["PUBLIC_BASE_URL"]
+
+
+def _hsts() -> str:
+    return f"max-age={_proxy_env()['CLINIC_HSTS_MAX_AGE']}"
+
+
+def _http(method: str, path: str, **kwargs) -> httpx.Response:
+    with httpx.Client(base_url=f"http://127.0.0.1:{_published(8080)}", follow_redirects=False, timeout=10) as c:
+        return c.request(method, path, **kwargs)
+
+
+def _https_client(**kwargs) -> httpx.Client:
+    return httpx.Client(base_url=f"https://localhost:{_tls_port()}", follow_redirects=False,
+                        verify=_strict_context(), timeout=10, **kwargs)
+
+
+def test_plain_http_only_redirects_to_the_https_origin_with_308():
+    origin = _origin()
+    assert origin.startswith("https://")
+    for method, path, kwargs in (("GET", "/login", {}),
+                                 ("POST", "/login", {"data": {"email": "a@b.c", "password": "x"}}),
+                                 ("GET", "/doctors?x=1", {}), ("GET", "/static/app.css", {})):
+        response = _http(method, path, **kwargs)
+        assert response.status_code == 308, (method, path, response.status_code)
+        assert response.headers["location"] == origin + path
+        assert "set-cookie" not in response.headers
+        assert "strict-transport-security" not in response.headers
+        assert "csrf" not in response.text.lower() and "<form" not in response.text.lower()
+
+
+def test_plain_http_redirect_ignores_the_client_host_header():
+    response = _http("GET", "/login", headers={"Host": "evil.example"})
+    assert response.status_code == 308
+    assert response.headers["location"] == _origin() + "/login"
+
+
+def test_hsts_once_on_every_https_answer():
+    expected = [_hsts()]
+    with _https_client() as c:
+        answers = [
+            ("/", c.get("/")),
+            ("/login", c.get("/login")),
+            ("/static/app.css", c.get("/static/app.css")),
+            ("/no-such-page", c.get("/no-such-page")),
+            ("/me", c.get("/me")),
+        ]
+        page = c.get("/login")
+        token = re.search(r'name="csrf_token" value="([^"]+)"', page.text)
+        data = {"email": "nobody@example.invalid", "password": "wrong-password"}
+        if token:
+            data["csrf_token"] = token.group(1)
+        answers.append(("POST /login", c.post("/login", data=data)))
+    statuses = {where: r.status_code for where, r in answers}
+    assert statuses["/no-such-page"] == 404 and statuses["/me"] == 303, statuses
+    assert statuses["POST /login"] in (400, 401, 403), statuses
+    for where, response in answers:
+        values = response.headers.get_list("strict-transport-security")
+        assert values == expected, (where, values)
+        assert "includesubdomains" not in values[0].lower() and "preload" not in values[0].lower()
+
+
+def _wait_https_ready(seconds: int = 120) -> None:
+    deadline = time.monotonic() + seconds
+    while time.monotonic() < deadline:
+        try:
+            with _https_client() as c:
+                if c.get("/login").status_code == 200:
+                    return
+        except httpx.HTTPError:
+            pass
+        time.sleep(1)
+    raise AssertionError("the stand did not come back after api start")
+
+
+def test_hsts_and_clinic_page_when_api_is_down():
+    stopped = _compose("stop", "api")
+    assert stopped.returncode == 0, stopped.stderr
+    try:
+        # A stopped container's address may not answer at all: nginx then
+        # waits proxy_connect_timeout (60 s) and answers 504.
+        with _https_client() as c:
+            response = c.get("/login", timeout=100)
+        assert response.status_code in (502, 504), response.status_code
+        assert "The clinic service is temporarily unavailable." in response.text
+        assert response.headers.get_list("strict-transport-security") == [_hsts()]
+        assert "content-security-policy" in response.headers
+        assert "no-store" in response.headers.get("cache-control", "")
+    finally:
+        started = _compose("start", "api")
+        assert started.returncode == 0, started.stderr
+        _wait_https_ready()
+
+
+def _proxy_script(**env) -> subprocess.CompletedProcess:
+    args = []
+    for name, value in env.items():
+        args += ["-e", f"{name}={value}"]
+    return _compose("run", "--rm", "--no-deps", "-T", *args, "proxy", "nginx", "-t", timeout=180)
+
+
+@pytest.mark.parametrize("env", [
+    {"CLINIC_HSTS_MAX_AGE": "abc"},
+    {"CLINIC_HSTS_MAX_AGE": "-1"},
+    {"CLINIC_HSTS_MAX_AGE": "1e3"},
+    {"CLINIC_HSTS_MAX_AGE": "3600;evil"},
+    {"CLINIC_HSTS_MAX_AGE": "63072001"},
+    {"PUBLIC_BASE_URL": "http://localhost:8450"},
+    {"PUBLIC_BASE_URL": "https://localhost:8450/path"},
+    {"PUBLIC_BASE_URL": "https://user@localhost"},
+    {"PUBLIC_BASE_URL": "https://localhost:8450?x=1"},
+    {"PUBLIC_BASE_URL": "https://local host"},
+    {"PUBLIC_BASE_URL": "https://localhost:8450;return 200"},
+    {"CLINIC_TLS_MODE": "prod"},
+], ids=lambda env: "-".join(f"{k}={v}" for k, v in env.items()))
+def test_proxy_refuses_to_start_with_a_bad_value(env):
+    done = _proxy_script(**env)
+    assert done.returncode != 0
+    assert "15-clinic-tls.sh:" in done.stdout + done.stderr
+
+
+def test_proxy_config_is_valid_with_good_values():
+    for env in ({}, {"CLINIC_HSTS_MAX_AGE": "31536000", "PUBLIC_BASE_URL": "https://clinic.example.org"},
+                {"PUBLIC_BASE_URL": "https://127.0.0.1:8450"}, {"PUBLIC_BASE_URL": "https://[::1]:8450"}):
+        done = _proxy_script(**env)
+        assert done.returncode == 0, (env, done.stderr[-2000:])
+        assert "syntax is ok" in done.stderr, done.stderr[-2000:]

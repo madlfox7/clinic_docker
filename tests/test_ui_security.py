@@ -62,7 +62,8 @@ def _assert_security_headers(response, where):
         values = response.headers.get_list(name)
         assert values == [value], f"{where}: {name} = {values!r}"
     assert "content-security-policy-report-only" not in response.headers, where
-    assert "strict-transport-security" not in response.headers, where
+    hsts = f"max-age={os.environ.get('CLINIC_HSTS_MAX_AGE') or 3600}"
+    assert response.headers.get_list("strict-transport-security") == [hsts], where
     assert "x-xss-protection" not in response.headers, where
 
 
@@ -341,16 +342,27 @@ def test_nginx_includes_security_headers_in_every_location():
     conf = (ROOT / "docker" / "proxy" / "nginx.conf").read_text(encoding="utf-8")
     locations = (ROOT / "docker" / "proxy" / "clinic_locations.conf").read_text(encoding="utf-8")
     snippet = (ROOT / "docker" / "proxy" / "security_headers.conf").read_text(encoding="utf-8")
-    # Every server either includes the shared locations or has none of its own.
+    hsts = "include /tmp/nginx/clinic/hsts.conf;"
     servers = conf.split("server {")[1:]
-    assert servers
+    assert len(servers) == 2
+    http_server, tls_server = servers
+    assert "listen 8080;" in http_server and "listen 8443 ssl;" in tls_server
     for server in servers:
         assert "include /etc/nginx/clinic/security_headers.conf;" in server, server
-    assert "include /etc/nginx/clinic/clinic_locations.conf;" in conf.split("listen 8443 ssl;", 1)[1]
-    blocks = re.findall(r"location\s+[^{]+\{(.*?)\n    \}", conf + locations, re.S)
-    assert len(blocks) >= 4
+    # Plain HTTP: one location that only redirects, no app and no HSTS.
+    assert "proxy_pass" not in http_server and hsts not in http_server
+    assert "clinic_locations.conf" not in http_server
+    http_blocks = re.findall(r"location\s+[^{]+\{(.*?)\n    \}", http_server, re.S)
+    assert len(http_blocks) == 1 and "include /tmp/nginx/clinic/redirect.conf;" in http_blocks[0]
+    assert "include /etc/nginx/clinic/security_headers.conf;" in http_blocks[0]
+    # HTTPS: the shared locations, every one with both header includes.
+    assert "include /etc/nginx/clinic/clinic_locations.conf;" in tls_server
+    assert hsts in tls_server.split("location", 1)[0]
+    blocks = re.findall(r"location\s+[^{]+\{(.*?)\n    \}", locations, re.S)
+    assert len(blocks) == len(re.findall(r"^\s+location\s", locations, re.M)) >= 5
     for block in blocks:
         assert "include /etc/nginx/clinic/security_headers.conf;" in block, block
+        assert hsts in block, block
         if "proxy_pass" in block:
             for header in ("Host", "Cookie", "X-Real-IP"):
                 assert f"proxy_set_header {header}" in block, block

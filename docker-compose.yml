@@ -146,6 +146,13 @@ services:
     secrets:
       - tls_cert
       - tls_key
+    # Read by docker/proxy/15-clinic-tls.sh at start: redirect origin, HSTS
+    # max-age, TLS mode. A bad value stops the proxy.
+    environment:
+      PUBLIC_BASE_URL: ${PUBLIC_BASE_URL:-https://localhost:8450}
+      CLINIC_HSTS_MAX_AGE: ${CLINIC_HSTS_MAX_AGE:-3600}
+      CLINIC_TLS_MODE: ${CLINIC_TLS_MODE:-local}
+      CLINIC_ACME_WEBROOT: ${CLINIC_ACME_WEBROOT:-false}
     depends_on:
       - api
     read_only: true
