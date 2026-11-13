@@ -138,6 +138,11 @@ services:
     networks:
       - frontend
       - app
+    # The server certificate and key, for the proxy only. The CA key
+    # (secrets/tls/ca.key) stays on the host and is never mounted.
+    secrets:
+      - tls_cert
+      - tls_key
     depends_on:
       - api
     read_only: true
@@ -164,6 +169,10 @@ secrets:
     file: ./secrets/field_encryption_key
   field_encryption_previous_keys:
     file: ./secrets/field_encryption_previous_keys
+  tls_cert:
+    file: ./secrets/tls/server.crt
+  tls_key:
+    file: ./secrets/tls/server.key
 
 volumes:
   db_data:
