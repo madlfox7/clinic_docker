@@ -108,7 +108,30 @@ def format_visit_when(starts_at, ends_at) -> str:
     )
 
 
-def send_appointment_notice(recipient: str, event: str, notice: dict, audience: str) -> None:
+def send_appointment_notice(
+    recipient: str, event: str, notice: dict, audience: str, previous: dict | None = None
+) -> None:
+    if event == "rescheduled":
+        if not previous or not previous.get("starts_at") or not previous.get("ends_at"):
+            raise ValueError("invalid appointment notice")
+        intro = (
+            "Your appointment was moved:"
+            if audience == "patient"
+            else "An appointment was moved:"
+        )
+        old_when = format_visit_when(previous["starts_at"], previous["ends_at"])
+        new_when = format_visit_when(notice["starts_at"], notice["ends_at"])
+        send_account_message(
+            recipient,
+            "Appointment rescheduled",
+            f"{intro}\n"
+            f"Doctor: {_mail_line(notice['doctor_name'])}\n"
+            f"Service: {_mail_line(notice['service_name'])}\n"
+            f"Previous date: {old_when}\n"
+            f"New date: {new_when}\n\n"
+            "If you did not expect this, contact the clinic.\n",
+        )
+        return
     if event == "confirmed":
         subject = "Appointment confirmed"
         intro = (
@@ -139,7 +162,7 @@ def send_appointment_notice(recipient: str, event: str, notice: dict, audience: 
     )
 
 
-def deliver_appointment_emails(notice, event: str) -> None:
+def deliver_appointment_emails(notice, event: str, previous=None) -> None:
     if not notice or not os.environ.get("SMTP_HOST", "").strip():
         return
     if not notice.get("starts_at") or not notice.get("ends_at"):
@@ -151,7 +174,7 @@ def deliver_appointment_emails(notice, event: str) -> None:
         recipients.append((notice["doctor_email"], "doctor"))
     for recipient, audience in recipients:
         try:
-            send_appointment_notice(recipient, event, notice, audience)
+            send_appointment_notice(recipient, event, notice, audience, previous)
         except Exception:
             log.exception("could not send appointment email")
 

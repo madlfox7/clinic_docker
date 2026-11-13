@@ -732,9 +732,25 @@ CREATE INDEX IF NOT EXISTS audit_events_rate_limited_idx
   ON audit_events (created_at)
   WHERE action = 'auth.rate_limited';
 
--- Old and new value of a numeric setting change (only the session idle timeout).
+-- Old and new value: the session idle timeout change, and a reschedule
+-- (old and new appointment id; new_value is always the target).
 ALTER TABLE audit_events ADD COLUMN IF NOT EXISTS old_value INTEGER;
 ALTER TABLE audit_events ADD COLUMN IF NOT EXISTS new_value INTEGER;
+-- upgrade older volumes: the CHECK without appointment.reschedule is dropped
+-- once and recreated; an up-to-date CHECK is left alone (no scan on start).
+DO $$
+BEGIN
+  IF EXISTS (
+    SELECT 1 FROM pg_constraint
+    WHERE conname = 'audit_events_change_values_check'
+      AND conrelid = 'public.audit_events'::regclass
+      AND pg_get_constraintdef(oid) NOT LIKE '%appointment.reschedule%'
+  ) THEN
+    ALTER TABLE public.audit_events DROP CONSTRAINT audit_events_change_values_check;
+  END IF;
+END
+$$;
+
 DO $$
 BEGIN
   IF NOT EXISTS (
@@ -747,6 +763,12 @@ BEGIN
       CHECK (
         (old_value IS NULL AND new_value IS NULL)
         OR action = 'clinic.session_idle.update'
+        OR (
+          action = 'appointment.reschedule'
+          AND target_type = 'appointment'
+          AND old_value IS NOT NULL
+          AND new_value = target_id
+        )
       );
   END IF;
 END

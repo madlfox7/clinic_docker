@@ -1,0 +1,57 @@
+{% extends "base.html" %}
+{% from "_patient.html" import patient_label %}
+{% block title %}Reschedule appointment{% endblock %}
+{% block content %}
+<h1>Reschedule appointment</h1>
+<div class="card mb-3"><div class="card-body">
+  <dl class="row mb-0">
+    {% if patient %}<dt class="col-sm-3">Patient</dt><dd class="col-sm-9">{{ patient_label(patient.full_name, patient.email) }}{% if patient.blocked %} — Blocked{% endif %}</dd>{% endif %}
+    <dt class="col-sm-3">Doctor</dt><dd class="col-sm-9">{{ visit.doctor_name }}</dd>
+    <dt class="col-sm-3">Service</dt><dd class="col-sm-9">{{ visit.service_name }}</dd>
+    <dt class="col-sm-3">Current time</dt><dd class="col-sm-9">{{ visit.starts_at|visit_when(visit.ends_at) }}</dd>
+  </dl>
+  <p class="text-body-secondary mt-2 mb-0">Choose a new time with the same doctor and service. The current appointment is cancelled only when the new one is booked. For another doctor or service, cancel and book again.</p>
+</div></div>
+{% if error == "unavailable" %}<div class="alert alert-danger" role="alert"><strong>Reschedule failed.</strong> This slot is no longer available. Please choose another slot.</div>
+{% elif error == "overlap" %}<div class="alert alert-danger" role="alert"><strong>Reschedule failed.</strong> The new time overlaps another appointment of this patient.</div>
+{% elif error == "has_records" %}<div class="alert alert-danger" role="alert"><strong>Reschedule failed.</strong> This appointment already has medical records. Please contact the clinic.</div>
+{% elif error == "same_slot" %}<div class="alert alert-danger" role="alert"><strong>Reschedule failed.</strong> Choose a different time.</div>
+{% elif error == "slot_mismatch" %}<div class="alert alert-danger" role="alert"><strong>Reschedule failed.</strong> The new slot must be with the same doctor and service.</div>
+{% elif error == "patient_blocked" %}<div class="alert alert-danger" role="alert"><strong>Reschedule failed.</strong> This patient account is blocked.</div>
+{% elif error == "could_not_reschedule" %}<div class="alert alert-danger" role="alert"><strong>Reschedule failed.</strong> The appointment could not be moved. Try again or contact the clinic.</div>{% endif %}
+{% for date_error in date_errors %}
+  {% if date_error == "invalid_day" %}<div class="alert alert-warning">Invalid date; showing today.</div>
+  {% elif date_error == "day_out_of_range" %}<div class="alert alert-warning">Date must be between years 1900 and 2100; showing today.</div>
+  {% elif date_error == "invalid_view" %}<div class="alert alert-warning">Invalid view; showing a week.</div>{% endif %}
+{% endfor %}
+<div class="d-flex flex-wrap gap-2 align-items-center mb-3">
+  <div class="btn-group" role="group" aria-label="Move">
+    <a class="btn btn-outline-primary btn-sm" href="{{ navigation.previous_url }}" aria-label="Previous">←</a>
+    <a class="btn btn-outline-primary btn-sm" href="{{ navigation.today_url }}">Today</a>
+    <a class="btn btn-outline-primary btn-sm" href="{{ navigation.next_url }}" aria-label="Next">→</a>
+  </div>
+  <div class="btn-group" role="group" aria-label="View">
+    <a class="btn btn-sm {% if view == 'day' %}btn-primary{% else %}btn-outline-primary{% endif %}" href="{{ navigation.day_view_url }}">Day</a>
+    <a class="btn btn-sm {% if view == 'week' %}btn-primary{% else %}btn-outline-primary{% endif %}" href="{{ navigation.week_view_url }}">Week</a>
+  </div>
+  <span class="text-body-secondary">{% if view == "week" %}{{ selected_day.strftime("%a, %d %b %Y") }} – {{ window_last_day.strftime("%a, %d %b %Y") }}{% else %}{{ selected_day.strftime("%a, %d %b %Y") }}{% endif %}</span>
+</div>
+{% for day in days %}
+  <h2>{{ day.label }}</h2>
+  <ul class="slot-list">
+  {% for s in day.slots %}
+    <li class="slot-free">
+      <span class="slot-time">{{ s.starts_at.strftime("%H:%M") }}–{{ s.ends_at.strftime("%H:%M") }}</span>
+      <form class="inline-form" method="post" action="/appointments/{{ visit.id }}/reschedule" data-confirm="Move the appointment to this time?">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}">
+        <input type="hidden" name="slot_id" value="{{ s.id }}">
+        <button class="btn btn-primary btn-sm" type="submit">Move here</button>
+      </form>
+    </li>
+  {% endfor %}
+  </ul>
+{% else %}
+  <div class="alert alert-secondary">No free slots in this period. Use the arrows to look at other dates.</div>
+{% endfor %}
+<p><a href="{% if role == 'patient' %}/my{% else %}/doctors/{{ visit.doctor_id }}/slots?service_id={{ visit.service_id }}{% endif %}">Back</a></p>
+{% endblock %}

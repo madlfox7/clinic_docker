@@ -7,6 +7,19 @@
 {% if cancelled %}<div class="alert alert-success">Appointment cancelled.</div>{% endif %}
 {% if cancel_error %}<div class="alert alert-warning">Appointment could not be cancelled. It may not belong to you or may already be cancelled.</div>
 {% endif %}
+{% if reschedule_error %}<div class="alert alert-warning">Appointment could not be rescheduled. It may not belong to you, may already be cancelled or may have started.</div>{% endif %}
+{% if reschedule_confirmation %}
+  <div class="card border-success mb-3">
+    <div class="card-body">
+    <h2 class="h5 mt-0 text-success">Appointment rescheduled</h2>
+    <dl class="row mb-0">
+      <dt class="col-sm-3">Doctor</dt><dd class="col-sm-9">{{ reschedule_confirmation.doctor_name }}</dd>
+      <dt class="col-sm-3">Service</dt><dd class="col-sm-9">{{ reschedule_confirmation.service_name }}</dd>
+      <dt class="col-sm-3">New date and time</dt><dd class="col-sm-9">{{ reschedule_confirmation.starts_at|visit_when(reschedule_confirmation.ends_at) }}</dd>
+    </dl>
+    </div>
+  </div>
+{% endif %}
 {% if filter_errors %}<div class="alert alert-warning">Some filters were not valid and were ignored.</div>{% endif %}
 {% if booking_confirmation %}
   <div class="card border-success mb-3">
@@ -59,6 +72,7 @@
   <input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}">
           <button class="btn btn-outline-danger btn-sm" type="submit">Cancel appointment</button>
         </form>
+        <a class="btn btn-outline-primary btn-sm" href="/appointments/{{ a.id }}/reschedule">Reschedule</a>
       {% endif %}
       {% if a.notes %}
         <div class="mt-2">Report / diagnosis:

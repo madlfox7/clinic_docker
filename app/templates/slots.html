@@ -124,8 +124,13 @@
 {% elif booking_confirmation %}
   <div class="card border-success mb-3">
     <div class="card-body">
+    {% if rescheduled == "1" %}
+    <h2 class="h5 mt-0 text-success">Appointment rescheduled</h2>
+    <p>The appointment was moved to the new time.</p>
+    {% else %}
     <h2 class="h5 mt-0 text-success">Appointment confirmed</h2>
     <p>Appointment booked successfully.</p>
+    {% endif %}
     <dl class="row mb-0">
       <dt class="col-sm-3">Doctor</dt><dd class="col-sm-9">{{ booking_confirmation.doctor_name }}</dd>
       <dt class="col-sm-3">Patient</dt><dd class="col-sm-9">{{ patient_label(booking_confirmation.patient_name, booking_confirmation.patient_email) }}</dd>
@@ -160,6 +165,7 @@
   <input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}">
               <button class="btn btn-outline-danger" type="submit">Cancel appointment</button>
             </form>
+            {% if s.appointment_id %}<a class="btn btn-outline-primary" href="/appointments/{{ s.appointment_id }}/reschedule">Reschedule</a>{% endif %}
           {% endif %}
         {% elif role == "admin" %}
           <span class="badge text-bg-secondary">Booked</span>

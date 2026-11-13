@@ -9,6 +9,7 @@
   <p class="text-body-secondary">This calendar is read-only. You can view availability and visits, but cannot book or edit schedules.</p>
 {% endif %}
 
+{% if reschedule_error %}<div class="alert alert-warning">Appointment could not be rescheduled. It may already be cancelled or may have started.</div>{% endif %}
 {% if errors %}
   {% for error in errors %}
     {% if error == "invalid_day" %}<div class="alert alert-warning">Invalid date; showing today.</div>

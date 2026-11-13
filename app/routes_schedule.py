@@ -515,6 +515,7 @@ def registrar_appointments(request: Request):
             ),
             "requests": [],
             "doctor": None,
+            "reschedule_error": request.query_params.get("reschedule_error") == "1",
         },
     )
 

@@ -193,7 +193,12 @@ def doctor_slots(request: Request, doctor_id: str):
         if raw_confirmation_id is not None
         else None
     )
-    if role == "registrar" and booked == "1" and confirmation_id is not None:
+    rescheduled = request.query_params.get("rescheduled")
+    if (
+        role == "registrar"
+        and (booked == "1" or rescheduled == "1")
+        and confirmation_id is not None
+    ):
         cur.execute(
             """
             SELECT d.full_name, u.email, svc.name, s.duration_minutes,
@@ -334,6 +339,7 @@ def doctor_slots(request: Request, doctor_id: str):
             "service_error": service_error,
             "error": error,
             "booked": booked,
+            "rescheduled": rescheduled,
             "booking_confirmation": booking_confirmation,
             "cancelled": cancelled,
             "cancel_error": cancel_error,
@@ -1012,3 +1018,390 @@ def doctor_appointments(request: Request):
         "doctor_appointments.html",
         {"request": request, "items": items, "role": role},
     )
+
+
+# --- Reschedule (14_ux_filters.md п. 5) ---------------------------------------
+# Same doctor and service only. One transaction under db_as(user): the old visit
+# is cancelled first, then the new slot is checked and inserted (Б1), the journal
+# function checks the pair again before COMMIT (Б3). No new grants (Б4).
+
+RESCHEDULE_ERRORS = (
+    "unavailable",
+    "overlap",
+    "has_records",
+    "same_slot",
+    "slot_mismatch",
+    "patient_blocked",
+    "could_not_reschedule",
+)
+
+
+def _reschedule_denied(role):
+    """One answer for foreign, missing, cancelled, past and malformed ids (Б5)."""
+    if role == "patient":
+        return RedirectResponse("/my?reschedule_error=1", status_code=303)
+    return RedirectResponse("/registrar/appointments?reschedule_error=1", status_code=303)
+
+
+def _reschedule_error(appointment_id, code):
+    return RedirectResponse(
+        f"/appointments/{appointment_id}/reschedule?error={code}", status_code=303
+    )
+
+
+def _load_reschedulable(cur, user, appointment_id, lock=False):
+    """The open visit (scheduled, not started); patients only see their own."""
+    patient_filter = "AND a.patient_user_id = %s" if user["role"] == "patient" else ""
+    args = [appointment_id] + ([user["id"]] if user["role"] == "patient" else [])
+    cur.execute(
+        """
+        SELECT a.id, a.slot_id, a.doctor_id, s.service_id, a.patient_user_id,
+               a.starts_at, a.ends_at, d.full_name, svc.name, a.reserved_ends_at
+        FROM appointments a
+        JOIN slots s ON s.id = a.slot_id
+        JOIN doctors d ON d.id = a.doctor_id
+        JOIN services svc ON svc.id = s.service_id
+        WHERE a.id = %s
+          AND a.status = 'scheduled'
+          AND a.starts_at > CURRENT_TIMESTAMP
+          """
+        + patient_filter
+        + (" FOR UPDATE OF a" if lock else ""),
+        args,
+    )
+    row = cur.fetchone()
+    if not row:
+        return None
+    return {
+        "id": row[0],
+        "slot_id": row[1],
+        "doctor_id": row[2],
+        "service_id": row[3],
+        "patient_user_id": row[4],
+        "starts_at": row[5],
+        "ends_at": row[6],
+        "doctor_name": row[7],
+        "service_name": row[8],
+        "reserved_ends_at": row[9],
+    }
+
+
+@router.get("/appointments/{appointment_id}/reschedule")
+def reschedule_form(request: Request, appointment_id: str):
+    user, denied = require_user(request, "patient", "registrar")
+    if denied:
+        return denied
+    role = user["role"]
+    appointment_id = parse_strict_int(appointment_id, min_value=1)
+    if appointment_id is None:
+        return _reschedule_denied(role)
+    selected_day, view, date_errors = calendar_state(request, default_view="week")
+    window_days = 7 if view == "week" else 1
+    window_start = day_start(selected_day)
+    window_end = day_start(selected_day + timedelta(days=window_days))
+    conn = db_as(user)
+    cur = conn.cursor()
+    try:
+        visit = _load_reschedulable(cur, user, appointment_id)
+        if visit is None:
+            return _reschedule_denied(role)
+        patient = None
+        if role == "registrar":
+            cur.execute(
+                """
+                SELECT u.email, u.blocked, pp.full_name
+                FROM users u
+                LEFT JOIN patient_profiles pp ON pp.user_id = u.id
+                WHERE u.id = %s
+                """,
+                (visit["patient_user_id"],),
+            )
+            row = cur.fetchone()
+            patient = {"email": row[0], "blocked": row[1], "full_name": row[2]}
+        # Free slots of the same doctor and service. A slot that only overlaps the
+        # visit being moved counts as free: the move cancels it first (Б1).
+        cur.execute(
+            """
+            SELECT s.id, s.starts_at,
+                   s.starts_at + make_interval(mins => s.duration_minutes)
+            FROM slots s
+            JOIN services svc ON svc.id = s.service_id AND svc.active
+            JOIN doctor_services ds
+              ON ds.doctor_id = s.doctor_id AND ds.service_id = s.service_id
+            WHERE s.doctor_id = %s
+              AND s.service_id = %s
+              AND s.id <> %s
+              AND s.starts_at > CURRENT_TIMESTAMP
+              AND s.starts_at >= %s
+              AND s.starts_at < %s
+              AND (
+                  NOT public.scheduled_slot_is_taken(s.id)
+                  OR (s.starts_at < %s AND s.ends_at > %s)
+              )
+              AND NOT EXISTS (
+                  SELECT 1 FROM time_off t
+                  WHERE t.doctor_id = s.doctor_id
+                    AND s.starts_at::date BETWEEN t.starts_on AND t.ends_on
+              )
+              AND NOT EXISTS (SELECT 1 FROM holidays h WHERE h.day = s.starts_at::date)
+            ORDER BY s.starts_at
+            """,
+            (
+                visit["doctor_id"],
+                visit["service_id"],
+                visit["slot_id"],
+                window_start,
+                window_end,
+                visit["reserved_ends_at"],
+                visit["starts_at"],
+            ),
+        )
+        slots = [
+            {"id": r[0], "starts_at": r[1], "ends_at": r[2]} for r in cur.fetchall()
+        ]
+    finally:
+        cur.close()
+        conn.close()
+    days = {}
+    for slot in slots:
+        days.setdefault(slot["starts_at"].date(), []).append(slot)
+    error = request.query_params.get("error")
+    return templates.TemplateResponse(
+        request,
+        "reschedule.html",
+        {
+            "request": request,
+            "role": role,
+            "visit": visit,
+            "patient": patient,
+            "days": [
+                {"label": day.strftime("%A, %Y-%m-%d"), "slots": items}
+                for day, items in sorted(days.items())
+            ],
+            "error": error if error in RESCHEDULE_ERRORS else None,
+            "selected_day": selected_day,
+            "view": view,
+            "window_last_day": selected_day + timedelta(days=window_days - 1),
+            "date_errors": date_errors,
+            "navigation": _reschedule_navigation(visit["id"], view, selected_day),
+        },
+    )
+
+
+def _reschedule_navigation(appointment_id, view, selected_day):
+    step = timedelta(days=7 if view == "week" else 1)
+    path = f"/appointments/{appointment_id}/reschedule"
+
+    def link(day, link_view=view):
+        return url_with(path, {"view": link_view, "day": day.isoformat()})
+
+    return {
+        "previous_url": link(selected_day - step),
+        "today_url": link(date.today()),
+        "next_url": link(selected_day + step),
+        "day_view_url": link(selected_day, "day"),
+        "week_view_url": link(selected_day, "week"),
+    }
+
+
+@router.post("/appointments/{appointment_id}/reschedule")
+def reschedule_appointment(
+    request: Request,
+    appointment_id: str,
+    slot_id: str = Form(None),
+):
+    user, denied = require_user(request, "patient", "registrar")
+    if denied:
+        return denied
+    role = user["role"]
+    appointment_id = parse_strict_int(appointment_id, min_value=1)
+    new_slot_id = parse_strict_int(slot_id, min_value=1) if slot_id is not None else None
+    if appointment_id is None or new_slot_id is None:
+        return _reschedule_denied(role)
+
+    conn = db_as(user)
+    cur = conn.cursor()
+    try:
+        # 1. owner of the visit, without a lock (patients: own visits only)
+        if role == "patient":
+            cur.execute(
+                "SELECT patient_user_id FROM appointments WHERE id = %s AND patient_user_id = %s",
+                (appointment_id, user["id"]),
+            )
+        else:
+            cur.execute(
+                "SELECT patient_user_id FROM appointments WHERE id = %s", (appointment_id,)
+            )
+        owner = cur.fetchone()
+        if not owner:
+            return _reschedule_denied(role)
+        patient_id = owner[0]
+        # 2. one patient at a time, as in booking
+        cur.execute("SELECT pg_advisory_xact_lock(%s)", (patient_id,))
+        # 3. lock the visit; a parallel cancel or move leaves nothing here
+        visit = _load_reschedulable(cur, user, appointment_id, lock=True)
+        if visit is None:
+            conn.rollback()
+            return _reschedule_denied(role)
+        if role == "registrar":
+            cur.execute(
+                "SELECT blocked FROM users WHERE id = %s AND role = 'patient'",
+                (patient_id,),
+            )
+            patient_row = cur.fetchone()
+            if not patient_row or patient_row[0]:
+                conn.rollback()
+                return _reschedule_error(appointment_id, "patient_blocked")
+        # 4. visits with notes or prescriptions stay where they are
+        cur.execute("SELECT public.appointment_has_medical_records(%s)", (appointment_id,))
+        if cur.fetchone()[0]:
+            conn.rollback()
+            return _reschedule_error(appointment_id, "has_records")
+        # 5. the new slot: not the same slot, same doctor and service, bookable
+        if new_slot_id == visit["slot_id"]:
+            conn.rollback()
+            return _reschedule_error(appointment_id, "same_slot")
+        cur.execute(
+            """
+            SELECT s.doctor_id, s.service_id, s.starts_at,
+                   s.starts_at + make_interval(mins => s.duration_minutes),
+                   s.starts_at <= CURRENT_TIMESTAMP AS is_past,
+                   public.doctor_is_active(s.doctor_id),
+                   EXISTS (SELECT 1 FROM services svc WHERE svc.id = s.service_id AND svc.active),
+                   EXISTS (SELECT 1 FROM doctor_services ds
+                           WHERE ds.doctor_id = s.doctor_id AND ds.service_id = s.service_id),
+                   EXISTS (SELECT 1 FROM time_off t
+                           WHERE t.doctor_id = s.doctor_id
+                             AND s.starts_at::date BETWEEN t.starts_on AND t.ends_on)
+                   OR EXISTS (SELECT 1 FROM holidays h WHERE h.day = s.starts_at::date)
+            FROM slots s
+            WHERE s.id = %s
+            """,
+            (new_slot_id,),
+        )
+        slot = cur.fetchone()
+        if not slot:
+            conn.rollback()
+            return _reschedule_error(appointment_id, "unavailable")
+        (
+            slot_doctor_id,
+            slot_service_id,
+            slot_starts_at,
+            slot_visit_ends_at,
+            slot_past,
+            doctor_active,
+            service_active,
+            service_assigned,
+            slot_closed,
+        ) = slot
+        if slot_doctor_id != visit["doctor_id"] or slot_service_id != visit["service_id"]:
+            conn.rollback()
+            return _reschedule_error(appointment_id, "slot_mismatch")
+        if slot_past or slot_closed or not (doctor_active and service_active and service_assigned):
+            conn.rollback()
+            return _reschedule_error(appointment_id, "unavailable")
+
+        # 6. cancel the old visit first, so its own time and buffer are free (Б1)
+        cur.execute(
+            """
+            UPDATE appointments
+            SET status = 'cancelled'
+            WHERE id = %s
+              AND status = 'scheduled'
+              AND starts_at > CURRENT_TIMESTAMP
+              AND patient_user_id = %s
+            """,
+            (appointment_id, patient_id),
+        )
+        if cur.rowcount != 1:
+            conn.rollback()
+            return _reschedule_denied(role)
+        # 7. taken / overlap checks after the cancel
+        cur.execute("SELECT public.scheduled_slot_is_taken(%s)", (new_slot_id,))
+        if cur.fetchone()[0]:
+            conn.rollback()
+            return _reschedule_error(appointment_id, "unavailable")
+        cur.execute(
+            """
+            SELECT 1
+            FROM appointments a
+            WHERE a.patient_user_id = %s
+              AND a.status IN ('scheduled', 'completed')
+              AND a.starts_at < %s
+              AND a.ends_at > %s
+            LIMIT 1
+            """,
+            (patient_id, slot_visit_ends_at, slot_starts_at),
+        )
+        if cur.fetchone():
+            conn.rollback()
+            return _reschedule_error(appointment_id, "overlap")
+        # 8. insert exactly like booking; RLS INSERT runs is_valid_free_slot
+        cur.execute(
+            """
+            INSERT INTO appointments (
+                slot_id, patient_user_id, doctor_id, starts_at, ends_at,
+                reserved_ends_at
+            )
+            SELECT s.id, %s, s.doctor_id, s.starts_at,
+                   s.starts_at + make_interval(mins => s.duration_minutes),
+                   s.ends_at
+            FROM slots s
+            WHERE s.id = %s
+              AND s.starts_at > CURRENT_TIMESTAMP
+            RETURNING id
+            """,
+            (patient_id, new_slot_id),
+        )
+        inserted = cur.fetchone()
+        if not inserted:
+            conn.rollback()
+            return _reschedule_error(appointment_id, "unavailable")
+        new_id = inserted[0]
+        # 9. the journal event checks the pair again; 42501 rolls everything back
+        cur.execute(
+            "SELECT public.record_appointment_reschedule(%s, %s)", (appointment_id, new_id)
+        )
+        # 10. mail data for both visits, before COMMIT (a failure here is not fatal)
+        old_notice = new_notice = None
+        cur.execute("SAVEPOINT reschedule_notice")
+        try:
+            old_notice = load_appointment_notice(cur, appointment_id)
+            new_notice = load_appointment_notice(cur, new_id)
+        except psycopg2.Error:
+            log.exception("could not prepare reschedule email")
+            cur.execute("ROLLBACK TO SAVEPOINT reschedule_notice")
+            old_notice = new_notice = None
+        # 11. one COMMIT
+        conn.commit()
+    except psycopg2.errors.UniqueViolation:
+        conn.rollback()
+        return _reschedule_error(appointment_id, "unavailable")
+    except psycopg2.errors.ExclusionViolation as exc:
+        conn.rollback()
+        constraint = exc.diag.constraint_name if exc.diag is not None else None
+        if constraint == "appointments_no_overlap_per_patient":
+            return _reschedule_error(appointment_id, "overlap")
+        return _reschedule_error(appointment_id, "unavailable")
+    except (psycopg2.errors.InsufficientPrivilege, psycopg2.errors.CheckViolation):
+        conn.rollback()
+        log.warning("reschedule of appointment %s was refused by the database", appointment_id)
+        if role == "patient":
+            return _reschedule_denied(role)
+        return _reschedule_error(appointment_id, "could_not_reschedule")
+    except psycopg2.Error:
+        conn.rollback()
+        log.exception("could not reschedule appointment %s", appointment_id)
+        return _reschedule_error(appointment_id, "could_not_reschedule")
+    finally:
+        cur.close()
+        conn.close()
+
+    deliver_appointment_emails(new_notice, "rescheduled", previous=old_notice)
+    if role == "registrar":
+        return RedirectResponse(
+            f"/doctors/{visit['doctor_id']}/slots?rescheduled=1"
+            f"&service_id={visit['service_id']}&appointment_id={new_id}",
+            status_code=303,
+        )
+    return RedirectResponse(f"/my?rescheduled=1&appointment_id={new_id}", status_code=303)

@@ -3017,4 +3017,121 @@ GRANT EXECUTE ON FUNCTION public.email_verification_token_status(text) TO clinic
 GRANT EXECUTE ON FUNCTION public.confirm_email_verification(text) TO clinic_api;
 GRANT EXECUTE ON FUNCTION public.request_email_verification(text, text) TO clinic_api;
 
+-- Reschedule (14_ux_filters.md п. 5). The move itself is an ordinary
+-- transaction of the patient or registrar (RLS, UPDATE (status) and INSERT
+-- grants stay as they are); these two functions only answer "does the visit
+-- have medical records" and write the one journal event.
+
+-- Whether a visit has notes or prescriptions, without reading the text.
+-- Patient: only an own visit (anything else is 42501, so it is no oracle);
+-- registrar: any visit (the registrar has no grant on visit_notes).
+CREATE OR REPLACE FUNCTION public.appointment_has_medical_records(appt_id integer)
+RETURNS boolean
+LANGUAGE plpgsql
+STABLE
+SECURITY DEFINER
+SET search_path = pg_catalog, public, pg_temp
+AS $function$
+DECLARE
+  actor_id integer := NULLIF(current_setting('app.user_id', true), '')::integer;
+  actor_role text;
+BEGIN
+  SELECT u.role INTO actor_role
+  FROM public.users AS u
+  WHERE u.id = actor_id AND NOT u.blocked;
+
+  IF actor_role IS NULL
+     OR actor_role NOT IN ('patient', 'registrar')
+     OR current_setting('role', true) IS DISTINCT FROM ('app_' || actor_role) THEN
+    RAISE EXCEPTION 'invalid context' USING ERRCODE = '42501';
+  END IF;
+  IF actor_role = 'patient' AND NOT EXISTS (
+       SELECT 1 FROM public.appointments AS a
+       WHERE a.id = appt_id AND a.patient_user_id = actor_id
+     ) THEN
+    RAISE EXCEPTION 'invalid context' USING ERRCODE = '42501';
+  END IF;
+
+  RETURN EXISTS (SELECT 1 FROM public.visit_notes WHERE appointment_id = appt_id)
+      OR EXISTS (SELECT 1 FROM public.prescriptions WHERE appointment_id = appt_id);
+END;
+$function$;
+
+REVOKE ALL ON FUNCTION public.appointment_has_medical_records(integer) FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION public.appointment_has_medical_records(integer)
+  TO app_patient, app_registrar;
+
+-- The single appointment.reschedule event: target_id and new_value are the new
+-- visit, old_value the old one, ids only. Written like set_session_idle_minutes
+-- (typed columns, not the generic record_audit_event allowlist). It checks the
+-- pair again, so a wrong pair raises 42501 and the whole move rolls back.
+CREATE OR REPLACE FUNCTION public.record_appointment_reschedule(old_id integer, new_id integer)
+RETURNS void
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = pg_catalog, public, pg_temp
+AS $function$
+DECLARE
+  actor_id integer := NULLIF(current_setting('app.user_id', true), '')::integer;
+  actor_role text;
+  old_row record;
+  new_row record;
+BEGIN
+  SELECT u.role INTO actor_role
+  FROM public.users AS u
+  WHERE u.id = actor_id AND NOT u.blocked;
+
+  IF actor_role IS NULL
+     OR actor_role NOT IN ('patient', 'registrar')
+     OR current_setting('role', true) IS DISTINCT FROM ('app_' || actor_role)
+     OR old_id IS NULL OR new_id IS NULL
+     OR new_id <= old_id THEN
+    RAISE EXCEPTION 'invalid reschedule context' USING ERRCODE = '42501';
+  END IF;
+
+  SELECT a.patient_user_id, a.doctor_id, a.slot_id, a.status, s.service_id
+  INTO old_row
+  FROM public.appointments AS a
+  JOIN public.slots AS s ON s.id = a.slot_id
+  WHERE a.id = old_id;
+  SELECT a.patient_user_id, a.doctor_id, a.slot_id, a.status, s.service_id
+  INTO new_row
+  FROM public.appointments AS a
+  JOIN public.slots AS s ON s.id = a.slot_id
+  WHERE a.id = new_id;
+
+  IF old_row.patient_user_id IS NULL
+     OR new_row.patient_user_id IS NULL
+     OR old_row.status IS DISTINCT FROM 'cancelled'
+     OR new_row.status IS DISTINCT FROM 'scheduled'
+     OR old_row.patient_user_id <> new_row.patient_user_id
+     OR old_row.doctor_id <> new_row.doctor_id
+     OR old_row.service_id <> new_row.service_id
+     OR old_row.slot_id = new_row.slot_id
+     OR (actor_role = 'patient' AND (
+          old_row.patient_user_id <> actor_id
+          OR NOT public.current_patient_is_active()))
+     OR (actor_role = 'registrar' AND NOT EXISTS (
+          SELECT 1 FROM public.users AS p
+          WHERE p.id = new_row.patient_user_id
+            AND p.role = 'patient'
+            AND NOT p.blocked)) THEN
+    RAISE EXCEPTION 'reschedule pair is not allowed' USING ERRCODE = '42501';
+  END IF;
+
+  INSERT INTO public.audit_events (
+    actor_user_id, actor_role, action, target_type, target_id, old_value, new_value
+  )
+  VALUES (
+    actor_id, actor_role, 'appointment.reschedule', 'appointment', new_id,
+    old_id, new_id
+  );
+END;
+$function$;
+
+REVOKE ALL ON FUNCTION public.record_appointment_reschedule(integer, integer) FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION public.record_appointment_reschedule(integer, integer)
+  TO app_patient, app_registrar;
+
 COMMIT;
+
