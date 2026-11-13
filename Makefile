@@ -19,7 +19,7 @@ PYTEST_ARGS ?= -q
 CONFIRM ?=
 
 .DEFAULT_GOAL := help
-.PHONY: help start stop restart clean reset fclean logs ps test
+.PHONY: help start stop restart clean reset fclean logs ps test tls-check
 
 # Anonymous volumes mounted by this project's containers (the postgres image
 # declares one on the one-shot migrate container). "down -v" misses them once
@@ -66,6 +66,7 @@ help:
 	@echo "  clean    remove containers and networks; data is kept"
 	@echo "  logs     follow the logs of all services"
 	@echo "  ps       list the containers"
+	@echo "  tls-check check the proxy certificate, SAN, chain and ports as Compose will use them (read-only)"
 	@echo "  test     run the test suite (TEST_BASE, TEST_CA, TEST_MAILPIT, TEST_PROJECT, PYTHON, PYTEST_ARGS)"
 	@echo "  reset    WIPES THE DATABASE: down -v, then start (asks first; CONFIRM=yes skips)"
 	@echo "  fclean   WIPES THE DATABASE: down -v --rmi local --remove-orphans for this project only (asks first; CONFIRM=yes skips)"
@@ -100,3 +101,8 @@ ps:
 test:
 	$(if $(TEST_PROJECT),COMPOSE_PROJECT_NAME=$(TEST_PROJECT)) CLINIC_TEST_BASE=$(TEST_BASE) CLINIC_MAILPIT=$(TEST_MAILPIT) SSL_CERT_FILE=$(TEST_CA) \
 		$(PYTHON) -m pytest $(PYTEST_ARGS) $(TEST_FILES)
+
+# Ports and environment come from $(COMPOSE) config (override files and shell
+# variables included), not from a grep of .env.
+tls-check:
+	$(COMPOSE) config --format json | $(PYTHON) scripts/tls_compose_env.py

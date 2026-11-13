@@ -52,55 +52,13 @@ fi
 # --- TLS for the proxy ---------------------------------------------------------
 # CLINIC_TLS_MODE comes from the environment, else from a CLINIC_TLS_MODE= line
 # in .env (read with grep, .env is never sourced); empty means local.
-#   local: our own CA (secrets/tls/ca.*, name constraints: localhost,
-#          127.0.0.1 and ::1 only) signs the server certificate. ca.key never
-#          leaves this host: it is not mounted into any container.
+#   local:    our own CA (secrets/tls/ca.*, name constraints: localhost,
+#             127.0.0.1 and ::1 only) signs the server certificate. ca.key
+#             never leaves this host: it is not mounted into any container.
+#   provided: server.crt (full chain) and server.key are yours; this script
+#             never creates or overwrites them, it only checks them.
 # The proxy (uid 101) reads only server.key and server.crt (Compose secrets).
-env_or_dotenv() {
-  eval "value_is_set=\${$1+x}"
-  if [ -n "$value_is_set" ]; then
-    eval "printf '%s' \"\${$1}\""
-    return 0
-  fi
-  [ -f .env ] || return 0
-  grep "^$1=" .env | tail -n 1 | cut -d= -f2- | tr -d '\r' \
-    | sed -e 's/^"\(.*\)"$/\1/' -e "s/^'\(.*\)'\$/\1/"
-}
-
-TLS_DIR=secrets/tls
-TLS_TMP_FILES=
-tls_cleanup() {
-  for tmp_file in $TLS_TMP_FILES; do
-    rm -f "$tmp_file"
-  done
-}
-trap tls_cleanup EXIT INT TERM
-# tls_tmp NAME: a new private temporary file in secrets/tls, path in $NAME,
-# removed on exit.
-tls_tmp() {
-  tmp_file="$(mktemp "$TLS_DIR/.tmp.XXXXXX")"
-  TLS_TMP_FILES="$TLS_TMP_FILES $tmp_file"
-  eval "$1=\$tmp_file"
-}
-tls_fail() {
-  echo "error   $*" >&2
-  exit 1
-}
-# Public key of a certificate and of a private key, to compare the pair.
-tls_cert_pubkey() { openssl x509 -noout -pubkey -in "$1" 2>/dev/null; }
-tls_key_pubkey() { openssl pkey -pubout -in "$1" 2>/dev/null; }
-tls_pair_matches() {
-  cert_pub="$(tls_cert_pubkey "$1")" || return 1
-  key_pub="$(tls_key_pubkey "$2")" || return 1
-  [ -n "$cert_pub" ] && [ "$cert_pub" = "$key_pub" ]
-}
-# Whole days until the certificate expires (0 when expired or unreadable).
-tls_days_left() {
-  end="$(openssl x509 -noout -enddate -in "$1" 2>/dev/null | cut -d= -f2-)"
-  end_s="$(date -u -d "$end" +%s 2>/dev/null)" || { echo 0; return 0; }
-  now_s="$(date -u +%s)"
-  if [ "$end_s" -le "$now_s" ]; then echo 0; else echo $(( (end_s - now_s) / 86400 )); fi
-}
+. scripts/tls_lib.sh
 
 tls_create_ca() {
   tls_tmp ca_cfg
@@ -178,96 +136,52 @@ LEAF_CONFIG
   tls_pair_matches "$leaf_crt_new" "$leaf_key_new" \
     || tls_fail "the new server key does not match its certificate"
   if [ -e "$TLS_DIR/server.key" ] || [ -e "$TLS_DIR/server.crt" ]; then
-    backup_dir="$TLS_DIR/backup-$(date -u +%Y%m%dT%H%M%SZ)"
-    mkdir -m 700 "$backup_dir"
-    for live in server.key server.crt; do
-      if [ -e "$TLS_DIR/$live" ]; then
-        cat "$TLS_DIR/$live" > "$backup_dir/$live"
-        chmod 600 "$backup_dir/$live"
-      fi
-    done
-    echo "backup  $backup_dir"
+    tls_backup_live
   fi
-  # Write into the existing files (same inode): the running proxy sees the
-  # new pair after nginx -s reload. Key first, then certificate.
-  cat "$leaf_key_new" > "$TLS_DIR/server.key"
-  cat "$leaf_crt_new" > "$TLS_DIR/server.crt"
+  tls_write_live "$leaf_key_new" "$leaf_crt_new"
   echo "created $TLS_DIR/server.key, $TLS_DIR/server.crt (localhost, 127.0.0.1, ::1; $leaf_days days)"
 }
 
-TLS_MODE="$(env_or_dotenv CLINIC_TLS_MODE)"
-[ -n "$TLS_MODE" ] || TLS_MODE=local
-case "$TLS_MODE" in
-  local) ;;
-  provided) tls_fail "CLINIC_TLS_MODE=provided is not supported by this version of the script" ;;
-  *) tls_fail "CLINIC_TLS_MODE must be local or provided, got '$TLS_MODE'" ;;
-esac
-
-# Ports and PUBLIC_BASE_URL must agree before anything starts: the HTTP
-# redirect and the links in mail go to the port of PUBLIC_BASE_URL.
-# A mismatch is an error in local mode and a warning in provided mode
-# (a provided setup may sit behind another forwarder).
-tls_port_problem() {
-  if [ "$TLS_MODE" = local ]; then
-    tls_fail "$1"
-  fi
-  echo "warning $1" >&2
-}
-public_url="$(env_or_dotenv PUBLIC_BASE_URL)"
-[ -n "$public_url" ] || public_url=https://localhost:8450
-https_only="$(env_or_dotenv SESSION_HTTPS_ONLY)"
-[ -n "$https_only" ] || https_only=true
-proxy_port="$(env_or_dotenv CLINIC_PROXY_PORT)"
-tls_port="$(env_or_dotenv CLINIC_PROXY_TLS_PORT)"
-case "$public_url" in
-  https://*) ;;
-  *)
-    if [ "$https_only" = true ]; then
-      tls_fail "PUBLIC_BASE_URL must start with https:// while SESSION_HTTPS_ONLY is true"
-    fi
-    ;;
-esac
-if [ -n "$proxy_port" ] && [ "$proxy_port" != 8080 ] && [ -z "$tls_port" ]; then
-  tls_port_problem "CLINIC_PROXY_PORT=$proxy_port but CLINIC_PROXY_TLS_PORT is empty, so HTTPS would take 8450 of the default stand; set CLINIC_PROXY_TLS_PORT (HTTP port + 370)"
-fi
-[ -n "$tls_port" ] || tls_port=8450
-url_authority="${public_url#*://}"
-url_authority="${url_authority%%/*}"
-case "$url_authority" in
-  \[*\]:*) url_port="${url_authority##*]:}" ;;
-  \[*) url_port=443 ;;
-  *:*) url_port="${url_authority##*:}" ;;
-  *) url_port=443 ;;
-esac
-if [ "$url_port" != "$tls_port" ]; then
-  tls_port_problem "redirect and mail links point to port $url_port (PUBLIC_BASE_URL), proxy publishes HTTPS on $tls_port (CLINIC_PROXY_TLS_PORT)"
-fi
+tls_settings
+tls_check_settings
 
 mkdir -p "$TLS_DIR"
 chmod 700 "$TLS_DIR"
-if [ -e "$TLS_DIR/ca.key" ] && [ -e "$TLS_DIR/ca.crt" ]; then
-  echo "keep    $TLS_DIR/ca.key, $TLS_DIR/ca.crt"
-elif [ -e "$TLS_DIR/ca.key" ] || [ -e "$TLS_DIR/ca.crt" ]; then
-  tls_fail "only one of $TLS_DIR/ca.key and $TLS_DIR/ca.crt exists; restore the other one or move both away to create a new CA"
-else
-  tls_create_ca
-fi
-for ca_file in "$TLS_DIR/ca.key" "$TLS_DIR/ca.crt"; do
-  chmod 600 "$ca_file"
-  if command -v setfacl >/dev/null 2>&1; then
-    setfacl -b "$ca_file" 2>/dev/null || true
+if [ "$TLS_MODE" = local ]; then
+  if [ -e "$TLS_DIR/ca.key" ] && [ -e "$TLS_DIR/ca.crt" ]; then
+    echo "keep    $TLS_DIR/ca.key, $TLS_DIR/ca.crt"
+  elif [ -e "$TLS_DIR/ca.key" ] || [ -e "$TLS_DIR/ca.crt" ]; then
+    tls_fail "only one of $TLS_DIR/ca.key and $TLS_DIR/ca.crt exists; restore the other one or move both away to create a new CA"
+  else
+    tls_create_ca
   fi
-done
-if ! openssl x509 -checkend 5184000 -noout -in "$TLS_DIR/ca.crt" >/dev/null 2>&1; then
-  echo "warning $TLS_DIR/ca.crt expires within 60 days; it is not renewed automatically." >&2
-fi
-leaf_problem="$(tls_leaf_problem)"
-if [ -n "$leaf_problem" ]; then
-  echo "issue   $TLS_DIR/server.crt: $leaf_problem"
-  tls_issue_leaf
+  for ca_file in "$TLS_DIR/ca.key" "$TLS_DIR/ca.crt"; do
+    chmod 600 "$ca_file"
+    if command -v setfacl >/dev/null 2>&1; then
+      setfacl -b "$ca_file" 2>/dev/null || true
+    fi
+  done
+  if ! openssl x509 -checkend 5184000 -noout -in "$TLS_DIR/ca.crt" >/dev/null 2>&1; then
+    tls_warn "$TLS_DIR/ca.crt expires within 60 days; it is not renewed automatically."
+  fi
+  leaf_problem="$(tls_leaf_problem)"
+  if [ -n "$leaf_problem" ]; then
+    echo "issue   $TLS_DIR/server.crt: $leaf_problem"
+    tls_issue_leaf
+  else
+    echo "keep    $TLS_DIR/server.key, $TLS_DIR/server.crt"
+  fi
 else
-  echo "keep    $TLS_DIR/server.key, $TLS_DIR/server.crt"
+  # provided: never generate, never overwrite.
+  if [ -e "$TLS_DIR/ca.key" ]; then
+    tls_warn "$TLS_DIR/ca.key is not used in provided mode, move it off this host"
+  fi
+  if [ ! -s "$TLS_DIR/server.crt" ] || [ ! -s "$TLS_DIR/server.key" ]; then
+    tls_fail "provided mode: put your full-chain certificate in $TLS_DIR/server.crt and its key in $TLS_DIR/server.key"
+  fi
 fi
+tls_check_pair "$TLS_DIR/server.key" "$TLS_DIR/server.crt"
+echo "check   $TLS_DIR/server.crt: key, dates, $URL_HOST in SAN, chain ($TLS_MODE)"
 tls_cleanup
 TLS_TMP_FILES=
 

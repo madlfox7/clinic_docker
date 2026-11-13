@@ -34,7 +34,16 @@ fi
 # Only after pip install: pip must keep using the system trust store for PyPI.
 # From here on urllib (readiness) and httpx (pytest) verify the stand
 # certificate against the stand CA and nothing else.
-export SSL_CERT_FILE="$ROOT_DIR/secrets/tls/ca.crt"
+# provided mode: a public (or CLINIC_TLS_CA_FILE) certificate, so the system
+# store or that file is used instead.
+TLS_MODE="${CLINIC_TLS_MODE:-$(grep '^CLINIC_TLS_MODE=' .env 2>/dev/null | tail -n 1 | cut -d= -f2- | tr -d '\r"'"'"'' || true)}"
+if [ "$TLS_MODE" = provided ]; then
+  if [ -n "${CLINIC_TLS_CA_FILE:-}" ]; then
+    export SSL_CERT_FILE="$CLINIC_TLS_CA_FILE"
+  fi
+else
+  export SSL_CERT_FILE="$ROOT_DIR/secrets/tls/ca.crt"
+fi
 echo "Starting the local clinic stack (database volume will be preserved)..."
 docker compose up -d --build
 

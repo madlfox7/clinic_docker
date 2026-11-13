@@ -658,3 +658,398 @@ def test_init_secrets_accepts_matching_ports(tmp_path):
     done = _run_init(root, **_init_env(CLINIC_PROXY_PORT="8082", CLINIC_PROXY_TLS_PORT="8452",
                                        PUBLIC_BASE_URL="https://localhost:8452/"))
     assert done.returncode == 0, done.stderr
+
+
+# --- 5. provided mode, tls-check and reload --------------------------------------
+
+PROD_HOST = "clinic.example.org"
+
+
+def _make_ca(directory: pathlib.Path, days: int = 30, constraints: str | None = None) -> pathlib.Path:
+    directory.mkdir(parents=True, exist_ok=True)
+    ext = ["-addext", "basicConstraints=critical,CA:TRUE,pathlen:0",
+           "-addext", "keyUsage=critical,keyCertSign,cRLSign",
+           "-addext", "subjectKeyIdentifier=hash"]
+    if constraints:
+        ext += ["-addext", constraints]
+    _openssl("req", "-x509", "-new", "-newkey", "ec", "-pkeyopt", "ec_paramgen_curve:P-256", "-nodes",
+             "-keyout", str(directory / "ca.key"), "-out", str(directory / "ca.crt"),
+             "-days", str(days), "-subj", "/CN=Test CA", *ext)
+    return directory
+
+
+def _provided_root(tmp_path: pathlib.Path, days: int = 90, san: str = f"DNS:{PROD_HOST}"):
+    root = _script_copy(tmp_path / "repo")
+    ca = _make_ca(tmp_path / "test-ca", days=400)
+    key, crt = _issue_leaf(tmp_path, ca, "leaf", san, days)
+    tls = root / "secrets" / "tls"
+    tls.mkdir(parents=True)
+    (tls / "server.key").write_bytes(key.read_bytes())
+    (tls / "server.crt").write_bytes(crt.read_bytes())
+    return root, ca, tls
+
+
+def _provided_env(ca=None, **env):
+    base = {"CLINIC_TLS_MODE": "provided", "PUBLIC_BASE_URL": f"https://{PROD_HOST}",
+            "CLINIC_PROXY_PORT": "", "CLINIC_PROXY_TLS_PORT": "", "SESSION_HTTPS_ONLY": ""}
+    if ca is not None:
+        base["CLINIC_TLS_CA_FILE"] = str(ca / "ca.crt")
+    base.update(env)
+    return base
+
+
+def _shas(tls: pathlib.Path) -> tuple[str, str]:
+    return _sha(tls / "server.key"), _sha(tls / "server.crt")
+
+
+def test_provided_mode_never_generates_and_refuses_an_untrusted_chain(tmp_path):
+    root, _, tls = _provided_root(tmp_path)
+    before = _shas(tls)
+    done = _run_init(root, **_provided_env())
+    assert done.returncode != 0, done.stdout
+    assert "chain does not verify" in done.stderr, done.stderr
+    assert _shas(tls) == before
+    assert not (tls / "ca.key").exists() and not (tls / "ca.crt").exists()
+    missing = _script_copy(tmp_path / "empty")
+    done = _run_init(missing, **_provided_env())
+    assert done.returncode != 0 and "provided mode: put your full-chain certificate" in done.stderr
+    assert not (missing / "secrets" / "tls" / "server.crt").exists()
+
+
+def test_provided_mode_with_corporate_ca_file(tmp_path):
+    root, ca, tls = _provided_root(tmp_path)
+    before = _shas(tls)
+    done = _run_init(root, **_provided_env(ca))
+    assert done.returncode == 0, done.stderr
+    assert "BEGIN" not in done.stdout + done.stderr
+    assert _shas(tls) == before
+    assert not (tls / "ca.key").exists()
+    for name in ("server.key", "server.crt"):
+        # 600 plus the ACL (the group bits show the ACL mask).
+        assert (tls / name).stat().st_mode & 0o777 in (0o600, 0o640)
+        acl = subprocess.run(["getfacl", "-cpn", str(tls / name)], capture_output=True, text=True).stdout
+        assert "user:101:r--" in acl, acl
+    config = subprocess.run(["docker", "compose", "-f", "docker-compose.yml", "config"], cwd=ROOT,
+                            capture_output=True, text=True, env={**os.environ, "CLINIC_TLS_CA_FILE": str(ca / "ca.crt")})
+    assert config.returncode == 0 and str(ca) not in config.stdout
+    # A stray CA key next to a provided certificate is reported.
+    (tls / "ca.key").write_text("not a key\n")
+    done = _run_init(root, **_provided_env(ca))
+    assert done.returncode == 0 and "ca.key is not used in provided mode" in done.stderr
+
+
+def test_provided_mode_checks_pair_dates_and_san(tmp_path):
+    root, ca, tls = _provided_root(tmp_path)
+    other_key, _ = _issue_leaf(tmp_path, ca, "other", f"DNS:{PROD_HOST}", 90)
+    good_key = (tls / "server.key").read_bytes()
+    (tls / "server.key").write_bytes(other_key.read_bytes())
+    done = _run_init(root, **_provided_env(ca))
+    assert done.returncode != 0 and "key does not match certificate" in done.stderr, done.stderr
+    (tls / "server.key").write_bytes(good_key)
+    for days, ok in ((3, False), (15, True)):
+        key, crt = _issue_leaf(tmp_path, ca, f"short{days}", f"DNS:{PROD_HOST}", days)
+        (tls / "server.key").write_bytes(key.read_bytes())
+        (tls / "server.crt").write_bytes(crt.read_bytes())
+        done = _run_init(root, **_provided_env(ca))
+        if ok:
+            assert done.returncode == 0 and "expires within 21 days" in done.stderr, done.stderr
+        else:
+            assert done.returncode != 0 and "expires within 7 days" in done.stderr, done.stderr
+    done = _run_init(root, **_provided_env(ca, PUBLIC_BASE_URL="https://other.example"))
+    assert done.returncode != 0 and "not in certificate SAN" in done.stderr, done.stderr
+    lib = (ROOT / "scripts" / "tls_lib.sh").read_text()
+    assert '*"does match"*) return 0' in lib and "-checkip" in lib and "-checkhost" in lib
+
+
+def test_local_mode_accepts_ip_literals_through_checkip(tmp_path):
+    root = _script_copy(tmp_path)
+    for url in ("https://127.0.0.1:8450", "https://[::1]:8450", "https://[::1]:8450/"):
+        done = _run_init(root, PUBLIC_BASE_URL=url)
+        assert done.returncode == 0, (url, done.stderr)
+        assert "in SAN" in done.stdout
+
+
+def test_provided_mode_only_warns_about_ports(tmp_path):
+    root, ca, _ = _provided_root(tmp_path)
+    done = _run_init(root, **_provided_env(ca, CLINIC_PROXY_PORT="8082"))
+    assert done.returncode == 0 and "warning" in done.stderr and "CLINIC_PROXY_TLS_PORT is empty" in done.stderr
+    done = _run_init(root, **_provided_env(ca, CLINIC_PROXY_TLS_PORT="8452"))
+    assert done.returncode == 0 and "point to port 443" in done.stderr
+
+
+def test_local_ca_close_to_expiry_warns_and_limits_the_leaf(tmp_path):
+    root = _script_copy(tmp_path)
+    tls = root / "secrets" / "tls"
+    _make_ca(tls, days=40, constraints="nameConstraints=critical,permitted;DNS:localhost,"
+             "permitted;IP:127.0.0.1/255.255.255.255,permitted;IP:::1/ffff:ffff:ffff:ffff:ffff:ffff:ffff:ffff")
+    ca_sha = _sha(tls / "ca.crt")
+    done = _run_init(root)
+    assert done.returncode == 0, done.stderr
+    assert "expires within 60 days" in done.stderr
+    assert _sha(tls / "ca.crt") == ca_sha
+    end = _openssl("x509", "-noout", "-enddate", "-in", str(tls / "server.crt")).stdout.split("=", 1)[1].strip()
+    ca_end = _openssl("x509", "-noout", "-enddate", "-in", str(tls / "ca.crt")).stdout.split("=", 1)[1].strip()
+    stamp = lambda text: int(subprocess.run(["date", "-u", "-d", text, "+%s"], capture_output=True, text=True).stdout)
+    assert stamp(ca_end) - stamp(end) >= 86400 - 120, (end, ca_end)
+
+
+def test_make_tls_check_reads_compose_values():
+    env = {**os.environ}
+    done = subprocess.run(["make", "-s", "tls-check", "COMPOSE=docker compose"], cwd=ROOT,
+                          capture_output=True, text=True, env=env)
+    assert done.returncode == 0, done.stderr
+    assert done.stdout.startswith("OK") and f"HTTPS port {_tls_port()}" in done.stdout, done.stdout
+    makefile = (ROOT / "Makefile").read_text()
+    assert "$(COMPOSE) config --format json | $(PYTHON) scripts/tls_compose_env.py" in makefile
+    assert "BEGIN" not in done.stdout + done.stderr
+
+
+def _reload_copy(tmp_path: pathlib.Path) -> pathlib.Path:
+    root = _script_copy(tmp_path / "repo")
+    done = _run_init(root)
+    assert done.returncode == 0, done.stderr
+    return root
+
+
+def _fake_bin(tmp_path: pathlib.Path, nginx_t_rc: int = 0, served: pathlib.Path | None = None) -> dict:
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir(exist_ok=True)
+    calls = tmp_path / "compose.calls"
+    compose = bin_dir / "fake-compose"
+    compose.write_text(f"""#!/bin/sh
+echo "$*" >> {calls}
+case "$*" in
+  *"nginx -t"*) exit {nginx_t_rc} ;;
+esac
+exit 0
+""")
+    compose.chmod(0o755)
+    env = {"COMPOSE": str(compose), "PATH": os.environ["PATH"]}
+    if served is not None:
+        real = shutil.which("openssl")
+        wrapper = bin_dir / "openssl"
+        wrapper.write_text(f"""#!/bin/sh
+if [ "$1" = s_client ]; then cat {served}; exit 0; fi
+exec {real} "$@"
+""")
+        wrapper.chmod(0o755)
+        env["PATH"] = f"{bin_dir}:{os.environ['PATH']}"
+    return env, calls
+
+
+def _run_reload(root: pathlib.Path, key, crt, env: dict, cwd="/tmp"):
+    full = {k: v for k, v in os.environ.items() if not k.startswith("CLINIC_") and k != "PUBLIC_BASE_URL"}
+    full.update(env)
+    return subprocess.run(["sh", str(root / "scripts" / "tls_reload.sh"), str(key), str(crt)], cwd=cwd,
+                          env=full, capture_output=True, text=True, timeout=120)
+
+
+def test_reload_refuses_a_bad_candidate_and_keeps_files(tmp_path):
+    root = _reload_copy(tmp_path)
+    tls = root / "secrets" / "tls"
+    before = _shas(tls)
+    env, calls = _fake_bin(tmp_path)
+    key_a, crt_a = _issue_leaf(tmp_path, tls, "a", "DNS:localhost, IP:127.0.0.1, IP:::1", 90)
+    key_b, _ = _issue_leaf(tmp_path, tls, "b", "DNS:localhost, IP:127.0.0.1, IP:::1", 90)
+    done = _run_reload(root, key_b, crt_a, env)
+    assert done.returncode != 0 and "key does not match certificate" in done.stderr, done.stderr
+    expired_key, expired = _issue_leaf(tmp_path, tls, "old", "DNS:localhost, IP:127.0.0.1, IP:::1", 1)
+    _openssl("x509", "-req", "-in", str(tmp_path / "old.csr"), "-CA", str(tls / "ca.crt"), "-CAkey", str(tls / "ca.key"),
+             "-set_serial", "0x" + os.urandom(8).hex(), "-not_before", "20200101000000Z", "-not_after", "20200201000000Z",
+             "-extfile", str(tmp_path / "old.ext"), "-out", str(expired))
+    done = _run_reload(root, expired_key, expired, env)
+    assert done.returncode != 0 and "has expired" in done.stderr, done.stderr
+    assert _shas(tls) == before
+    assert not calls.exists(), "reload must not touch the proxy for a bad candidate"
+    assert not list(tls.glob("backup-*")) and not list(tls.glob(".tmp.*"))
+
+
+def test_reload_restores_files_when_nginx_t_fails(tmp_path):
+    root = _reload_copy(tmp_path)
+    tls = root / "secrets" / "tls"
+    before = _shas(tls)
+    inodes = ((tls / "server.key").stat().st_ino, (tls / "server.crt").stat().st_ino)
+    env, calls = _fake_bin(tmp_path, nginx_t_rc=1)
+    key, crt = _issue_leaf(tmp_path, tls, "new", "DNS:localhost, IP:127.0.0.1, IP:::1", 90)
+    done = _run_reload(root, key, crt, env)
+    assert done.returncode != 0 and "restored the previous files" in done.stderr, done.stderr
+    assert _shas(tls) == before
+    assert ((tls / "server.key").stat().st_ino, (tls / "server.crt").stat().st_ino) == inodes
+    assert "reload" not in calls.read_text()
+    backups = list(tls.glob("backup-*"))
+    assert len(backups) == 1 and oct(backups[0].stat().st_mode & 0o777) == "0o700"
+    assert all(oct(f.stat().st_mode & 0o777) == "0o600" for f in backups[0].iterdir())
+
+
+def test_reload_refuses_a_second_run_while_locked(tmp_path):
+    root = _reload_copy(tmp_path)
+    tls = root / "secrets" / "tls"
+    before = _shas(tls)
+    env, calls = _fake_bin(tmp_path)
+    key, crt = _issue_leaf(tmp_path, tls, "new", "DNS:localhost, IP:127.0.0.1, IP:::1", 90)
+    lock = tls / ".reload.lock"
+    lock.touch(mode=0o600)
+    holder = subprocess.Popen(["flock", str(lock), "sleep", "30"])
+    try:
+        time.sleep(0.5)
+        done = _run_reload(root, key, crt, env)
+    finally:
+        holder.kill()
+        holder.wait()
+    assert done.returncode != 0 and "reload already running" in done.stderr, done.stderr
+    assert _shas(tls) == before and not calls.exists()
+
+
+def test_reload_reports_a_served_serial_that_did_not_change(tmp_path):
+    root = _reload_copy(tmp_path)
+    tls = root / "secrets" / "tls"
+    old = tmp_path / "served.pem"
+    old.write_bytes((tls / "server.crt").read_bytes())
+    env, calls = _fake_bin(tmp_path, served=old)
+    key, crt = _issue_leaf(tmp_path, tls, "new", "DNS:localhost, IP:127.0.0.1, IP:::1", 90)
+    done = _run_reload(root, key, crt, env)
+    assert done.returncode != 0 and "WARN served serial" in done.stderr and "!= candidate" in done.stderr, done.stderr
+    # The new files passed nginx -t, so they stay.
+    assert _sha(tls / "server.crt") == _sha(crt)
+    assert "nginx -s reload" in calls.read_text()
+
+
+@pytest.mark.skipif(os.environ.get("CLINIC_TLS_RELOAD_TEST") != "1",
+                    reason="replaces the stand certificate; run with CLINIC_TLS_RELOAD_TEST=1")
+def test_reload_replaces_the_stand_certificate_without_a_restart(tmp_path):
+    tls_live = ROOT / "secrets" / "tls"
+    before = _shas(tls_live)
+    port = _tls_port()
+    env = {"COMPOSE": "docker compose", "PUBLIC_BASE_URL": _origin(), "CLINIC_PROXY_TLS_PORT": str(port),
+           "CLINIC_PROXY_PORT": str(_published(8080))}
+    started = _compose("ps", "--format", "{{.Service}} {{.RunningFor}} {{.ID}}").stdout
+    old_serial = _openssl("x509", "-noout", "-serial", "-in", str(tls_live / "server.crt")).stdout.strip()
+    key, crt = _issue_leaf(tmp_path, tls_live, "reload", "DNS:localhost, IP:127.0.0.1, IP:::1", 90)
+    new_serial = _openssl("x509", "-noout", "-serial", "-in", str(crt)).stdout.strip()
+    backups_before = set(tls_live.glob("backup-*"))
+    with _https_client() as keep_alive:
+        assert keep_alive.get("/login").status_code == 200
+        try:
+            done = _run_reload(ROOT, key, crt, env)
+            assert done.returncode == 0, done.stderr
+            assert f"served serial {new_serial.split('=')[1]}" in done.stdout
+            assert keep_alive.get("/login").status_code == 200
+            cert = ssl.DER_cert_to_PEM_cert(
+                _strict_context().wrap_socket(socket.create_connection(("127.0.0.1", port)),
+                                              server_hostname="localhost").getpeercert(True))
+            served = subprocess.run(["openssl", "x509", "-noout", "-serial"], input=cert,
+                                    capture_output=True, text=True).stdout.strip()
+            assert served == new_serial != old_serial
+            new_backups = set(tls_live.glob("backup-*")) - backups_before
+            assert len(new_backups) == 1
+            backup = new_backups.pop()
+            assert all(oct(f.stat().st_mode & 0o777) == "0o600" for f in backup.iterdir())
+        finally:
+            restore = _run_reload(ROOT, backup / "server.key", backup / "server.crt", env)
+            assert restore.returncode == 0, restore.stderr
+    assert _shas(tls_live) == before
+    ids = lambda text: sorted(line.split()[-1] for line in text.splitlines() if line.startswith("proxy "))
+    assert ids(_compose("ps", "--format", "{{.Service}} {{.RunningFor}} {{.ID}}").stdout) == ids(started)
+
+
+def _provided_proxy(tmp_path: pathlib.Path, acme: bool):
+    ca = _make_ca(tmp_path / "prod-ca", days=400)
+    key, crt = _issue_leaf(tmp_path, ca, "prod", f"DNS:{PROD_HOST}", 90)
+    for path in (key, crt):
+        path.chmod(0o600)
+        subprocess.run(["setfacl", "-m", "u:101:r", str(path)], check=True)
+    webroot = tmp_path / "acme"
+    (webroot / ".well-known" / "acme-challenge").mkdir(parents=True)
+    (webroot / ".well-known" / "acme-challenge" / "probe").write_text("acme-probe-body\n")
+    for directory in (webroot, webroot / ".well-known", webroot / ".well-known" / "acme-challenge"):
+        directory.chmod(0o755)
+    override = tmp_path / "provided.yml"
+    override.write_text(
+        "secrets:\n"
+        f"  tls_cert:\n    file: {crt}\n"
+        f"  tls_key:\n    file: {key}\n"
+    )
+    name = f"fixer-tlstest-{os.urandom(4).hex()}"
+    done = _compose("-f", str(ROOT / "docker-compose.yml"), "-f", str(override), "run", "-d", "--rm", "--no-deps",
+                    "--name", name, "-e", "CLINIC_TLS_MODE=provided", "-e", f"PUBLIC_BASE_URL=https://{PROD_HOST}",
+                    "-e", f"CLINIC_ACME_WEBROOT={'true' if acme else 'false'}",
+                    "-v", f"{webroot}:/var/www/acme:ro", "proxy", timeout=180)
+    assert done.returncode == 0, done.stderr
+    return name, ca
+
+
+def _container_ip(name: str) -> str:
+    deadline = time.monotonic() + 30
+    while time.monotonic() < deadline:
+        out = subprocess.run(["docker", "inspect", "-f", "{{range .NetworkSettings.Networks}}{{.IPAddress}} {{end}}",
+                              name], capture_output=True, text=True).stdout.split()
+        if out:
+            ip = out[0]
+            try:
+                socket.create_connection((ip, 8080), timeout=1).close()
+                return ip
+            except OSError:
+                pass
+        time.sleep(0.5)
+    logs = subprocess.run(["docker", "logs", name], capture_output=True, text=True)
+    raise AssertionError(f"test proxy did not start: {logs.stderr[-1500:]}")
+
+
+def test_provided_proxy_serves_only_its_own_name(tmp_path):
+    name, ca = _provided_proxy(tmp_path, acme=False)
+    try:
+        ip = _container_ip(name)
+        ok = httpx.get(f"http://{ip}:8080/login", headers={"Host": PROD_HOST}, timeout=5)
+        assert ok.status_code == 308 and ok.headers["location"] == f"https://{PROD_HOST}/login"
+        with pytest.raises(httpx.RemoteProtocolError):
+            httpx.get(f"http://{ip}:8080/login", headers={"Host": "evil.example"}, timeout=5)
+        context = ssl.create_default_context(cafile=str(ca / "ca.crt"))
+        with socket.create_connection((ip, 8443), timeout=5) as raw:
+            with context.wrap_socket(raw, server_hostname=PROD_HOST) as tls:
+                assert ("DNS", PROD_HOST) in tls.getpeercert()["subjectAltName"]
+        loose = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+        loose.load_verify_locations(str(ca / "ca.crt"))
+        loose.check_hostname = True
+        with pytest.raises(ssl.SSLError):
+            with socket.create_connection((ip, 8443), timeout=5) as raw:
+                loose.wrap_socket(raw, server_hostname="other.example")
+        config = subprocess.run(["docker", "exec", name, "cat", "/tmp/nginx/clinic/server_name.conf"],
+                                capture_output=True, text=True).stdout
+        assert config.strip() == f"server_name {PROD_HOST};"
+        acme = httpx.get(f"http://{ip}:8080/.well-known/acme-challenge/probe", headers={"Host": PROD_HOST}, timeout=5)
+        assert acme.status_code == 308
+    finally:
+        subprocess.run(["docker", "rm", "-f", name], capture_output=True)
+
+
+def test_acme_webroot_only_in_provided_mode(tmp_path):
+    local = _compose("run", "--rm", "--no-deps", "-T", "-e", "CLINIC_ACME_WEBROOT=true", "--entrypoint", "sh", "proxy",
+                     "-c", "/docker-entrypoint.d/15-clinic-tls.sh >/dev/null && wc -c < /tmp/nginx/clinic/acme.conf"
+                     " && wc -c < /tmp/nginx/clinic/default_servers.conf", timeout=180)
+    assert local.returncode == 0, local.stderr
+    assert local.stdout.split() == ["0", "0"]
+    bad = _compose("run", "--rm", "--no-deps", "-T", "-e", "CLINIC_ACME_WEBROOT=yes", "proxy", "nginx", "-t", timeout=180)
+    assert bad.returncode != 0 and "CLINIC_ACME_WEBROOT" in bad.stdout + bad.stderr
+    name, _ = _provided_proxy(tmp_path, acme=True)
+    try:
+        ip = _container_ip(name)
+        served = httpx.get(f"http://{ip}:8080/.well-known/acme-challenge/probe", headers={"Host": PROD_HOST}, timeout=5)
+        assert served.status_code == 200 and served.text == "acme-probe-body\n"
+        assert "set-cookie" not in served.headers
+        other = httpx.get(f"http://{ip}:8080/login", headers={"Host": PROD_HOST}, timeout=5)
+        assert other.status_code == 308
+    finally:
+        subprocess.run(["docker", "rm", "-f", name], capture_output=True)
+    acme_file = (ROOT / "docker-compose.acme.yml").read_text()
+    assert "./acme-webroot:/var/www/acme:ro" in acme_file
+
+
+def test_env_prod_example():
+    text = (ROOT / ".env.prod.example").read_text()
+    lines = dict(line.split("=", 1) for line in text.splitlines() if line and not line.startswith("#"))
+    assert lines["CLINIC_HSTS_MAX_AGE"] == "31536000"
+    assert lines["CLINIC_TLS_MODE"] == "provided"
+    assert lines["CLINIC_PROXY_PORT"] == "80" and lines["CLINIC_PROXY_TLS_PORT"] == "443"
+    assert lines["SESSION_HTTPS_ONLY"] == "true" and lines["CLINIC_ACME_WEBROOT"] == "false"
+    url = lines["PUBLIC_BASE_URL"]
+    assert url.startswith("https://") and url.count(":") == 1 and url.count("/") == 2

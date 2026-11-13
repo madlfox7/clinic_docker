@@ -463,7 +463,7 @@ def _not_world_readable(path: Path) -> bool:
 
 def test_rotate_script_keeps_old_key_and_prints_no_values(tmp_path):
 	(tmp_path / "scripts").mkdir()
-	for name in ("init_secrets.sh", "rotate_field_key.sh"):
+	for name in ("init_secrets.sh", "tls_lib.sh", "rotate_field_key.sh"):
 		shutil.copy2(ROOT / "scripts" / name, tmp_path / "scripts" / name)
 	run = lambda *cmd: subprocess.run(cmd, cwd=tmp_path, capture_output=True, text=True)
 

@@ -86,14 +86,57 @@ case $rest in
 esac
 origin="https://$host$rest"
 
+# --- CLINIC_ACME_WEBROOT (HTTP-01 webroot, provided mode only) -------------------
+acme=${CLINIC_ACME_WEBROOT:-false}
+case $acme in
+    true|false) ;;
+    *) fail "CLINIC_ACME_WEBROOT must be true or false" ;;
+esac
+
 # --- Snippets ------------------------------------------------------------------
 umask 022
 mkdir -p "$OUT"
 printf 'return 308 %s$request_uri;\n' "$origin" > "$OUT/redirect.conf"
 printf 'add_header Strict-Transport-Security "max-age=%s" always;\n' "$max_age" > "$OUT/hsts.conf"
-# The ACME webroot exists only for provided certificates (later step); empty here.
-: > "$OUT/acme.conf"
-# One server per port in local mode: it answers every name the tests use.
-printf 'server_name localhost 127.0.0.1 [::1];\n' > "$OUT/server_name.conf"
+if [ "$mode" = provided ]; then
+    # Only the name from PUBLIC_BASE_URL is served; any other Host gets the
+    # connection closed (444) and any other SNI a rejected handshake.
+    printf 'server_name %s;\n' "$host" > "$OUT/server_name.conf"
+    cat > "$OUT/default_servers.conf" <<'DEFAULT_SERVERS'
+server {
+    listen 8080 default_server;
+    server_name _;
+    server_tokens off;
+    access_log /var/log/nginx/access.log clinic_path;
+    return 444;
+}
+server {
+    listen 8443 ssl default_server;
+    server_name _;
+    server_tokens off;
+    access_log /var/log/nginx/access.log clinic_path;
+    ssl_reject_handshake on;
+    return 444;
+}
+DEFAULT_SERVERS
+    if [ "$acme" = true ]; then
+        # Webroot mounted read-only by docker-compose.acme.yml; everything else on HTTP is 308.
+        cat > "$OUT/acme.conf" <<'ACME'
+location ^~ /.well-known/acme-challenge/ {
+    include /etc/nginx/clinic/security_headers.conf;
+    root /var/www/acme;
+    default_type text/plain;
+}
+ACME
+    else
+        : > "$OUT/acme.conf"
+    fi
+else
+    # One server per port in local mode: it answers every name the tests use.
+    printf 'server_name localhost 127.0.0.1 [::1];\n' > "$OUT/server_name.conf"
+    : > "$OUT/default_servers.conf"
+    # No ACME webroot with the stand CA, even if CLINIC_ACME_WEBROOT=true.
+    : > "$OUT/acme.conf"
+fi
 
-echo "15-clinic-tls.sh: mode $mode, redirect to $origin, HSTS max-age=$max_age"
+echo "15-clinic-tls.sh: mode $mode, redirect to $origin, HSTS max-age=$max_age, ACME webroot $acme"
