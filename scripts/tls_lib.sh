@@ -94,7 +94,19 @@ tls_port_problem() {
 
 # Ports and PUBLIC_BASE_URL must agree: the HTTP redirect and the links in
 # mail go to the port of PUBLIC_BASE_URL.
+# 0 when HOST (no brackets) is an IPv4 or IPv6 literal.
+tls_host_is_ip() {
+  case "$1" in
+    *:*) return 0 ;;
+    *[!0-9.]*|'') return 1 ;;
+  esac
+  return 0
+}
+
 tls_check_settings() {
+  if [ "$TLS_MODE" = provided ] && tls_host_is_ip "$URL_HOST"; then
+    tls_fail "provided mode needs a domain name in PUBLIC_BASE_URL, not the IP address $URL_HOST (public certificates and SNI are issued for names)"
+  fi
   case "$PUBLIC_URL" in
     https://*) ;;
     *)
@@ -116,10 +128,7 @@ tls_check_settings() {
 # -checkhost for names. Older OpenSSL returned 0 on a mismatch, so the
 # "does match" line is required as well as exit code 0.
 tls_name_matches() {
-  case "$2" in
-    *:*|*[!0-9.]*) case "$2" in *:*) name_flag=-checkip ;; *) name_flag=-checkhost ;; esac ;;
-    *) name_flag=-checkip ;;
-  esac
+  if tls_host_is_ip "$2"; then name_flag=-checkip; else name_flag=-checkhost; fi
   name_out="$(openssl x509 -noout -in "$1" "$name_flag" "$2" 2>/dev/null)" || return 1
   case "$name_out" in
     *"does match"*) return 0 ;;

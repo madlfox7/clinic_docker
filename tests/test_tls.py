@@ -1155,3 +1155,12 @@ def test_reload_checks_the_serial_where_the_proxy_is_published(tmp_path, bind, e
     assert done.returncode == 0, done.stderr
     assert f"served serial" in done.stdout and expected in done.stdout, done.stdout
     assert f"-connect {expected}" in (tmp_path / "s_client.calls").read_text()
+
+
+@pytest.mark.parametrize("url", ["https://203.0.113.7", "https://[2001:db8::1]", "https://127.0.0.1:443"])
+def test_provided_mode_refuses_an_ip_address(tmp_path, url):
+    root, ca, tls = _provided_root(tmp_path, san="DNS:clinic.example.org, IP:203.0.113.7, IP:2001:db8::1, IP:127.0.0.1")
+    done = _run_init(root, **_provided_env(ca, PUBLIC_BASE_URL=url))
+    assert done.returncode != 0 and "provided mode needs a domain name" in done.stderr, done.stderr
+    proxy = _proxy_script(CLINIC_TLS_MODE="provided", PUBLIC_BASE_URL=url)
+    assert proxy.returncode != 0 and "provided mode needs a domain name" in proxy.stdout + proxy.stderr

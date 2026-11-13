@@ -54,10 +54,7 @@ fi
 $COMPOSE exec -T proxy nginx -s reload >/dev/null 2>&1 || tls_fail "nginx -s reload failed; the new files are in place, check the proxy"
 echo "reload  proxy, candidate serial $cand_serial"
 
-case "$URL_HOST" in
-  *:*|*[!0-9.]*) case "$URL_HOST" in *:*) sni=-noservername ;; *) sni="-servername $URL_HOST" ;; esac ;;
-  *) sni=-noservername ;;
-esac
+if tls_host_is_ip "$URL_HOST"; then sni=-noservername; else sni="-servername $URL_HOST"; fi
 # The serial is read where the proxy is published: CLINIC_PROXY_BIND if it
 # names one address, else the loopback.
 bind="$(env_or_dotenv CLINIC_PROXY_BIND)"

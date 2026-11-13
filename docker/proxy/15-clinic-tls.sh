@@ -85,6 +85,16 @@ case $rest in
     *) fail "PUBLIC_BASE_URL has a bad host" ;;
 esac
 origin="https://$host$rest"
+if [ "$mode" = provided ]; then
+    case $host in
+        \[*|*[!0-9.]*) ;;
+        *) host_is_ip=yes ;;
+    esac
+    case $host in \[*) host_is_ip=yes ;; esac
+    if [ "${host_is_ip:-}" = yes ]; then
+        fail "provided mode needs a domain name in PUBLIC_BASE_URL, not an IP address"
+    fi
+fi
 
 # --- CLINIC_ACME_WEBROOT (HTTP-01 webroot, provided mode only) -------------------
 acme=${CLINIC_ACME_WEBROOT:-false}
