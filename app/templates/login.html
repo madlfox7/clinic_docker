@@ -27,13 +27,11 @@
   <div class="mb-3"><label class="form-label w-100">Password: <input class="form-control" name="password" type="password" required></label></div>
   <button class="btn btn-primary w-100" type="submit">Login</button>
 </form>
-{% if unverified or registered or notice in ("mail_failed", "resent") %}
 <form class="mt-3" method="post" action="/resend-verification">
   <input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}">
   <div class="mb-2"><label class="form-label w-100">Send a new confirmation link to: <input class="form-control" name="email" type="email" maxlength="254" required></label></div>
   <button class="btn btn-outline-primary w-100" type="submit">Resend confirmation email</button>
 </form>
-{% endif %}
 <p class="mt-3 mb-1"><a href="/register">Create a patient account</a></p>
 <p class="mb-0"><a href="/forgot-password">Forgot password?</a></p>
 {% endif %}

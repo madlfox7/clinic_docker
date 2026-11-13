@@ -479,3 +479,93 @@ def test_register_route_and_login_page_have_no_taken_answer():
     assert "already exists" not in body and "409" not in body
     assert "exc_info" not in body and "log.exception" not in body[body.index("send_existing_account_notice"):]
     assert "Account created" not in (ROOT / "app" / "templates" / "login.html").read_text()
+
+
+# --- 2.5 One answer for every failed sign-in ----------------------------------
+
+LOGIN_FAILED = "Invalid email or password. If you have just registered, confirm your email first."
+CSRF_VALUE = re.compile(r'name="csrf_token" value="[^"]*"')
+
+
+def _attempts(email: str) -> str:
+    return _psql(
+        "SELECT coalesce(sum(failed_attempts), 0) FROM login_attempts "
+        f"WHERE email_fingerprint = public.digest('{email}', 'sha256')"
+    )[0]
+
+
+def _pending_account(prefix: str, password: str = NEW_PASSWORD) -> str:
+    email = _unique(prefix)
+    with _client(follow_redirects=False) as c:
+        assert _register_raw(c, email, password).status_code == 303
+    return email
+
+
+def test_every_failed_sign_in_gets_the_same_answer():
+    pending = _pending_account("login-pending")
+    blocked = _pending_account("login-blocked")
+    try:
+        confirm_registration(blocked)
+        _psql(f"UPDATE users SET blocked = TRUE WHERE email = '{blocked}'")
+        attempts = [
+            (pending, NEW_PASSWORD),
+            (_unique("login-nobody"), NEW_PASSWORD),
+            (PAT, "wrong-password-2026"),
+            (blocked, NEW_PASSWORD),
+            ("not-an-email", NEW_PASSWORD),
+        ]
+        with _client(follow_redirects=False) as c:
+            c.get("/login")
+            answers = []
+            for email, password in attempts:
+                page = c.post("/login", data={"email": email, "password": password})
+                answers.append((page.status_code, CSRF_VALUE.sub("", page.text)))
+            assert c.get("/me").status_code in (302, 303)
+        assert answers[0][0] == 401 and LOGIN_FAILED in answers[0][1]
+        assert all(answer == answers[0] for answer in answers), [a[0] for a in answers]
+        assert "Please confirm your email" not in answers[0][1]
+    finally:
+        _drop_user(pending)
+        _drop_user(blocked)
+        _psql(f"DELETE FROM login_attempts WHERE email_fingerprint = public.digest('{PAT}', 'sha256')")
+
+
+def test_unconfirmed_right_password_is_counted_and_journaled_as_a_failure():
+    email = _pending_account("login-count")
+    try:
+        user_id = _psql(f"SELECT id FROM users WHERE email = '{email}'")[0]
+        with _client() as c:
+            first = c.post("/login", data={"email": email, "password": NEW_PASSWORD})
+            assert first.status_code == 401
+        assert _attempts(email) == "1"
+        assert _psql(
+            "SELECT reason FROM audit_events WHERE action = 'auth.login.failure' "
+            f"AND actor_user_id = {user_id}"
+        ) == ["unverified"]
+        assert _psql(
+            f"SELECT count(*) FROM audit_events WHERE action = 'auth.login.success' AND actor_user_id = {user_id}"
+        ) == ["0"]
+        with _client() as c:
+            codes = [c.post("/login", data={"email": email, "password": NEW_PASSWORD}).status_code
+                     for _ in range(5)]
+        assert codes == [401] * 4 + [429], codes
+        _psql(f"DELETE FROM login_attempts WHERE email_fingerprint = public.digest('{email}', 'sha256')")
+        with _client() as c:
+            c.post("/login", data={"email": email, "password": NEW_PASSWORD})
+        assert _attempts(email) == "1"
+        confirm_registration(email)
+        with _client() as c:
+            done = c.post("/login", data={"email": email, "password": NEW_PASSWORD})
+            assert done.url.path == "/me"
+        assert _attempts(email) == "0"
+    finally:
+        _drop_user(email)
+
+
+def test_login_page_always_offers_the_resend_form_to_guests():
+    with _client() as c:
+        page = c.get("/login")
+        assert page.status_code == 200 and 'action="/resend-verification"' in page.text
+    source = (ROOT / "app" / "routes_auth.py").read_text()
+    assert "Please confirm your email before signing in" not in source
+    assert source.count("LOGIN_FAILED") >= 3

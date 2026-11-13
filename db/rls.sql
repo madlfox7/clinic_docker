@@ -777,26 +777,18 @@ BEGIN
 
   password_matches := public.crypt(password_to_check, stored_hash) = stored_hash;
 
-  -- Branch order: rate limit, one crypt, bad credentials, blocked (answered
-  -- exactly like bad credentials), unverified email, success. blocked always
-  -- wins over unverified. Exactly one journal row in every branch keeps the
-  -- timing equal.
+  -- Branch order: rate limit, one crypt, success, then one failure path for
+  -- everything else. Success needs the right password on an account that is
+  -- neither blocked nor waiting for email confirmation. Unknown email, wrong
+  -- password, blocked and unverified accounts get the same answer (no row,
+  -- counter +1, one journal row), so a failed sign-in does not tell whether
+  -- the email is registered. The "unverified" column stays for the signature
+  -- and is always FALSE.
   IF user_found AND password_matches AND stored_hash IS DISTINCT FROM dummy_hash
-     AND NOT matched_blocked THEN
-    -- The password was right: the attempt counter is cleared as on success.
+     AND NOT matched_blocked AND matched_verified THEN
     DELETE FROM public.login_attempts
     WHERE email_fingerprint = email_key
       AND source_fingerprint = source_key;
-    IF NOT matched_verified THEN
-      -- No session until the email is confirmed; only a marker, no account data.
-      PERFORM public.record_auth_event(
-        'auth.login.failure', matched_id, matched_role, 'unverified', candidate_source
-      );
-      RETURN QUERY
-      SELECT NULL::integer, NULL::text, NULL::text, NULL::boolean,
-             NULL::bigint, FALSE, TRUE;
-      RETURN;
-    END IF;
     PERFORM public.record_auth_event(
       'auth.login.success', matched_id, matched_role, NULL, candidate_source
     );
@@ -806,10 +798,10 @@ BEGIN
     RETURN;
   END IF;
 
-  -- A blocked account with the right password takes the bad-credentials path
-  -- as a whole (attempt counter, one journal row, no row returned), so the
-  -- answer does not tell that the email exists and is blocked. Unknown email:
-  -- no account id and no email in the journal.
+  -- Blocked or unverified accounts with the right password take the
+  -- bad-credentials path as a whole (attempt counter, one journal row, no row
+  -- returned); only the journal reason differs, blocked wins over unverified.
+  -- Unknown email: no account id and no email in the journal.
   PERFORM public.record_auth_event(
     'auth.login.failure',
     CASE WHEN user_found THEN matched_id END,
@@ -818,6 +810,9 @@ BEGIN
       WHEN user_found AND password_matches
            AND stored_hash IS DISTINCT FROM dummy_hash AND matched_blocked
         THEN 'blocked'
+      WHEN user_found AND password_matches
+           AND stored_hash IS DISTINCT FROM dummy_hash AND NOT matched_verified
+        THEN 'unverified'
       ELSE 'bad_credentials'
     END,
     candidate_source

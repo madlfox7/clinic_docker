@@ -364,7 +364,7 @@ def test_guest_and_api_roles_have_no_profile_or_user_insert():
 
 # --- R2-A-reg-no-email-confirm -----------------------------------------------
 
-CONFIRM_FIRST = "Please confirm your email before signing in."
+LOGIN_FAILED = "Invalid email or password. If you have just registered, confirm your email first."
 RESENT = "If this email belongs to an unconfirmed account, we sent a new link."
 NEUTRAL_INVALID = "This confirmation link is invalid or already used. If you already confirmed your email, sign in."
 REG_PASSWORD = "Confirm-Check-2026!"
@@ -447,18 +447,20 @@ def test_registration_mails_once_and_sign_in_waits_for_confirmation():
             for _ in range(2):
                 c.post("/login", data={"email": email, "password": "wrong-password"})
             page = c.post("/login", data={"email": email, "password": REG_PASSWORD})
-            assert page.status_code == 403 and CONFIRM_FIRST in page.text
+            # A right password on an unconfirmed account is a failed sign-in
+            # like any other: 401, the shared text, the counter is not cleared.
+            assert page.status_code == 401 and LOGIN_FAILED in page.text
             assert 'action="/resend-verification"' in page.text
             assert c.get("/me").url.path == "/login"
         assert _psql(
-            f"SELECT count(*) FROM login_attempts WHERE email_fingerprint = public.digest('{email}', 'sha256')"
-        ) == ["0"]
+            f"SELECT sum(failed_attempts) FROM login_attempts WHERE email_fingerprint = public.digest('{email}', 'sha256')"
+        ) == ["3"]
         assert _psql(
             "SELECT reason FROM audit_events WHERE action = 'auth.login.failure' "
             f"AND actor_user_id = {user_id} ORDER BY id DESC LIMIT 1"
         ) == ["unverified"]
         wrong = _client().post("/login", data={"email": email, "password": "wrong-password"})
-        assert wrong.status_code == 401 and CONFIRM_FIRST not in wrong.text
+        assert wrong.status_code == 401 and LOGIN_FAILED in wrong.text
 
         token = latest_verification_token(email)
         with _client() as c:
@@ -693,8 +695,7 @@ def test_blocked_unconfirmed_account_answers_401_not_403():
         _psql(f"UPDATE users SET blocked = TRUE WHERE email = '{email}'")
         with _client() as c:
             page = c.post("/login", data={"email": email, "password": REG_PASSWORD})
-            assert page.status_code == 401 and INVALID in page.text
-            assert CONFIRM_FIRST not in page.text and 'action="/resend-verification"' not in page.text
+            assert page.status_code == 401 and LOGIN_FAILED in page.text
         token = latest_verification_token(email)
         with _client() as c:
             assert c.post("/verify-email", data={"token": token}).status_code == 400

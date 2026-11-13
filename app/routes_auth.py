@@ -71,6 +71,9 @@ DEFAULT_REGISTRATION_PASSWORDS = {
 }
 SAME_PASSWORD_ERROR = "Choose a password different from your current one."
 EDGE_SPACE_ERROR = "Password must not start or end with a space."
+# One answer for every failed sign-in (unknown email, wrong password, blocked
+# or unconfirmed account), so the login form does not tell who is registered.
+LOGIN_FAILED = "Invalid email or password. If you have just registered, confirm your email first."
 
 
 def has_edge_space(password: str) -> bool:
@@ -109,7 +112,6 @@ def _login_page(
     password_reset: bool = False,
     doctor_id: int | None = None,
     expired: bool = False,
-    unverified: bool = False,
     notice: str | None = None,
 ):
     return templates.TemplateResponse(
@@ -123,8 +125,6 @@ def _login_page(
             "email": email,
             "registered": registered,
             "password_reset": password_reset,
-            # Only after a right password for an unconfirmed account: offer a resend.
-            "unverified": unverified,
             "notice": notice,
             # Only a validated integer ever reaches the form, never the raw value.
             "doctor_id": doctor_id,
@@ -476,14 +476,14 @@ def login(
         normalized_email is None
         or not within_length(password, MAX_PASSWORD_LENGTH)
     ):
-        return _login_page(request, "Invalid email or password", 401, doctor_id=doctor_id)
+        return _login_page(request, LOGIN_FAILED, 401, doctor_id=doctor_id)
     client_source = client_ip(request)
     conn = db()
     try:
         with conn.cursor() as cur:
             cur.execute(
                 """
-                SELECT id, email, role, blocked, auth_version, rate_limited, unverified
+                SELECT id, email, role, blocked, auth_version, rate_limited
                 FROM public.authenticate_user(%s, %s, %s)
                 """,
                 (normalized_email, password, client_source),
@@ -493,7 +493,7 @@ def login(
     finally:
         conn.close()
     if not row:
-        return _login_page(request, "Invalid email or password", 401, doctor_id=doctor_id)
+        return _login_page(request, LOGIN_FAILED, 401, doctor_id=doctor_id)
     if row[5]:
         response = _login_page(
             request,
@@ -503,14 +503,6 @@ def login(
         )
         response.headers["Retry-After"] = "900"
         return response
-    if row[6]:
-        return _login_page(
-            request,
-            "Please confirm your email before signing in.",
-            403,
-            doctor_id=doctor_id,
-            unverified=True,
-        )
     request.session.clear()
     signed_in_at = int(time.time())
     request.session["user_id"] = row[0]
@@ -581,10 +573,10 @@ def resend_verification(request: Request, email: str = Form("")):
     if status == "blocked":
         return _login_page(request, "Account is blocked", 403)
     if contains_nul(email) or any(char in email for char in "\r\n"):
-        return _login_page(request, "Enter a valid email address.", 400, unverified=True)
+        return _login_page(request, "Enter a valid email address.", 400)
     normalized_email = _normalize_registration_email(email)
     if normalized_email is None:
-        return _login_page(request, "Enter a valid email address.", 400, unverified=True)
+        return _login_page(request, "Enter a valid email address.", 400)
     row = None
     try:
         conn = db()
