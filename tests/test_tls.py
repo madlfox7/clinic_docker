@@ -950,6 +950,7 @@ def test_reload_replaces_the_stand_certificate_without_a_restart(tmp_path):
     key, crt = _issue_leaf(tmp_path, tls_live, "reload", "DNS:localhost, IP:127.0.0.1, IP:::1", 90)
     new_serial = _openssl("x509", "-noout", "-serial", "-in", str(crt)).stdout.strip()
     backups_before = set(tls_live.glob("backup-*"))
+    backup = None
     with _https_client() as keep_alive:
         assert keep_alive.get("/login").status_code == 200
         try:
@@ -968,8 +969,14 @@ def test_reload_replaces_the_stand_certificate_without_a_restart(tmp_path):
             backup = new_backups.pop()
             assert all(oct(f.stat().st_mode & 0o777) == "0o600" for f in backup.iterdir())
         finally:
-            restore = _run_reload(ROOT, backup / "server.key", backup / "server.crt", env)
-            assert restore.returncode == 0, restore.stderr
+            if backup is None:
+                # The script failed before or after its own backup: take the
+                # backup it made, if any; without one the live files are untouched.
+                made = sorted(set(tls_live.glob("backup-*")) - backups_before)
+                backup = made[0] if made else None
+            if backup is not None and _shas(tls_live) != before:
+                restore = _run_reload(ROOT, backup / "server.key", backup / "server.crt", env)
+                assert restore.returncode == 0, restore.stderr
     assert _shas(tls_live) == before
     ids = lambda text: sorted(line.split()[-1] for line in text.splitlines() if line.startswith("proxy "))
     assert ids(_compose("ps", "--format", "{{.Service}} {{.RunningFor}} {{.ID}}").stdout) == ids(started)
@@ -992,7 +999,8 @@ def _provided_proxy(tmp_path: pathlib.Path, acme: bool):
         f"  tls_cert:\n    file: {crt}\n"
         f"  tls_key:\n    file: {key}\n"
     )
-    name = f"fixer-tlstest-{os.urandom(4).hex()}"
+    project = os.environ.get("COMPOSE_PROJECT_NAME") or ROOT.name
+    name = f"{project}-tlstest-{os.urandom(4).hex()}"
     done = _compose("-f", str(ROOT / "docker-compose.yml"), "-f", str(override), "run", "-d", "--rm", "--no-deps",
                     "--name", name, "-e", "CLINIC_TLS_MODE=provided", "-e", f"PUBLIC_BASE_URL=https://{PROD_HOST}",
                     "-e", f"CLINIC_ACME_WEBROOT={'true' if acme else 'false'}",
@@ -1030,12 +1038,13 @@ def test_provided_proxy_serves_only_its_own_name(tmp_path):
         with socket.create_connection((ip, 8443), timeout=5) as raw:
             with context.wrap_socket(raw, server_hostname=PROD_HOST) as tls:
                 assert ("DNS", PROD_HOST) in tls.getpeercert()["subjectAltName"]
-        loose = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
-        loose.load_verify_locations(str(ca / "ca.crt"))
-        loose.check_hostname = True
-        with pytest.raises(ssl.SSLError):
+        # A foreign SNI is refused by the server (ssl_reject_handshake: alert
+        # unrecognized_name), before any certificate reaches the client.
+        with pytest.raises(ssl.SSLError) as refused:
             with socket.create_connection((ip, 8443), timeout=5) as raw:
-                loose.wrap_socket(raw, server_hostname="other.example")
+                context.wrap_socket(raw, server_hostname="other.example")
+        assert not isinstance(refused.value, ssl.SSLCertVerificationError), refused.value
+        assert "UNRECOGNIZED_NAME" in str(refused.value), refused.value
         config = subprocess.run(["docker", "exec", name, "cat", "/tmp/nginx/clinic/server_name.conf"],
                                 capture_output=True, text=True).stdout
         assert config.strip() == f"server_name {PROD_HOST};"
