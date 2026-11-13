@@ -153,6 +153,9 @@ services:
       CLINIC_HSTS_MAX_AGE: ${CLINIC_HSTS_MAX_AGE:-3600}
       CLINIC_TLS_MODE: ${CLINIC_TLS_MODE:-local}
       CLINIC_ACME_WEBROOT: ${CLINIC_ACME_WEBROOT:-false}
+      # 1: PUBLIC_BASE_URL is a public tunnel (ngrok demo) in front of the
+      # local stand; local mode only. Default 0.
+      CLINIC_PUBLIC_TUNNEL: ${CLINIC_PUBLIC_TUNNEL:-0}
     depends_on:
       - api
     read_only: true

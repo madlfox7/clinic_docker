@@ -188,7 +188,7 @@ else
   fi
 fi
 tls_check_pair "$TLS_DIR/server.key" "$TLS_DIR/server.crt"
-echo "check   $TLS_DIR/server.crt: key, dates, $URL_HOST in SAN, chain ($TLS_MODE)"
+echo "check   $TLS_DIR/server.crt: key, dates, $CERT_HOST in SAN, chain ($TLS_MODE)"
 tls_cleanup
 TLS_TMP_FILES=
 

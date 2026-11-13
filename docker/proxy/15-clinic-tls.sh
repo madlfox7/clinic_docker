@@ -85,6 +85,40 @@ case $rest in
     *) fail "PUBLIC_BASE_URL has a bad host" ;;
 esac
 origin="https://$host$rest"
+# --- CLINIC_PUBLIC_TUNNEL: PUBLIC_BASE_URL is a tunnel (ngrok demo) -----------
+tunnel=${CLINIC_PUBLIC_TUNNEL:-0}
+case $tunnel in
+    1|true) tunnel=1 ;;
+    0|false) tunnel=0 ;;
+    *) fail "CLINIC_PUBLIC_TUNNEL must be 1 or 0" ;;
+esac
+host_is_ip=
+case $host in
+    \[*) host_is_ip=yes ;;
+    *[!0-9.]*) ;;
+    *) host_is_ip=yes ;;
+esac
+if [ "$mode" = local ]; then
+    if [ "$tunnel" = 1 ]; then
+        # The public domain of the tunnel on the default port; the tunnel
+        # itself connects to https://localhost:<published port>.
+        [ -z "$rest" ] || [ "$rest" = ":443" ] || fail "CLINIC_PUBLIC_TUNNEL=1 needs PUBLIC_BASE_URL without a port (443)"
+        [ -z "$host_is_ip" ] || fail "CLINIC_PUBLIC_TUNNEL=1 needs a domain name in PUBLIC_BASE_URL, not an IP address"
+        case $host in
+            localhost|*.localhost) fail "CLINIC_PUBLIC_TUNNEL=1 needs the public tunnel domain in PUBLIC_BASE_URL, not localhost" ;;
+            *.*) ;;
+            *) fail "CLINIC_PUBLIC_TUNNEL=1 needs a full domain name in PUBLIC_BASE_URL" ;;
+        esac
+    else
+        # Without a tunnel the stand is reached under the names of its certificate.
+        case $host in
+            localhost|127.0.0.1|\[::1\]) ;;
+            *) fail "PUBLIC_BASE_URL host must be localhost, 127.0.0.1 or [::1] with the stand CA (set CLINIC_PUBLIC_TUNNEL=1 for a tunnel)" ;;
+        esac
+    fi
+elif [ "$tunnel" = 1 ]; then
+    fail "CLINIC_PUBLIC_TUNNEL=1 works only with CLINIC_TLS_MODE=local"
+fi
 if [ "$mode" = provided ]; then
     case $host in
         \[*|*[!0-9.]*) ;;
@@ -149,4 +183,4 @@ else
     : > "$OUT/acme.conf"
 fi
 
-echo "15-clinic-tls.sh: mode $mode, redirect to $origin, HSTS max-age=$max_age, ACME webroot $acme"
+echo "15-clinic-tls.sh: mode $mode, tunnel $tunnel, redirect to $origin, HSTS max-age=$max_age, ACME webroot $acme"

@@ -531,7 +531,9 @@ def test_proxy_refuses_to_start_with_a_bad_value(env):
 
 
 def test_proxy_config_is_valid_with_good_values():
-    for env in ({}, {"CLINIC_HSTS_MAX_AGE": "31536000", "PUBLIC_BASE_URL": "https://clinic.example.org"},
+    for env in ({}, {"CLINIC_HSTS_MAX_AGE": "31536000", "PUBLIC_BASE_URL": "https://clinic.example.org",
+                 "CLINIC_TLS_MODE": "provided"},
+                {"CLINIC_PUBLIC_TUNNEL": "1", "PUBLIC_BASE_URL": "https://demo-clinic.ngrok-free.app"},
                 {"PUBLIC_BASE_URL": "https://127.0.0.1:8450"}, {"PUBLIC_BASE_URL": "https://[::1]:8450"}):
         done = _proxy_script(**env)
         assert done.returncode == 0, (env, done.stderr[-2000:])
@@ -1164,3 +1166,80 @@ def test_provided_mode_refuses_an_ip_address(tmp_path, url):
     assert done.returncode != 0 and "provided mode needs a domain name" in done.stderr, done.stderr
     proxy = _proxy_script(CLINIC_TLS_MODE="provided", PUBLIC_BASE_URL=url)
     assert proxy.returncode != 0 and "provided mode needs a domain name" in proxy.stdout + proxy.stderr
+
+
+
+# --- Tunnel mode (ngrok demo, CLINIC_PUBLIC_TUNNEL) ---------------------------------
+
+TUNNEL_URL = "https://demo-clinic.ngrok-free.app"
+
+
+def _tunnel_env(**env):
+    base = {"PUBLIC_BASE_URL": TUNNEL_URL, "CLINIC_PUBLIC_TUNNEL": "1", "CLINIC_PROXY_PORT": "8082",
+            "CLINIC_PROXY_TLS_PORT": "8452", "SESSION_HTTPS_ONLY": ""}
+    base.update(env)
+    return base
+
+
+def test_tunnel_url_needs_the_flag(tmp_path):
+    root = _script_copy(tmp_path)
+    done = _run_init(root, **_tunnel_env(CLINIC_PUBLIC_TUNNEL=""))
+    assert done.returncode != 0 and "point to port 443" in done.stderr, done.stderr
+    proxy = _proxy_script(PUBLIC_BASE_URL=TUNNEL_URL)
+    assert proxy.returncode != 0 and "must be localhost, 127.0.0.1 or [::1]" in proxy.stdout + proxy.stderr
+
+
+def test_tunnel_flag_accepts_the_public_domain_and_checks_the_leaf_for_localhost(tmp_path):
+    root = _script_copy(tmp_path)
+    for url in (TUNNEL_URL, TUNNEL_URL + "/", TUNNEL_URL + ":443"):
+        done = _run_init(root, **_tunnel_env(PUBLIC_BASE_URL=url))
+        assert done.returncode == 0, (url, done.stderr)
+        assert "is a tunnel to https://localhost:8452" in done.stdout
+        assert "localhost in SAN" in done.stdout
+    check = subprocess.run(["sh", str(root / "scripts" / "tls_check.sh")], cwd="/", capture_output=True, text=True,
+                           env={**{k: v for k, v in os.environ.items() if not k.startswith("CLINIC_")}, **_tunnel_env()})
+    assert check.returncode == 0, check.stderr
+    assert "\nOK      " in check.stdout and "localhost in SAN" in check.stdout, check.stdout
+    proxy = _proxy_script(PUBLIC_BASE_URL=TUNNEL_URL, CLINIC_PUBLIC_TUNNEL="1")
+    assert proxy.returncode == 0, proxy.stderr[-1500:]
+
+
+@pytest.mark.parametrize("env, needle", [
+    ({"PUBLIC_BASE_URL": "http://demo-clinic.ngrok-free.app"}, "https://"),
+    ({"PUBLIC_BASE_URL": "https://203.0.113.7"}, "not the IP address"),
+    ({"PUBLIC_BASE_URL": "https://[2001:db8::1]"}, "not the IP address"),
+    ({"PUBLIC_BASE_URL": "https://localhost"}, "not localhost"),
+    ({"PUBLIC_BASE_URL": "https://app.localhost"}, "not app.localhost"),
+    ({"PUBLIC_BASE_URL": "https://demo-clinic.ngrok-free.app:8452"}, "without a port"),
+    ({"PUBLIC_BASE_URL": "https://intranet"}, "full domain name"),
+    ({"CLINIC_PUBLIC_TUNNEL": "yes"}, "must be 1 or 0"),
+], ids=["http", "ipv4", "ipv6", "localhost", "sub-localhost", "port", "single-label", "bad-flag"])
+def test_tunnel_flag_refuses_anything_but_a_public_https_domain(tmp_path, env, needle):
+    root = _script_copy(tmp_path)
+    done = _run_init(root, **_tunnel_env(**env))
+    assert done.returncode != 0 and needle in done.stderr, done.stderr
+    if env.get("PUBLIC_BASE_URL", "").startswith("https://"):
+        proxy = _proxy_script(**_tunnel_env(**env))
+        assert proxy.returncode != 0 and "15-clinic-tls.sh:" in proxy.stdout + proxy.stderr
+
+
+def test_tunnel_flag_only_in_local_mode(tmp_path):
+    root, ca, _ = _provided_root(tmp_path)
+    done = _run_init(root, **_provided_env(ca, CLINIC_PUBLIC_TUNNEL="1"))
+    assert done.returncode != 0 and "works only with CLINIC_TLS_MODE=local" in done.stderr, done.stderr
+    proxy = _proxy_script(CLINIC_TLS_MODE="provided", CLINIC_PUBLIC_TUNNEL="1", PUBLIC_BASE_URL="https://clinic.example.org")
+    assert proxy.returncode != 0 and "works only with CLINIC_TLS_MODE=local" in proxy.stdout + proxy.stderr
+
+
+def test_stand_answers_a_tunnel_host_over_localhost_sni():
+    """What ngrok does: TLS to localhost:<port> with SNI localhost (verified
+    against the stand CA) and the public tunnel name in Host."""
+    host = TUNNEL_URL.removeprefix("https://")
+    with httpx.Client(base_url=f"https://localhost:{_tls_port()}", verify=_strict_context(),
+                      follow_redirects=False, timeout=10, headers={"Host": host}) as c:
+        page = c.get("/login")
+        assert page.status_code == 200 and "<form" in page.text
+        assert page.headers.get_list("strict-transport-security") == [_hsts()]
+        assert re.search(r";\s*secure(;|$)", page.headers["set-cookie"], re.I)
+        slash = c.get("/doctors/")
+        assert slash.status_code in (307, 308) and slash.headers["location"] == "/doctors"

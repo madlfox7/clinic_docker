@@ -81,6 +81,18 @@ tls_settings() {
     *) URL_PORT=443; URL_HOST="$url_authority" ;;
   esac
   URL_HOST="${URL_HOST#[}"
+  # CLINIC_PUBLIC_TUNNEL: the public address is a tunnel (ngrok demo) in
+  # front of the local stand; see tls_check_settings.
+  PUBLIC_TUNNEL="$(env_or_dotenv CLINIC_PUBLIC_TUNNEL)"
+  case "$PUBLIC_TUNNEL" in
+    1|true) PUBLIC_TUNNEL=1 ;;
+    ''|0|false) PUBLIC_TUNNEL=0 ;;
+    *) tls_fail "CLINIC_PUBLIC_TUNNEL must be 1 or 0, got '$PUBLIC_TUNNEL'" ;;
+  esac
+  # The name the stand certificate must carry: the PUBLIC_BASE_URL host, or
+  # localhost behind a tunnel (the tunnel connects to https://localhost:<port>).
+  CERT_HOST="$URL_HOST"
+  [ "$PUBLIC_TUNNEL" = 0 ] || CERT_HOST=localhost
 }
 
 # A mismatch is an error in local mode and a warning in provided mode
@@ -103,6 +115,27 @@ tls_host_is_ip() {
   return 0
 }
 
+# Tunnel mode: only with the stand CA (local). The public address must be a
+# real https domain on the default port; the port check against the
+# published HTTPS port is skipped for it, nothing else is.
+tls_check_tunnel() {
+  [ "$TLS_MODE" = local ] || tls_fail "CLINIC_PUBLIC_TUNNEL=1 works only with CLINIC_TLS_MODE=local"
+  case "$PUBLIC_URL" in
+    https://*) ;;
+    *) tls_fail "CLINIC_PUBLIC_TUNNEL=1 needs an https:// PUBLIC_BASE_URL" ;;
+  esac
+  [ "$URL_PORT" = 443 ] || tls_fail "CLINIC_PUBLIC_TUNNEL=1 needs PUBLIC_BASE_URL without a port (443), got port $URL_PORT"
+  if tls_host_is_ip "$URL_HOST"; then
+    tls_fail "CLINIC_PUBLIC_TUNNEL=1 needs a domain name in PUBLIC_BASE_URL, not the IP address $URL_HOST"
+  fi
+  case "$URL_HOST" in
+    localhost|*.localhost) tls_fail "CLINIC_PUBLIC_TUNNEL=1 needs the public tunnel domain in PUBLIC_BASE_URL, not $URL_HOST" ;;
+    *.*) ;;
+    *) tls_fail "CLINIC_PUBLIC_TUNNEL=1 needs a full domain name in PUBLIC_BASE_URL, got $URL_HOST" ;;
+  esac
+  echo "tunnel  PUBLIC_BASE_URL $PUBLIC_URL is a tunnel to https://localhost:${TLS_PORT:-8450}; the stand certificate is checked for localhost"
+}
+
 tls_check_settings() {
   if [ "$TLS_MODE" = provided ] && tls_host_is_ip "$URL_HOST"; then
     tls_fail "provided mode needs a domain name in PUBLIC_BASE_URL, not the IP address $URL_HOST (public certificates and SNI are issued for names)"
@@ -119,7 +152,9 @@ tls_check_settings() {
     tls_port_problem "CLINIC_PROXY_PORT=$PROXY_PORT but CLINIC_PROXY_TLS_PORT is empty, so HTTPS would take 8450 of the default stand; set CLINIC_PROXY_TLS_PORT (HTTP port + 370)"
   fi
   [ -n "$TLS_PORT" ] || TLS_PORT=8450
-  if [ "$URL_PORT" != "$TLS_PORT" ]; then
+  if [ "$PUBLIC_TUNNEL" = 1 ]; then
+    tls_check_tunnel
+  elif [ "$URL_PORT" != "$TLS_PORT" ]; then
     tls_port_problem "redirect and mail links point to port $URL_PORT (PUBLIC_BASE_URL), proxy publishes HTTPS on $TLS_PORT (CLINIC_PROXY_TLS_PORT)"
   fi
 }
@@ -166,8 +201,8 @@ tls_check_pair() {
   if ! openssl x509 -checkend 1814400 -noout -in "$leaf_only" >/dev/null 2>&1; then
     tls_warn "$cert_label expires within 21 days"
   fi
-  tls_name_matches "$leaf_only" "$URL_HOST" \
-    || tls_fail "$URL_HOST (PUBLIC_BASE_URL) is not in certificate SAN of $cert_label"
+  tls_name_matches "$leaf_only" "$CERT_HOST" \
+    || tls_fail "$CERT_HOST (PUBLIC_BASE_URL) is not in certificate SAN of $cert_label"
   if [ "$TLS_MODE" = local ]; then
     openssl verify -x509_strict -CAfile "$TLS_DIR/ca.crt" "$leaf_only" >/dev/null 2>&1 \
       || tls_fail "$cert_label does not verify against $TLS_DIR/ca.crt"

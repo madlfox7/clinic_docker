@@ -17,6 +17,7 @@ proxy_env = proxy.get("environment") or {}
 api_env = services.get("api", {}).get("environment") or {}
 for name, value in (("PUBLIC_BASE_URL", proxy_env.get("PUBLIC_BASE_URL")),
                     ("CLINIC_TLS_MODE", proxy_env.get("CLINIC_TLS_MODE")),
+                    ("CLINIC_PUBLIC_TUNNEL", proxy_env.get("CLINIC_PUBLIC_TUNNEL")),
                     ("SESSION_HTTPS_ONLY", api_env.get("SESSION_HTTPS_ONLY"))):
     if value is not None:
         env[name] = str(value)

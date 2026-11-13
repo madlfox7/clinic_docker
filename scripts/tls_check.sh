@@ -25,4 +25,4 @@ if [ "$TLS_MODE" = local ]; then
   fi
 fi
 tls_check_pair "$key" "$cert"
-echo "OK      $cert: key matches, $(tls_days_left "$cert") days left, $URL_HOST in SAN, chain verified ($TLS_MODE); HTTPS port $TLS_PORT"
+echo "OK      $cert: key matches, $(tls_days_left "$cert") days left, $CERT_HOST in SAN, chain verified ($TLS_MODE); HTTPS port $TLS_PORT"
