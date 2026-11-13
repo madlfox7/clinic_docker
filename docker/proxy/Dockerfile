@@ -2,3 +2,4 @@ FROM nginxinc/nginx-unprivileged:stable-alpine@sha256:ed04ec1ff34502c339ee5c3ae3
 
 COPY docker/proxy/nginx.conf /etc/nginx/conf.d/default.conf
 COPY docker/proxy/security_headers.conf docker/proxy/html_no_store.conf /etc/nginx/clinic/
+COPY docker/proxy/errors/clinic-unavailable.html /etc/nginx/clinic/errors/

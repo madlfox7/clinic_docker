@@ -1,8 +1,10 @@
 import logging
 import re
+import secrets
 
 from fastapi import Depends, FastAPI, Request
 from fastapi.exceptions import RequestValidationError
+from fastapi.responses import HTMLResponse
 from starlette.exceptions import HTTPException as StarletteHTTPException
 from fastapi.staticfiles import StaticFiles
 from starlette.middleware.sessions import SessionMiddleware
@@ -95,20 +97,23 @@ _ERROR_TEXT = {
     404: ("Page not found", "The page you requested does not exist."),
     405: ("Method not allowed", "This action is not available for this address."),
     422: ("Invalid input", "Some submitted values are missing or invalid. Please check the form and try again."),
+    500: ("Something went wrong", "The request could not be completed. Please try again later. If the problem persists, contact the clinic."),
 }
 
 
-def _error_page(request: Request, status_code: int, headers=None, message=None):
+def _error_page(request: Request, status_code: int, headers=None, message=None, load_role=True):
     title, default_message = _ERROR_TEXT.get(
         status_code, ("Request failed", "The request could not be completed.")
     )
     role = None
-    try:
-        user, status = load_session_user(request)
-        if status == "ok":
-            role = user["role"]
-    except Exception:
-        role = None
+    # load_role=False (unexpected errors): no database, no session change.
+    if load_role:
+        try:
+            user, status = load_session_user(request)
+            if status == "ok":
+                role = user["role"]
+        except Exception:
+            role = None
     return templates.TemplateResponse(
         request,
         "error.html",
@@ -145,6 +150,32 @@ async def medical_record_unreadable(request: Request, exc: FieldDecryptError):
 @app.exception_handler(RequestValidationError)
 async def html_validation_error(request: Request, exc: RequestValidationError):
     return _error_page(request, 422)
+
+
+_FALLBACK_500 = (
+    "<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\">"
+    "<title>Error</title></head><body><h1>Something went wrong</h1>"
+    "<p>Please try again later.</p></body></html>"
+)
+
+
+@app.exception_handler(Exception)
+async def unexpected_error(request: Request, exc: Exception):
+    # Details stay in the server log; the page shows only a short reference.
+    reference = secrets.token_hex(4)
+    log.exception(
+        "unexpected error ref=%s %s %s %s",
+        reference, request.method, request.url.path, type(exc).__name__,
+    )
+    try:
+        return _error_page(
+            request, 500,
+            message=f"The request could not be completed. Please try again later. Reference: {reference}.",
+            load_role=False,
+        )
+    except Exception:
+        log.exception("error page failed ref=%s", reference)
+        return HTMLResponse(_FALLBACK_500, status_code=500)
 
 
 app.include_router(auth_router)
