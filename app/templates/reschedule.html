@@ -12,6 +12,7 @@
   </dl>
   <p class="text-body-secondary mt-2 mb-0">Choose a new time with the same doctor and service. The current appointment is cancelled only when the new one is booked. For another doctor or service, cancel and book again.</p>
 </div></div>
+{% if error == "too_many" or limit_reached %}<div class="alert alert-danger" role="alert">{% if error == "too_many" %}<strong>Reschedule failed.</strong> {% endif %}You can reschedule up to 3 times a day. Cancel and book again, or call the clinic.</div>{% endif %}
 {% if error == "unavailable" %}<div class="alert alert-danger" role="alert"><strong>Reschedule failed.</strong> This slot is no longer available. Please choose another slot.</div>
 {% elif error == "overlap" %}<div class="alert alert-danger" role="alert"><strong>Reschedule failed.</strong> The new time overlaps another appointment of this patient.</div>
 {% elif error == "has_records" %}<div class="alert alert-danger" role="alert"><strong>Reschedule failed.</strong> This appointment already has medical records. Please contact the clinic.</div>

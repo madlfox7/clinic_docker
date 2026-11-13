@@ -812,3 +812,37 @@ BEGIN
   END IF;
 END
 $$;
+
+-- One reschedule event per old visit and per new visit (old_value and
+-- new_value are INTEGER). An old volume that already holds duplicates (only
+-- possible through direct SQL before this change) keeps starting: the index
+-- is skipped with a warning.
+DO $$
+BEGIN
+  IF to_regclass('public.audit_events_reschedule_old_unique') IS NULL THEN
+    IF EXISTS (SELECT old_value FROM public.audit_events
+               WHERE action = 'appointment.reschedule'
+               GROUP BY old_value HAVING count(*) > 1) THEN
+      RAISE WARNING 'duplicate appointment.reschedule old_value, unique index skipped';
+    ELSE
+      CREATE UNIQUE INDEX audit_events_reschedule_old_unique
+        ON public.audit_events (old_value) WHERE action = 'appointment.reschedule';
+    END IF;
+  END IF;
+  IF to_regclass('public.audit_events_reschedule_new_unique') IS NULL THEN
+    IF EXISTS (SELECT new_value FROM public.audit_events
+               WHERE action = 'appointment.reschedule'
+               GROUP BY new_value HAVING count(*) > 1) THEN
+      RAISE WARNING 'duplicate appointment.reschedule new_value, unique index skipped';
+    ELSE
+      CREATE UNIQUE INDEX audit_events_reschedule_new_unique
+        ON public.audit_events (new_value) WHERE action = 'appointment.reschedule';
+    END IF;
+  END IF;
+END
+$$;
+
+-- The daily patient reschedule limit counts these rows.
+CREATE INDEX IF NOT EXISTS audit_events_reschedule_actor_idx
+  ON audit_events (actor_user_id, created_at)
+  WHERE action = 'appointment.reschedule';

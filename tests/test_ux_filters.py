@@ -7,6 +7,7 @@ import uuid
 from pathlib import Path
 
 import httpx
+import pytest
 
 from tests.csrf_client import CsrfClient
 from tests.demo_secret import demo_password
@@ -24,6 +25,24 @@ REG = "reg@clinic.local"
 ADMIN = "admin@clinic.local"
 PAT_NAME, PAT_PHONE = "Narek Hakobyan", "+374 10 123456"
 RAW_DATETIME = re.compile(r"\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}")
+
+
+def age_patient_reschedules() -> None:
+    """Move patients' reschedule events 25 hours back (superuser psql, tests only).
+
+    Patients may make 3 moves in 24 hours and the volume survives between runs;
+    the limit is not raised for tests and the app has no bypass.
+    """
+    _psql(
+        "UPDATE audit_events SET created_at = created_at - INTERVAL '25 hours' "
+        "WHERE action = 'appointment.reschedule' AND actor_role = 'patient'"
+    )
+
+
+@pytest.fixture(autouse=True)
+def patient_reschedule_limit_reset():
+    age_patient_reschedules()
+    yield
 
 
 def _client(**kwargs):

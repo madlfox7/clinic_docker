@@ -3140,12 +3140,17 @@ BEGIN
     RAISE EXCEPTION 'invalid reschedule context' USING ERRCODE = '42501';
   END IF;
 
-  SELECT a.patient_user_id, a.doctor_id, a.slot_id, a.status, s.service_id
+  -- row_xmin: both rows must be written by this very transaction (the
+  -- cancel of the old visit and the insert of the new one), so a pair made
+  -- by hand in earlier transactions cannot be reported as a move.
+  SELECT a.patient_user_id, a.doctor_id, a.slot_id, a.status, s.service_id,
+         a.xmin AS row_xmin
   INTO old_row
   FROM public.appointments AS a
   JOIN public.slots AS s ON s.id = a.slot_id
   WHERE a.id = old_id;
-  SELECT a.patient_user_id, a.doctor_id, a.slot_id, a.status, s.service_id
+  SELECT a.patient_user_id, a.doctor_id, a.slot_id, a.status, s.service_id,
+         a.xmin AS row_xmin
   INTO new_row
   FROM public.appointments AS a
   JOIN public.slots AS s ON s.id = a.slot_id
@@ -3159,6 +3164,8 @@ BEGIN
      OR old_row.doctor_id <> new_row.doctor_id
      OR old_row.service_id <> new_row.service_id
      OR old_row.slot_id = new_row.slot_id
+     OR old_row.row_xmin IS DISTINCT FROM pg_current_xact_id()::xid
+     OR new_row.row_xmin IS DISTINCT FROM pg_current_xact_id()::xid
      OR (actor_role = 'patient' AND (
           old_row.patient_user_id <> actor_id
           OR NOT public.current_patient_is_active()))
@@ -3168,6 +3175,19 @@ BEGIN
             AND p.role = 'patient'
             AND NOT p.blocked)) THEN
     RAISE EXCEPTION 'reschedule pair is not allowed' USING ERRCODE = '42501';
+  END IF;
+
+  -- Daily patient limit (RESCHEDULE_DAILY_LIMIT in routes_booking.py), counted
+  -- under the patient's two-key lock (1, patient id), the same key the app
+  -- takes for booking and rescheduling; the lock is re-entrant in a session.
+  PERFORM pg_advisory_xact_lock(1::int, old_row.patient_user_id::int);
+  IF actor_role = 'patient' AND (
+       SELECT count(*) FROM public.audit_events
+       WHERE action = 'appointment.reschedule'
+         AND actor_user_id = actor_id
+         AND created_at > CURRENT_TIMESTAMP - INTERVAL '24 hours'
+     ) >= 3 THEN
+    RAISE EXCEPTION 'reschedule limit reached' USING ERRCODE = '42501';
   END IF;
 
   INSERT INTO public.audit_events (
@@ -3183,6 +3203,28 @@ $function$;
 REVOKE ALL ON FUNCTION public.record_appointment_reschedule(integer, integer) FROM PUBLIC;
 GRANT EXECUTE ON FUNCTION public.record_appointment_reschedule(integer, integer)
   TO app_patient, app_registrar;
+
+-- How many moves the signed-in patient made in the last 24 hours.
+CREATE OR REPLACE FUNCTION public.own_reschedules_last_day()
+RETURNS integer
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = pg_catalog, public, pg_temp
+AS $function$
+DECLARE
+  actor_id integer := NULLIF(current_setting('app.user_id', true), '')::integer;
+BEGIN
+  IF current_setting('role', true) IS DISTINCT FROM 'app_patient' OR actor_id IS NULL THEN
+    RAISE EXCEPTION 'invalid context' USING ERRCODE = '42501';
+  END IF;
+  RETURN (SELECT count(*) FROM public.audit_events
+          WHERE action = 'appointment.reschedule'
+            AND actor_user_id = actor_id
+            AND created_at > CURRENT_TIMESTAMP - INTERVAL '24 hours');
+END;
+$function$;
+REVOKE ALL ON FUNCTION public.own_reschedules_last_day() FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION public.own_reschedules_last_day() TO app_patient;
 
 COMMIT;
 

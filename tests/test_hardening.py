@@ -2,7 +2,11 @@
 move, daily patient limit, two-key advisory lock)."""
 import os
 import re
+import subprocess
+import threading
+import time
 import uuid
+from contextlib import contextmanager
 from pathlib import Path
 
 import httpx
@@ -15,12 +19,24 @@ from tests.registration import (
     registration_limit_reset,  # noqa: F401 (autouse)
 )
 from tests.test_ux_filters import (
+    ADMIN,
+    DOC,
     PAT,
+    PAT2,
+    REG,
+    _Setup,
     _as_role,
+    _book_sql,
+    _login,
+    _post_reschedule,
     _psql,
     _psql_try,
+    _reschedule_events,
     _run_migrate,
+    _status,
     _user_id,
+    age_patient_reschedules,
+    patient_reschedule_limit_reset,  # noqa: F401 (autouse)
 )
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -256,3 +272,392 @@ def test_registration_limit_db_failure_fails_closed_with_503():
     limit_at = body.index("note_registration_attempt")
     assert limit_at < body.index("pwd.hash(") and limit_at < body.index("public.register_patient(")
     assert body.index("Passwords do not match") < body.index("note_registration_attempt")
+
+
+# --- 3. Reschedule: one event per move, daily patient limit, own lock space ---
+
+FAKE_BASE = 2_100_000_000
+LIMIT_TEXT = "You can reschedule up to 3 times a day."
+
+
+@contextmanager
+def _pat_client():
+    with _client() as c:
+        _login(c, PAT)
+        yield c
+
+
+def _current_visit(s) -> int:
+    ids = ",".join(str(i) for i in s.slots + s.extra_slots)
+    rows = _psql(f"SELECT id FROM appointments WHERE slot_id IN ({ids}) AND status = 'scheduled' "
+                 f"AND patient_user_id = {s.patient} ORDER BY id DESC")
+    return int(rows[0])
+
+
+def _fake_events(actor_id: int, role: str, count: int) -> None:
+    """count reschedule events of actor_id made just now, on ids no visit has."""
+    base = FAKE_BASE + int(uuid.uuid4().int % 1_000_000) * 10
+    _psql(
+        "INSERT INTO audit_events (actor_user_id, actor_role, action, target_type, target_id, "
+        "old_value, new_value) "
+        f"SELECT {actor_id}, '{role}', 'appointment.reschedule', 'appointment', {base} + 2 * g + 1, "
+        f"{base} + 2 * g, {base} + 2 * g + 1 FROM generate_series(0, {count - 1}) AS g"
+    )
+
+
+def _drop_fake_events() -> None:
+    _psql(f"DELETE FROM audit_events WHERE action = 'appointment.reschedule' AND old_value >= {FAKE_BASE}")
+
+
+def _own_count(role: str, user_id: int) -> subprocess.CompletedProcess:
+    """stdout is only the count (the set_config line of _as_role is dropped)."""
+    result = _as_role(role, user_id, "SELECT public.own_reschedules_last_day()")
+    lines = [line for line in result.stdout.splitlines() if line.strip()]
+    result.stdout = lines[-1] if len(lines) > 1 else ""
+    return result
+
+
+def _rescheduled_mails() -> int:
+    found = httpx.get(f"{MAILPIT}/api/v1/search",
+                      params={"query": f'to:"{PAT}" subject:"Appointment rescheduled"'}, timeout=5)
+    found.raise_for_status()
+    return len(found.json().get("messages") or [])
+
+
+def _hand_move_sql(patient: int, old_id: int, slot_id: int, tail: str = "") -> str:
+    """One transaction as app_patient: cancel, insert, journal call (what the app does)."""
+    return (
+        f"BEGIN; SET LOCAL ROLE app_patient; SELECT set_config('app.user_id', '{patient}', true); "
+        f"UPDATE appointments SET status = 'cancelled' WHERE id = {old_id}; "
+        "INSERT INTO appointments (slot_id, patient_user_id, doctor_id, starts_at, ends_at, reserved_ends_at) "
+        f"SELECT s.id, {patient}, s.doctor_id, s.starts_at, "
+        "s.starts_at + make_interval(mins => s.duration_minutes), s.ends_at "
+        f"FROM slots s WHERE s.id = {slot_id}; "
+        "SELECT public.record_appointment_reschedule("
+        f"{old_id}, (SELECT max(id) FROM appointments WHERE slot_id = {slot_id})); {tail}"
+    )
+
+
+def test_hand_made_pair_cannot_be_reported_as_a_move():
+    """R3-1: cancel A and book B through the UI, then call the journal function."""
+    s = _Setup()
+    try:
+        with _pat_client() as pat:
+            cancelled = pat.post(f"/appointments/{s.old}/cancel")
+            assert cancelled.status_code == 200 and _status(s.old) == "cancelled"
+            booked = pat.post(f"/slots/{s.targets[0]}/book")
+            assert "booked=1" in str(booked.url), booked.url
+        new = _current_visit(s)
+        forged = _as_role("app_patient", s.patient,
+                          f"SELECT public.record_appointment_reschedule({s.old}, {new})")
+        assert forged.returncode != 0 and "reschedule pair is not allowed" in forged.stderr, forged.stderr
+        assert [e for e in _reschedule_events(s.old) if "reschedule" in e] == []
+    finally:
+        s.cleanup()
+
+
+def test_http_move_writes_one_event_and_a_repeat_call_is_refused():
+    s = _Setup()
+    try:
+        with _pat_client() as pat:
+            done = _post_reschedule(pat, s.old, s.targets[0])
+            assert "rescheduled=1" in str(done.url), done.url
+        new = _current_visit(s)
+        assert len(_reschedule_events(s.old, new)) == 1
+        again = _as_role("app_patient", s.patient,
+                         f"SELECT public.record_appointment_reschedule({s.old}, {new})")
+        assert again.returncode != 0
+        assert "not allowed" in again.stderr or "duplicate key" in again.stderr, again.stderr
+        assert len(_reschedule_events(s.old, new)) == 1
+    finally:
+        s.cleanup()
+
+
+def test_unique_indexes_exist_and_refuse_a_duplicate_event():
+    names = _psql("SELECT indexname FROM pg_indexes WHERE tablename = 'audit_events' "
+                  "AND indexname LIKE 'audit_events_reschedule_%' ORDER BY 1")
+    assert names == ["audit_events_reschedule_actor_idx", "audit_events_reschedule_new_unique",
+                     "audit_events_reschedule_old_unique"], names
+    reg = _user_id(REG)
+    try:
+        _fake_events(reg, "registrar", 1)
+        old_value, new_value = _psql(
+            "SELECT old_value || '|' || new_value FROM audit_events "
+            f"WHERE action = 'appointment.reschedule' AND old_value >= {FAKE_BASE}")[0].split("|")
+        for old_v, new_v in ((old_value, int(new_value) + 100), (int(old_value) + 100, new_value)):
+            dup = _psql_try(
+                "INSERT INTO audit_events (actor_user_id, actor_role, action, target_type, target_id, "
+                f"old_value, new_value) VALUES ({reg}, 'registrar', 'appointment.reschedule', "
+                f"'appointment', {new_v}, {old_v}, {new_v})"
+            )
+            assert dup.returncode != 0 and "duplicate key value violates unique constraint" in dup.stderr
+    finally:
+        _drop_fake_events()
+
+
+def _migrate_output() -> str:
+    completed = subprocess.run(
+        ["docker", "compose", "run", "--rm", "--no-deps", "-T", "migrate"],
+        cwd=ROOT, capture_output=True, text=True,
+    )
+    assert completed.returncode == 0, completed.stderr[-2000:]
+    return completed.stdout + completed.stderr
+
+
+def _index_oid(name: str) -> str:
+    return _psql(f"SELECT coalesce(to_regclass('public.{name}')::oid::text, 'none')")[0]
+
+
+def test_old_volume_with_duplicates_starts_and_index_comes_back():
+    reg = _user_id(REG)
+    try:
+        _psql("DROP INDEX public.audit_events_reschedule_old_unique")
+        base = FAKE_BASE + 5
+        _psql(
+            "INSERT INTO audit_events (actor_user_id, actor_role, action, target_type, target_id, "
+            f"old_value, new_value) VALUES "
+            f"({reg}, 'registrar', 'appointment.reschedule', 'appointment', {base} + 1, {base}, {base} + 1), "
+            f"({reg}, 'registrar', 'appointment.reschedule', 'appointment', {base} + 3, {base}, {base} + 3)"
+        )
+        output = _migrate_output()
+        assert "duplicate appointment.reschedule old_value, unique index skipped" in output
+        assert _index_oid("audit_events_reschedule_old_unique") == "none"
+        new_oid = _index_oid("audit_events_reschedule_new_unique")
+        assert new_oid != "none"
+        _drop_fake_events()
+        _migrate_output()
+        old_oid = _index_oid("audit_events_reschedule_old_unique")
+        assert old_oid != "none"
+        _migrate_output()
+        assert _index_oid("audit_events_reschedule_old_unique") == old_oid
+        assert _index_oid("audit_events_reschedule_new_unique") == new_oid
+    finally:
+        _drop_fake_events()
+        if _index_oid("audit_events_reschedule_old_unique") == "none":
+            _run_migrate()
+
+
+def test_patient_daily_limit_three_moves_then_too_many_and_again_after_a_day():
+    httpx.delete(f"{MAILPIT}/api/v1/messages", timeout=5)
+    s = _Setup(times=("09:00", "10:00", "11:00", "12:00", "13:00", "14:00"))
+    try:
+        with _pat_client() as pat:
+            current = s.old
+            for target in s.targets[:3]:
+                done = _post_reschedule(pat, current, target)
+                assert "rescheduled=1" in str(done.url), done.url
+                current = _current_visit(s)
+            assert int(_psql(f"SELECT count(*) FROM audit_events WHERE action = 'appointment.reschedule' "
+                             f"AND actor_user_id = {s.patient} "
+                             "AND created_at > CURRENT_TIMESTAMP - INTERVAL '24 hours'")[0]) == 3
+            assert _rescheduled_mails() == 3
+            form = pat.get(f"/appointments/{current}/reschedule", params={"day": s.day, "view": "day"})
+            assert LIMIT_TEXT in form.text
+            refused = pat.post(f"/appointments/{current}/reschedule", data={"slot_id": str(s.targets[3])},
+                               follow_redirects=False)
+            assert refused.status_code == 303
+            assert refused.headers["location"] == f"/appointments/{current}/reschedule?error=too_many"
+            page = pat.get(refused.headers["location"])
+            assert LIMIT_TEXT in page.text
+            assert _status(current) == "scheduled" and _current_visit(s) == current
+            assert _rescheduled_mails() == 3
+            # a day later the patient may move again
+            age_patient_reschedules()
+            again = _post_reschedule(pat, current, s.targets[3])
+            assert "rescheduled=1" in str(again.url), again.url
+            assert _status(current) == "cancelled"
+            assert _rescheduled_mails() == 4
+    finally:
+        s.cleanup()
+
+
+def test_registrar_is_not_limited_and_does_not_use_the_patient_limit():
+    s = _Setup(times=("09:00", "10:00", "11:00", "12:00", "13:00", "14:00"))
+    try:
+        with _client() as reg:
+            _login(reg, REG)
+            current = s.old
+            for target in s.targets:
+                done = _post_reschedule(reg, current, target)
+                assert "rescheduled=1" in str(done.url), done.url
+                current = _current_visit(s)
+        assert len([e for e in _psql(
+            "SELECT id FROM audit_events WHERE action = 'appointment.reschedule' "
+            f"AND actor_user_id = {_user_id(REG)} AND created_at > CURRENT_TIMESTAMP - INTERVAL '1 minute'"
+        )]) >= 5
+        own = _own_count("app_patient", s.patient)
+        assert own.returncode == 0 and own.stdout.strip() == "0", own.stdout + own.stderr
+        with _pat_client() as pat:
+            form = pat.get(f"/appointments/{current}/reschedule", params={"day": s.day, "view": "day"})
+            assert form.status_code == 200 and LIMIT_TEXT not in form.text
+    finally:
+        s.cleanup()
+
+
+def test_database_layer_refuses_the_fourth_move_in_a_proper_transaction():
+    s = _Setup()
+    try:
+        _fake_events(s.patient, "patient", 3)
+        result = _psql_try(_hand_move_sql(s.patient, s.old, s.targets[0], "COMMIT;"))
+        assert result.returncode != 0 and "reschedule limit reached" in result.stderr, result.stderr
+        assert _status(s.old) == "scheduled"
+        assert _psql(f"SELECT count(*) FROM appointments WHERE slot_id = {s.targets[0]}") == ["0"]
+        # control: with fewer than 3 the same transaction is accepted (then rolled back)
+        _drop_fake_events()
+        ok = _psql_try(_hand_move_sql(s.patient, s.old, s.targets[0], "ROLLBACK;"))
+        assert ok.returncode == 0, ok.stderr
+    finally:
+        _drop_fake_events()
+        s.cleanup()
+
+
+def test_own_reschedules_last_day_is_patient_only_and_own_only():
+    pat, pat2 = _user_id(PAT), _user_id(PAT2)
+    try:
+        _fake_events(pat2, "patient", 2)
+        assert _own_count("app_patient", pat).stdout.strip() == "0"
+        assert _own_count("app_patient", pat2).stdout.strip() == "2"
+        for role, email in (("app_registrar", REG), ("app_doctor", DOC), ("app_admin", ADMIN)):
+            denied = _own_count(role, _user_id(email))
+            assert denied.returncode != 0 and "permission denied" in denied.stderr, role
+        guest = _own_count("app_guest", 0)
+        assert guest.returncode != 0 and "permission denied" in guest.stderr
+        grantees = _psql(
+            "SELECT grantee FROM information_schema.routine_privileges "
+            "WHERE routine_name = 'own_reschedules_last_day' AND privilege_type = 'EXECUTE' "
+            "AND grantee <> 'clinic' ORDER BY 1"
+        )
+        assert grantees == ["app_patient"], grantees
+    finally:
+        _drop_fake_events()
+
+
+def test_foreign_visit_with_exhausted_limit_gets_the_generic_refusal():
+    other = _Setup(patient=PAT2)
+    try:
+        _fake_events(_user_id(PAT), "patient", 3)
+        with _pat_client() as pat:
+            refused = pat.post(f"/appointments/{other.old}/reschedule",
+                               data={"slot_id": str(other.targets[0])}, follow_redirects=False)
+            assert refused.headers["location"] == "/my?reschedule_error=1"
+            garbage = pat.post("/appointments/2147000000/reschedule",
+                               data={"slot_id": str(other.targets[0])}, follow_redirects=False)
+            assert garbage.headers["location"] == "/my?reschedule_error=1"
+        assert _status(other.old) == "scheduled"
+    finally:
+        _drop_fake_events()
+        other.cleanup()
+
+
+class _Holder:
+    """A superuser psql session that holds the patient's two-key advisory lock."""
+
+    def __init__(self, patient: int):
+        self.proc = subprocess.Popen(
+            ["docker", "compose", "exec", "-T", "db", "psql", "-X", "-q", "-U", "clinic", "-d", "clinic"],
+            cwd=ROOT, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+        )
+        self.proc.stdin.write(f"SELECT pg_advisory_lock(1, {patient});\n")
+        self.proc.stdin.flush()
+
+    def release(self):
+        if self.proc.poll() is not None:
+            return
+        try:
+            self.proc.communicate("SELECT pg_advisory_unlock_all();\n\\q\n", timeout=20)
+        except subprocess.TimeoutExpired:
+            self.proc.kill()
+
+
+def _waiting_on(patient: int) -> list[str]:
+    return _psql(
+        "SELECT l.classid || '|' || l.objid || '|' || l.objsubid FROM pg_locks l "
+        f"WHERE l.locktype = 'advisory' AND NOT l.granted AND l.classid = 1 AND l.objid = {patient}"
+    )
+
+
+def test_booking_and_reschedule_wait_on_the_two_key_patient_lock():
+    s = _Setup()
+    try:
+        patient = s.patient
+        for action in ("book", "reschedule"):
+            holder = _Holder(patient)
+            results = {}
+            try:
+                deadline = time.time() + 15
+                while time.time() < deadline and not _psql(
+                    f"SELECT 1 FROM pg_locks WHERE locktype = 'advisory' AND granted "
+                    f"AND classid = 1 AND objid = {patient} AND objsubid = 2"
+                ):
+                    time.sleep(0.2)
+                with _pat_client() as pat:
+                    def run():
+                        if action == "book":
+                            results["r"] = pat.post(f"/slots/{s.targets[1]}/book")
+                        else:
+                            results["r"] = _post_reschedule(pat, _current_visit(s), s.targets[2])
+                    thread = threading.Thread(target=run)
+                    thread.start()
+                    waiting = []
+                    deadline = time.time() + 15
+                    while time.time() < deadline and not waiting:
+                        waiting = _waiting_on(patient)
+                        time.sleep(0.2)
+                    assert waiting == [f"1|{patient}|2"], (action, waiting)
+                    holder.release()
+                    thread.join(30)
+                assert results["r"].status_code == 200, (action, results["r"].status_code)
+            finally:
+                holder.release()
+        assert len([e for e in _reschedule_events(s.old) if "reschedule" in e]) <= 1
+    finally:
+        s.cleanup()
+
+
+def test_limit_constant_is_the_same_in_python_and_sql():
+    source = (ROOT / "app" / "routes_booking.py").read_text()
+    python_limit = int(re.search(r"^RESCHEDULE_DAILY_LIMIT = (\d+)$", source, re.M).group(1))
+    definition = "\n".join(_psql(
+        "SELECT pg_get_functiondef('public.record_appointment_reschedule(integer, integer)'::regprocedure)"
+    ))
+    sql_limit = int(re.search(r"INTERVAL '24 hours'\s*\)\s*>=\s*(\d+)", definition).group(1))
+    assert python_limit == sql_limit == 3
+    assert "pg_advisory_xact_lock(1::int, old_row.patient_user_id::int)" in definition
+    assert definition.index("pg_advisory_xact_lock") < definition.index("reschedule limit reached")
+    assert definition.index("row_xmin IS DISTINCT FROM") < definition.index("INSERT INTO public.audit_events")
+    assert "PATIENT_LOCK_CLASS = 1" in source
+    assert source.count("pg_advisory_xact_lock(%s::int, %s::int)") == 2
+    assert "pg_advisory_xact_lock(%s)\"" not in source
+
+
+def test_parallel_hand_moves_at_two_events_let_only_one_through():
+    """Б4: the count runs under the patient lock, so two parallel transactions cannot both pass."""
+    s = _Setup(times=("10:00", "12:00", "13:00", "14:00"))
+    second_old = _book_sql(s.targets[0], s.patient)
+    try:
+        _fake_events(s.patient, "patient", 2)
+        results = [None, None]
+        barrier = threading.Barrier(2)
+
+        def run(index, old_id, slot_id):
+            barrier.wait()
+            results[index] = _psql_try(_hand_move_sql(s.patient, old_id, slot_id,
+                                                      "SELECT pg_sleep(1); COMMIT;"))
+
+        threads = [threading.Thread(target=run, args=(0, s.old, s.targets[1])),
+                   threading.Thread(target=run, args=(1, second_old, s.targets[2]))]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join(60)
+        codes = sorted(r.returncode for r in results)
+        assert codes[0] == 0 and codes[1] != 0, [(r.returncode, r.stderr) for r in results]
+        failed = next(r for r in results if r.returncode != 0)
+        assert "reschedule limit reached" in failed.stderr, failed.stderr
+        assert _psql(
+            "SELECT count(*) FROM audit_events WHERE action = 'appointment.reschedule' "
+            f"AND actor_user_id = {s.patient} AND created_at > CURRENT_TIMESTAMP - INTERVAL '24 hours'"
+        ) == ["3"]
+    finally:
+        _drop_fake_events()
+        s.cleanup()

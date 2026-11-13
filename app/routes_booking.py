@@ -29,6 +29,11 @@ from field_crypto import decrypt_body
 from mailer import deliver_appointment_emails
 from routes_auth import _login_doctor_id, _normalize_registration_email, require_user
 
+# Two-key advisory locks: (class, patient id); same key in rls.sql
+# (record_appointment_reschedule). Booking and rescheduling of one patient
+# serialize on it; the int4 pair space is apart from hashtextextended keys.
+PATIENT_LOCK_CLASS = 1
+
 
 
 
@@ -526,7 +531,9 @@ def book_slot(
                 f"&service_id={service_id}{patient_email_query}",
                 status_code=303,
             )
-    cur.execute("SELECT pg_advisory_xact_lock(%s)", (patient_id,))
+    cur.execute(
+        "SELECT pg_advisory_xact_lock(%s::int, %s::int)", (PATIENT_LOCK_CLASS, patient_id)
+    )
 
     cur.execute("SELECT public.scheduled_slot_is_taken(%s)", (slot_id,))
     if cur.fetchone()[0]:
@@ -1082,7 +1089,12 @@ def doctor_appointments(request: Request):
 # is cancelled first, then the new slot is checked and inserted (Б1), the journal
 # function checks the pair again before COMMIT (Б3). No new grants (Б4).
 
+# Moves a patient may make in 24 hours (registrars are not limited); the same
+# number is in record_appointment_reschedule in rls.sql.
+RESCHEDULE_DAILY_LIMIT = 3
+
 RESCHEDULE_ERRORS = (
+    "too_many",
     "unavailable",
     "overlap",
     "has_records",
@@ -1162,6 +1174,10 @@ def reschedule_form(request: Request, appointment_id: str):
         visit = _load_reschedulable(cur, user, appointment_id)
         if visit is None:
             return _reschedule_denied(role)
+        limit_reached = False
+        if role == "patient":
+            cur.execute("SELECT public.own_reschedules_last_day()")
+            limit_reached = cur.fetchone()[0] >= RESCHEDULE_DAILY_LIMIT
         patient = None
         if role == "registrar":
             cur.execute(
@@ -1236,6 +1252,7 @@ def reschedule_form(request: Request, appointment_id: str):
                 for day, items in sorted(days.items())
             ],
             "error": error if error in RESCHEDULE_ERRORS else None,
+            "limit_reached": limit_reached,
             "selected_day": selected_day,
             "view": view,
             "window_last_day": selected_day + timedelta(days=window_days - 1),
@@ -1294,12 +1311,20 @@ def reschedule_appointment(
             return _reschedule_denied(role)
         patient_id = owner[0]
         # 2. one patient at a time, as in booking
-        cur.execute("SELECT pg_advisory_xact_lock(%s)", (patient_id,))
+        cur.execute(
+            "SELECT pg_advisory_xact_lock(%s::int, %s::int)", (PATIENT_LOCK_CLASS, patient_id)
+        )
         # 3. lock the visit; a parallel cancel or move leaves nothing here
         visit = _load_reschedulable(cur, user, appointment_id, lock=True)
         if visit is None:
             conn.rollback()
             return _reschedule_denied(role)
+        # the daily limit, counted under the lock and only for an own open visit
+        if role == "patient":
+            cur.execute("SELECT public.own_reschedules_last_day()")
+            if cur.fetchone()[0] >= RESCHEDULE_DAILY_LIMIT:
+                conn.rollback()
+                return _reschedule_error(appointment_id, "too_many")
         if role == "registrar":
             cur.execute(
                 "SELECT blocked FROM users WHERE id = %s AND role = 'patient'",
@@ -1358,6 +1383,8 @@ def reschedule_appointment(
             conn.rollback()
             return _reschedule_error(appointment_id, "unavailable")
 
+        # No SAVEPOINT before record_appointment_reschedule: it checks that both
+        # rows were written by this transaction (xmin).
         # 6. cancel the old visit first, so its own time and buffer are free (Б1)
         cur.execute(
             """
