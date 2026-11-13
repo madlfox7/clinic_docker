@@ -1276,6 +1276,70 @@ def test_tunnel_flag_refuses_anything_but_a_public_https_domain(tmp_path, env, n
         assert proxy.returncode != 0 and "15-clinic-tls.sh:" in proxy.stdout + proxy.stderr
 
 
+MALFORMED_PUBLIC_URLS = {
+    "uppercase": "https://Demo-Clinic.ngrok-free.app",
+    "path": "https://demo-clinic.ngrok-free.app/clinic",
+    "userinfo": "https://demo:pa55word@demo-clinic.ngrok-free.app",
+    "trailing-dot": "https://demo-clinic.ngrok-free.app.",
+    "query": "https://demo-clinic.ngrok-free.app?x=1",
+    "fragment": "https://demo-clinic.ngrok-free.app#top",
+    "double-dot": "https://demo..ngrok-free.app",
+    "backslash": "https://demo-clinic.ngrok-free.app\\x",
+    "percent": "https://demo%2dclinic.ngrok-free.app",
+    "leading-zero-port": "https://localhost:08452",
+}
+
+
+@pytest.mark.parametrize("tunnel", ["1", "0"], ids=["tunnel", "local"])
+@pytest.mark.parametrize("url", MALFORMED_PUBLIC_URLS.values(), ids=MALFORMED_PUBLIC_URLS.keys())
+def test_init_and_tls_check_refuse_what_the_proxy_and_api_refuse(tmp_path, url, tunnel):
+    root = _script_copy(tmp_path)
+    env = _tunnel_env(PUBLIC_BASE_URL=url, CLINIC_PUBLIC_TUNNEL=tunnel)
+    done = _run_init(root, **env)
+    assert done.returncode != 0 and "PUBLIC_BASE_URL" in done.stderr, done.stderr
+    # Refused before anything is written, and the value is not echoed
+    # (user info may carry a password).
+    assert not (root / "secrets" / "tls").exists()
+    assert "pa55word" not in done.stdout + done.stderr
+    # tls-check on a stand that has its secrets (made with a good address).
+    assert _run_init(root, **_tunnel_env()).returncode == 0
+    check = subprocess.run(["sh", str(root / "scripts" / "tls_check.sh")], cwd="/", capture_output=True, text=True,
+                           env={**{k: v for k, v in os.environ.items()
+                                   if not k.startswith("CLINIC_") and k != "PUBLIC_BASE_URL"}, **env})
+    assert check.returncode != 0 and "PUBLIC_BASE_URL" in check.stderr, check.stderr
+    assert "pa55word" not in check.stdout + check.stderr
+
+
+@pytest.mark.parametrize("url", MALFORMED_PUBLIC_URLS.values(), ids=MALFORMED_PUBLIC_URLS.keys())
+def test_proxy_refuses_the_same_malformed_public_urls(url):
+    proxy = _proxy_script(**_tunnel_env(PUBLIC_BASE_URL=url))
+    assert proxy.returncode != 0 and "15-clinic-tls.sh:" in proxy.stdout + proxy.stderr
+
+
+def test_api_refuses_the_same_malformed_public_urls():
+    urls = list(MALFORMED_PUBLIC_URLS.values())
+    code = ("import public_url\n"
+            f"for u in {urls!r}:\n"
+            "    try:\n"
+            "        public_url.parse(u, True)\n"
+            "    except RuntimeError:\n"
+            "        continue\n"
+            "    print('ACCEPTED', u)\n")
+    out = _api_run(code)
+    assert out.returncode == 0, out.stderr[-800:]
+    assert "ACCEPTED" not in out.stdout, out.stdout
+
+
+def test_make_start_stops_on_a_malformed_tunnel_url_before_compose(tmp_path):
+    root, compose, _ = _make_start_copy(tmp_path, reload_failures=0)
+    calls = tmp_path / "compose.calls"
+    (root / ".env").write_text(f"PUBLIC_BASE_URL={MALFORMED_PUBLIC_URLS['uppercase']}\nCLINIC_PUBLIC_TUNNEL=1\n"
+                               "CLINIC_PROXY_PORT=8082\nCLINIC_PROXY_TLS_PORT=8452\n")
+    done = _make_start(root, compose)
+    assert done.returncode != 0 and "PUBLIC_BASE_URL host must be lower-case" in done.stderr, done.stderr
+    assert not calls.exists() or "up" not in calls.read_text()
+
+
 def test_tunnel_flag_only_in_local_mode(tmp_path):
     root, ca, _ = _provided_root(tmp_path)
     done = _run_init(root, **_provided_env(ca, CLINIC_PUBLIC_TUNNEL="1"))

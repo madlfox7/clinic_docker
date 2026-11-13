@@ -57,6 +57,67 @@ tls_days_left() {
 }
 tls_serial() { openssl x509 -noout -serial -in "$1" 2>/dev/null | cut -d= -f2; }
 
+# tls_parse_url: PUBLIC_URL -> URL_HOST (no brackets), URL_PORT, with the
+# rules of docker/proxy/15-clinic-tls.sh and app/public_url.py, so an address
+# the proxy or the api would refuse already fails here (make start, tls-check):
+# scheme://host[:port] and one optional trailing slash; no path, query,
+# fragment or user info; host lower-case [a-z0-9.-] without a leading or
+# trailing dot or dash and without "..", or a bracketed IPv6 literal.
+tls_parse_url() {
+  # The value is not echoed: user info may carry a password.
+  url_bad=PUBLIC_BASE_URL
+  url_nl='
+'
+  url_cr="$(printf '\r')"
+  case "$PUBLIC_URL" in
+    *"$url_nl"*|*"$url_cr"*|*' '*|*'	'*) tls_fail "PUBLIC_BASE_URL must not contain spaces or line breaks" ;;
+  esac
+  case "$PUBLIC_URL" in
+    https://*) url_authority="${PUBLIC_URL#https://}" ;;
+    http://*) url_authority="${PUBLIC_URL#http://}" ;;
+    *) tls_fail "$url_bad must start with https://" ;;
+  esac
+  url_authority="${url_authority%/}"
+  case "$url_authority" in
+    ''|*/*|*'?'*|*'#'*|*@*|*'\'*|*'%'*)
+      tls_fail "$url_bad must be https://host[:port] without path, query, fragment or user info" ;;
+  esac
+  case "$url_authority" in
+    \[*\]|\[*\]:*)
+      URL_HOST="${url_authority%%]*}"
+      url_rest="${url_authority#"$URL_HOST"]}"
+      URL_HOST="${URL_HOST#[}"
+      case "$URL_HOST" in
+        ''|*[!0-9a-fA-F:.]*) tls_fail "$url_bad has a bad IPv6 address" ;;
+        *:*) ;;
+        *) tls_fail "$url_bad has a bad IPv6 address" ;;
+      esac
+      ;;
+    *\[*|*\]*) tls_fail "$url_bad has a bad host" ;;
+    *)
+      URL_HOST="${url_authority%%:*}"
+      url_rest="${url_authority#"$URL_HOST"}"
+      case "$URL_HOST" in
+        ''|*[!a-z0-9.-]*|.*|*.|-*|*-|*..*)
+          tls_fail "$url_bad host must be lower-case letters, digits, dots and dashes (no trailing dot)" ;;
+      esac
+      ;;
+  esac
+  case "$url_rest" in
+    '') URL_PORT=443 ;;
+    :*)
+      URL_PORT="${url_rest#:}"
+      case "$URL_PORT" in
+        ''|*[!0-9]*|0*) tls_fail "$url_bad has a bad port" ;;
+      esac
+      if [ "${#URL_PORT}" -gt 5 ] || [ "$URL_PORT" -gt 65535 ]; then
+        tls_fail "$url_bad has a bad port"
+      fi
+      ;;
+    *) tls_fail "$url_bad has a bad host" ;;
+  esac
+}
+
 # tls_settings: TLS_MODE, PUBLIC_URL, URL_HOST (no brackets), URL_PORT,
 # HTTPS_ONLY, PROXY_PORT, TLS_PORT from the environment or .env.
 tls_settings() {
@@ -72,15 +133,7 @@ tls_settings() {
   [ -n "$HTTPS_ONLY" ] || HTTPS_ONLY=true
   PROXY_PORT="$(env_or_dotenv CLINIC_PROXY_PORT)"
   TLS_PORT="$(env_or_dotenv CLINIC_PROXY_TLS_PORT)"
-  url_authority="${PUBLIC_URL#*://}"
-  url_authority="${url_authority%%/*}"
-  case "$url_authority" in
-    \[*\]:*) URL_PORT="${url_authority##*]:}"; URL_HOST="${url_authority%%]*}" ;;
-    \[*) URL_PORT=443; URL_HOST="${url_authority%%]*}" ;;
-    *:*) URL_PORT="${url_authority##*:}"; URL_HOST="${url_authority%%:*}" ;;
-    *) URL_PORT=443; URL_HOST="$url_authority" ;;
-  esac
-  URL_HOST="${URL_HOST#[}"
+  tls_parse_url
   # CLINIC_PUBLIC_TUNNEL: the public address is a tunnel (ngrok demo) in
   # front of the local stand; see tls_check_settings.
   PUBLIC_TUNNEL="$(env_or_dotenv CLINIC_PUBLIC_TUNNEL)"
