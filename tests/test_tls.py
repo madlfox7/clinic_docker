@@ -152,7 +152,7 @@ def test_init_secrets_is_idempotent_and_never_mounts_ca_files(tmp_path):
     assert first.returncode == 0, first.stderr
     tls = root / "secrets" / "tls"
     before = {p.name: _sha(p) for p in tls.iterdir() if p.is_file()}
-    assert set(before) == {"ca.key", "ca.crt", "server.key", "server.crt"}
+    assert set(before) == {"ca.key", "ca.crt", "server.key", "server.crt", ".leaf_reissued"}
     second = _run_init(root)
     assert second.returncode == 0, second.stderr
     assert {p.name: _sha(p) for p in tls.iterdir() if p.is_file()} == before
