@@ -203,6 +203,46 @@ case "$TLS_MODE" in
   *) tls_fail "CLINIC_TLS_MODE must be local or provided, got '$TLS_MODE'" ;;
 esac
 
+# Ports and PUBLIC_BASE_URL must agree before anything starts: the HTTP
+# redirect and the links in mail go to the port of PUBLIC_BASE_URL.
+# A mismatch is an error in local mode and a warning in provided mode
+# (a provided setup may sit behind another forwarder).
+tls_port_problem() {
+  if [ "$TLS_MODE" = local ]; then
+    tls_fail "$1"
+  fi
+  echo "warning $1" >&2
+}
+public_url="$(env_or_dotenv PUBLIC_BASE_URL)"
+[ -n "$public_url" ] || public_url=https://localhost:8450
+https_only="$(env_or_dotenv SESSION_HTTPS_ONLY)"
+[ -n "$https_only" ] || https_only=true
+proxy_port="$(env_or_dotenv CLINIC_PROXY_PORT)"
+tls_port="$(env_or_dotenv CLINIC_PROXY_TLS_PORT)"
+case "$public_url" in
+  https://*) ;;
+  *)
+    if [ "$https_only" = true ]; then
+      tls_fail "PUBLIC_BASE_URL must start with https:// while SESSION_HTTPS_ONLY is true"
+    fi
+    ;;
+esac
+if [ -n "$proxy_port" ] && [ "$proxy_port" != 8080 ] && [ -z "$tls_port" ]; then
+  tls_port_problem "CLINIC_PROXY_PORT=$proxy_port but CLINIC_PROXY_TLS_PORT is empty, so HTTPS would take 8450 of the default stand; set CLINIC_PROXY_TLS_PORT (HTTP port + 370)"
+fi
+[ -n "$tls_port" ] || tls_port=8450
+url_authority="${public_url#*://}"
+url_authority="${url_authority%%/*}"
+case "$url_authority" in
+  \[*\]:*) url_port="${url_authority##*]:}" ;;
+  \[*) url_port=443 ;;
+  *:*) url_port="${url_authority##*:}" ;;
+  *) url_port=443 ;;
+esac
+if [ "$url_port" != "$tls_port" ]; then
+  tls_port_problem "redirect and mail links point to port $url_port (PUBLIC_BASE_URL), proxy publishes HTTPS on $tls_port (CLINIC_PROXY_TLS_PORT)"
+fi
+
 mkdir -p "$TLS_DIR"
 chmod 700 "$TLS_DIR"
 if [ -e "$TLS_DIR/ca.key" ] && [ -e "$TLS_DIR/ca.crt" ]; then

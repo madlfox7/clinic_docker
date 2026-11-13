@@ -45,6 +45,8 @@ case $url in
     *) fail "PUBLIC_BASE_URL must start with https://" ;;
 esac
 authority=${url#https://}
+# One trailing slash is the same origin (the api strips it too).
+authority=${authority%/}
 case $authority in
     ''|*/*|*'?'*|*'#'*|*@*|*'\'*|*'%'*) fail "PUBLIC_BASE_URL must be https://host[:port] without path, query or user info" ;;
 esac

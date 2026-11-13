@@ -513,3 +513,148 @@ def test_proxy_config_is_valid_with_good_values():
         done = _proxy_script(**env)
         assert done.returncode == 0, (env, done.stderr[-2000:])
         assert "syntax is ok" in done.stderr, done.stderr[-2000:]
+
+
+# --- 3. Secure cookie and one PUBLIC_BASE_URL ------------------------------------
+
+MAILPIT = os.environ.get("CLINIC_MAILPIT", "http://127.0.0.1:8025")
+
+
+def _api_env() -> dict:
+    config = json.loads(_compose("config", "--format", "json").stdout)
+    return config["services"]["api"]["environment"]
+
+
+def test_api_and_proxy_share_one_default_origin_and_secure_cookie_default():
+    env = {k: v for k, v in os.environ.items() if k != "PUBLIC_BASE_URL" and k != "SESSION_HTTPS_ONLY"}
+    done = subprocess.run(["docker", "compose", "-f", "docker-compose.yml", "--env-file", "/dev/null",
+                           "config", "--format", "json"], cwd=ROOT, capture_output=True, text=True, env=env)
+    assert done.returncode == 0, done.stderr
+    services = json.loads(done.stdout)["services"]
+    assert services["api"]["environment"]["PUBLIC_BASE_URL"] == "https://localhost:8450"
+    assert services["proxy"]["environment"]["PUBLIC_BASE_URL"] == "https://localhost:8450"
+    assert services["api"]["environment"]["SESSION_HTTPS_ONLY"] == "true"
+    example = (ROOT / ".env.example").read_text()
+    assert "\nPUBLIC_BASE_URL=https://localhost:8450\n" in example
+    assert "\nSESSION_HTTPS_ONLY=true\n" in example
+
+
+def _api_run(code: str, **env) -> subprocess.CompletedProcess:
+    args = []
+    for name, value in env.items():
+        args += ["-e", f"{name}={value}"]
+    return _compose("run", "--rm", "--no-deps", "-T", *args, "api", "python", "-c", code, timeout=180)
+
+
+@pytest.mark.parametrize("env", [
+    {"SESSION_HTTPS_ONLY": "true", "PUBLIC_BASE_URL": "http://localhost:8450"},
+    {"PUBLIC_BASE_URL": "https://localhost:8450/path"},
+    {"PUBLIC_BASE_URL": "https://localhost:8450?x"},
+    {"PUBLIC_BASE_URL": "https://a@b"},
+    {"PUBLIC_BASE_URL": "https://localhost:8450#top"},
+    {"PUBLIC_BASE_URL": "https://localhost:99999"},
+    {"PUBLIC_BASE_URL": "https://local host"},
+    {"PUBLIC_BASE_URL": "https://localhost:8450\r\nBcc: x@y"},
+    {"PUBLIC_BASE_URL": "ftp://localhost"},
+], ids=["http", "path", "query", "userinfo", "fragment", "port", "space", "crlf", "scheme"])
+def test_bad_public_base_url_stops_the_api(env):
+    done = _api_run("import main", **env)
+    assert done.returncode != 0, env
+    assert "RuntimeError" in done.stderr and "PUBLIC_BASE_URL" in done.stderr, done.stderr[-800:]
+
+
+def test_public_base_url_defaults_and_http_only_without_secure_cookie():
+    out = _api_run("import os; os.environ.pop('SESSION_HTTPS_ONLY', None); os.environ.pop('PUBLIC_BASE_URL', None);"
+                   " import session_config, public_url;"
+                   " print(session_config.HTTPS_ONLY, public_url.public_base_url())")
+    assert out.returncode == 0, out.stderr[-800:]
+    assert out.stdout.split() == ["True", "https://localhost:8450"]
+    out = _api_run("import public_url; print(public_url.public_base_url())",
+                   SESSION_HTTPS_ONLY="false", PUBLIC_BASE_URL="http://127.0.0.1:8000/")
+    assert out.returncode == 0, out.stderr[-800:]
+    assert out.stdout.strip() == "http://127.0.0.1:8000"
+
+
+def test_public_base_url_has_one_source_in_the_app():
+    hits = []
+    for path in (ROOT / "app").rglob("*.py"):
+        text = path.read_text(encoding="utf-8")
+        if "http://localhost:8080" in text:
+            hits.append(f"{path.name}: literal")
+        if "PUBLIC_BASE_URL" in text and "environ" in text and path.name != "public_url.py":
+            for line in text.splitlines():
+                if "PUBLIC_BASE_URL" in line and "environ" in line:
+                    hits.append(f"{path.name}: {line.strip()}")
+    assert not hits, hits
+
+
+def _mail_text(address: str, subject: str) -> str:
+    for _ in range(20):
+        found = httpx.get(f"{MAILPIT}/api/v1/search", params={"query": f'to:"{address}" subject:"{subject}"'}, timeout=5)
+        found.raise_for_status()
+        messages = found.json().get("messages") or []
+        if messages:
+            message_id = messages[0].get("ID") or messages[0].get("Id")
+            return httpx.get(f"{MAILPIT}/api/v1/message/{message_id}", timeout=5).json().get("Text") or ""
+        time.sleep(0.5)
+    raise AssertionError(f"no mail '{subject}' for {address}")
+
+
+def test_mail_links_are_https_on_the_public_origin_and_open():
+    from tests.csrf_client import CsrfClient
+    from tests.registration import clear_registration_attempts, registration_form
+    from tests.test_polish import _drop_user
+
+    origin = _api_env()["PUBLIC_BASE_URL"].rstrip("/")
+    assert origin.startswith("https://")
+    address = f"tls-links-{os.urandom(5).hex()}@example.com"
+    clear_registration_attempts()
+    try:
+        with CsrfClient(base_url=origin, follow_redirects=True, timeout=10.0) as c:
+            c.get("/register")
+            created = c.post("/register", data=registration_form(address, "Tls-Links-Check-2026!"))
+            assert created.status_code == 200, created.status_code
+        verify = re.search(re.escape(origin) + r"/verify-email\?token=[0-9a-f]{64}",
+                           _mail_text(address, "Confirm your clinic email"))
+        assert verify, "verification link is not on the public https origin"
+        with httpx.Client(follow_redirects=False, timeout=10) as plain:
+            assert plain.get(verify.group(0)).status_code == 200
+        with CsrfClient(base_url=origin, follow_redirects=True, timeout=10.0) as c:
+            c.get("/forgot-password")
+            assert c.post("/forgot-password", data={"email": address}).status_code == 200
+        reset = re.search(re.escape(origin) + r"/reset-password\?token=[0-9a-f]{64}",
+                          _mail_text(address, "Reset your clinic password"))
+        assert reset, "reset link is not on the public https origin"
+        with httpx.Client(follow_redirects=False, timeout=10) as plain:
+            assert plain.get(reset.group(0)).status_code == 200
+    finally:
+        _drop_user(address)
+        clear_registration_attempts()
+
+
+def _init_env(**env) -> dict:
+    base = {"PUBLIC_BASE_URL": "", "CLINIC_PROXY_PORT": "", "CLINIC_PROXY_TLS_PORT": "", "SESSION_HTTPS_ONLY": ""}
+    base.update(env)
+    return base
+
+
+@pytest.mark.parametrize("env, needle", [
+    ({"CLINIC_PROXY_PORT": "8082"}, "CLINIC_PROXY_TLS_PORT is empty"),
+    ({"CLINIC_PROXY_PORT": "8082", "CLINIC_PROXY_TLS_PORT": "8452", "PUBLIC_BASE_URL": "https://localhost:8450"},
+     "point to port 8450"),
+    ({"PUBLIC_BASE_URL": "https://localhost"}, "point to port 443"),
+    ({"PUBLIC_BASE_URL": "http://localhost:8450"}, "must start with https://"),
+], ids=["tls-port-missing", "port-mismatch", "no-port", "http"])
+def test_init_secrets_refuses_mismatched_ports_in_local_mode(tmp_path, env, needle):
+    root = _script_copy(tmp_path)
+    done = _run_init(root, **_init_env(**env))
+    assert done.returncode != 0, done.stdout
+    assert needle in done.stderr, done.stderr
+    assert not (root / "secrets" / "tls").exists() or not any((root / "secrets" / "tls").iterdir())
+
+
+def test_init_secrets_accepts_matching_ports(tmp_path):
+    root = _script_copy(tmp_path)
+    done = _run_init(root, **_init_env(CLINIC_PROXY_PORT="8082", CLINIC_PROXY_TLS_PORT="8452",
+                                       PUBLIC_BASE_URL="https://localhost:8452/"))
+    assert done.returncode == 0, done.stderr

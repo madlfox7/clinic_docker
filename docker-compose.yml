@@ -74,10 +74,10 @@ services:
       SMTP_SSL: ${SMTP_SSL:-false}
       SMTP_USERNAME: ${SMTP_USERNAME:-}
       SMTP_TIMEOUT: ${SMTP_TIMEOUT:-5}
-      PUBLIC_BASE_URL: ${PUBLIC_BASE_URL:-http://localhost:8080}
+      PUBLIC_BASE_URL: ${PUBLIC_BASE_URL:-https://localhost:8450}
       SESSION_ABSOLUTE_HOURS: ${SESSION_ABSOLUTE_HOURS:-12}
       SESSION_SAME_SITE: ${SESSION_SAME_SITE:-lax}
-      SESSION_HTTPS_ONLY: ${SESSION_HTTPS_ONLY:-false}
+      SESSION_HTTPS_ONLY: ${SESSION_HTTPS_ONLY:-true}
     secrets:
       - clinic_api_password
       - session_secret

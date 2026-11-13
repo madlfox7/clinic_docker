@@ -1,4 +1,3 @@
-import os
 import re
 import time
 from typing import List
@@ -33,6 +32,7 @@ from db import (
 )
 from client_ip import client_ip
 from date_filters import clean_search, escape_like
+from public_url import public_base_url
 from mailer import (
     send_account_message,
     send_email_verification,
@@ -986,12 +986,8 @@ def update_email_notifications(
     return RedirectResponse("/me?notifications_saved=1", status_code=303)
 
 
-def _public_base_url() -> str:
-    return os.environ.get("PUBLIC_BASE_URL", "http://localhost:8080").strip().rstrip("/")
-
-
 def _send_email_change(old_email: str, new_email: str, old_token: str, new_token: str) -> None:
-    base_url = _public_base_url()
+    base_url = public_base_url()
     send_account_message(
         old_email,
         "Confirm your clinic email change",

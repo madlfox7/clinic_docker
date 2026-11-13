@@ -43,7 +43,7 @@ from tests.test_ux_filters import (
 
 ROOT = Path(__file__).resolve().parents[1]
 BASE = os.environ.get("CLINIC_TEST_BASE", "https://localhost:8450")
-MAILPIT = os.environ.get("CLINIC_MAILPIT", "http://localhost:8025")
+MAILPIT = os.environ.get("CLINIC_MAILPIT", "http://127.0.0.1:8025")
 
 
 def _client(follow_redirects: bool = True):

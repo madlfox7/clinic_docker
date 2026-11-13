@@ -3,6 +3,7 @@ import os
 import smtplib
 from email.message import EmailMessage
 
+from public_url import public_base_url
 from secret_files import read_secret
 
 log = logging.getLogger("clinic.mail")
@@ -182,9 +183,7 @@ def deliver_appointment_emails(notice, event: str, previous=None) -> None:
 def send_password_reset(recipient: str, token: str) -> None:
     if any(char in token for char in "\r\n"):
         raise ValueError("invalid reset message")
-    base_url = os.environ.get("PUBLIC_BASE_URL", "http://localhost:8080").strip().rstrip("/")
-    if not base_url or any(char in base_url for char in "\r\n"):
-        raise ValueError("invalid public base URL")
+    base_url = public_base_url()
     send_account_message(
         recipient,
         "Reset your clinic password",
@@ -198,9 +197,7 @@ def send_password_reset(recipient: str, token: str) -> None:
 def send_existing_account_notice(recipient: str) -> None:
     """Registration with an address that already has an account. No token,
     no name: only links to the normal sign-in and reset pages."""
-    base_url = os.environ.get("PUBLIC_BASE_URL", "http://localhost:8080").strip().rstrip("/")
-    if not base_url or any(char in base_url for char in "\r\n"):
-        raise ValueError("invalid public base URL")
+    base_url = public_base_url()
     send_account_message(
         recipient,
         "Your clinic account",
@@ -219,9 +216,7 @@ def send_email_verification(recipient: str, full_name: str | None, token: str) -
     """Confirmation link after registration. The name goes only into the body."""
     if any(char in token for char in "\r\n"):
         raise ValueError("invalid verification message")
-    base_url = os.environ.get("PUBLIC_BASE_URL", "http://localhost:8080").strip().rstrip("/")
-    if not base_url or any(char in base_url for char in "\r\n"):
-        raise ValueError("invalid public base URL")
+    base_url = public_base_url()
     greeting = f"Hello, {_mail_line(full_name)}.\n\n" if full_name else ""
     send_account_message(
         recipient,

@@ -45,7 +45,8 @@ def _same_site() -> str:
 def _https_only() -> bool:
     raw = os.environ.get("SESSION_HTTPS_ONLY")
     if raw is None:
-        return False
+        # Fail safe: an api started without compose still marks the cookie Secure.
+        return True
     if raw not in ("true", "false"):
         raise RuntimeError("SESSION_HTTPS_ONLY must be true or false")
     return raw == "true"

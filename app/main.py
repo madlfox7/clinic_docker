@@ -12,6 +12,7 @@ from starlette.middleware.sessions import SessionMiddleware
 from csrf import CSRF_ERROR_DETAIL, verify_csrf
 from db import load_session_user, log, templates
 from field_crypto import FieldDecryptError, init_keyring
+import public_url  # noqa: F401 (checks PUBLIC_BASE_URL at startup)
 from secret_files import read_secret
 from session_config import ABSOLUTE_SECONDS, HTTPS_ONLY, SAME_SITE
 from static_assets import STATIC_DIR

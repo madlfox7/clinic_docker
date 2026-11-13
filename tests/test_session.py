@@ -158,7 +158,7 @@ def test_set_cookie_attributes():
     header = response.headers["set-cookie"]
     assert re.search(r"; Max-Age=43200;", header), header
     assert "httponly" in header and "samesite=lax" in header
-    assert "secure" not in header.lower()
+    assert re.search(r";\s*secure(;|$)", header, re.I), header
 
 
 def test_idle_timeout_expires_session_once():
