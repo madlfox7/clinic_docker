@@ -10,6 +10,7 @@ from urllib.parse import urlencode
 
 from db import (
     ADDRESS_MAX_LENGTH,
+    MAX_EMAIL_LENGTH,
     EXPERIENCE_MAX_YEARS,
     MAX_CLOSURE_DAYS,
     MAX_FUTURE_DAYS,
@@ -35,6 +36,7 @@ from db import (
     templates,
     within_length,
 )
+from date_filters import date_range, range_bounds, url_with
 from mailer import deliver_appointment_emails, smtp_ready
 from session_config import ABSOLUTE_HOURS, IDLE_MAX, IDLE_MIN
 from routes_auth import (
@@ -61,45 +63,203 @@ def _discard_invite(token: str) -> None:
     finally:
         conn.close()
 
+# Audit filters: fixed lists in code, checked before the query (no SELECT DISTINCT).
+AUDIT_PAGE_SIZE = 50
+AUDIT_ACTIONS = (
+    "admin.create_denied",
+    "appointment.book", "appointment.cancel", "appointment.cancel_future",
+    "appointment.complete", "appointment.reschedule",
+    "auth.login.failure", "auth.login.success", "auth.logout",
+    "auth.rate_limited", "auth.session_expired",
+    "clinic.session_idle.update", "clinic.settings.update",
+    "doctor.activate", "doctor.deactivate", "doctor.invite", "doctor.update",
+    "medical.note.save", "medical.patient_history.view",
+    "medical.prescription.add", "medical.records.view",
+    "patient.profile.update",
+    "schedule.holiday.save", "schedule.slots.generate", "schedule.time_off.add",
+    "schedule.time_off_request.approved", "schedule.time_off_request.rejected",
+    "schedule.time_off_request.submit", "schedule.work_hours.apply",
+    "schedule.work_hours.save",
+    "service.activate", "service.create", "service.deactivate", "service.delete",
+    "service.update",
+    "user.block", "user.email_change", "user.email_notifications",
+    "user.email_verified", "user.invite", "user.password_change",
+    "user.password_link", "user.password_recovery", "user.unblock",
+)
+AUDIT_ACTION_PREFIXES = (
+    "auth.", "appointment.", "medical.", "schedule.", "user.",
+    "service.", "doctor.", "clinic.", "patient.",
+)
+AUDIT_ACTOR_ROLES = ("admin", "doctor", "patient", "registrar", "anonymous")
+AUDIT_TARGET_TYPES = (
+    "admin", "appointment", "clinic", "doctor", "holiday", "patient",
+    "registrar", "service", "time_off_request", "user",
+)
+AUDIT_ID_MAX = 9_223_372_036_854_775_807
+
+
 @router.get("/admin/audit")
 def admin_audit(request: Request):
     admin_user, denied = require_user(request, "admin")
     if denied:
         return denied
+    params = request.query_params
+    errors = []
+    filters = {}
+    # Fixed SQL fragments only; values always go in as parameters.
+    where = []
+    args = []
+
+    action = params.get("action", "")
+    if action:
+        if action in AUDIT_ACTION_PREFIXES:
+            where.append("starts_with(e.action, %s)")
+            args.append(action)
+            filters["action"] = action
+        elif action in AUDIT_ACTIONS:
+            where.append("e.action = %s")
+            args.append(action)
+            filters["action"] = action
+        else:
+            errors.append("invalid_filter")
+
+    actor_role = params.get("actor_role", "")
+    if actor_role:
+        if actor_role in AUDIT_ACTOR_ROLES:
+            where.append("e.actor_role = %s")
+            args.append(actor_role)
+            filters["actor_role"] = actor_role
+        else:
+            errors.append("invalid_filter")
+
+    # actor: exact normalized email only, never a substring. Anything that is not
+    # a whole email matches nobody (empty page), it does not drop the filter.
+    raw_actor = params.get("actor", "")
+    actor_email = None
+    actor_missing = False
+    if raw_actor:
+        if not contains_nul(raw_actor) and not has_control_char(raw_actor) and within_length(
+            raw_actor, MAX_EMAIL_LENGTH
+        ):
+            actor_email = _normalize_registration_email(raw_actor)
+        if actor_email is None:
+            errors.append("invalid_filter")
+            actor_missing = True
+        else:
+            filters["actor"] = actor_email
+
+    target_type = params.get("target_type", "")
+    if target_type:
+        if target_type in AUDIT_TARGET_TYPES:
+            where.append("e.target_type = %s")
+            args.append(target_type)
+            filters["target_type"] = target_type
+        else:
+            errors.append("invalid_filter")
+
+    raw_target_id = params.get("target_id", "")
+    if raw_target_id:
+        target_id = parse_strict_int(raw_target_id)
+        if target_id is None:
+            errors.append("invalid_filter")
+        else:
+            # A reschedule keeps the old visit id in old_value.
+            where.append(
+                "(e.target_id = %s OR (e.action = 'appointment.reschedule' AND e.old_value = %s))"
+            )
+            args.extend([target_id, target_id])
+            filters["target_id"] = target_id
+
+    from_day, to_day, range_errors = date_range(request)
+    errors.extend(range_errors)
+    range_from, range_to = range_bounds(from_day, to_day)
+    if range_from is not None:
+        where.append("e.created_at >= %s AND e.created_at < %s")
+        args.extend([range_from, range_to])
+        if params.get("from"):
+            filters["from"] = from_day.isoformat()
+        if params.get("to"):
+            filters["to"] = to_day.isoformat()
+
+    raw_before = params.get("before_id", "")
+    before_id = None
+    if raw_before:
+        before_id = parse_strict_int(raw_before, min_value=1, max_value=AUDIT_ID_MAX)
+        if before_id is None:
+            errors.append("invalid_filter")
+
     conn = db_as(admin_user)
     cur = conn.cursor()
-    cur.execute(
-        """
-        SELECT e.created_at, u.email, e.actor_role, e.action,
-               e.target_type, e.target_id, e.reason, e.source,
-               e.old_value, e.new_value
-        FROM audit_events e
-        LEFT JOIN users u ON u.id = e.actor_user_id
-        ORDER BY e.created_at DESC, e.id DESC
-        LIMIT 100
-        """
-    )
-    events = [
-        {
-            "created_at": row[0],
-            "actor_email": row[1],
-            "actor_role": row[2],
-            "action": row[3],
-            "target_type": row[4],
-            "target_id": row[5],
-            "reason": row[6],
-            "source": row[7],
-            "old_value": row[8],
-            "new_value": row[9],
-        }
-        for row in cur.fetchall()
-    ]
+    events = []
+    has_next = False
+    if actor_email is not None:
+        cur.execute("SELECT id FROM users WHERE lower(email) = %s", (actor_email,))
+        actor_row = cur.fetchone()
+        if actor_row is None:
+            actor_missing = True
+        else:
+            where.append("e.actor_user_id = %s")
+            args.append(actor_row[0])
+    if before_id is not None:
+        where.append("e.id < %s")
+        args.append(before_id)
+    if not actor_missing:
+        cur.execute(
+            """
+            SELECT e.id, e.created_at, u.email, e.actor_role, e.action,
+                   e.target_type, e.target_id, e.reason, e.source,
+                   e.old_value, e.new_value
+            FROM audit_events e
+            LEFT JOIN users u ON u.id = e.actor_user_id
+            WHERE """
+            + (" AND ".join(where) if where else "TRUE")
+            + """
+            ORDER BY e.id DESC
+            LIMIT %s
+            """,
+            [*args, AUDIT_PAGE_SIZE + 1],
+        )
+        rows = cur.fetchall()
+        has_next = len(rows) > AUDIT_PAGE_SIZE
+        events = [
+            {
+                "id": row[0],
+                "created_at": row[1],
+                "actor_email": row[2],
+                "actor_role": row[3],
+                "action": row[4],
+                "target_type": row[5],
+                "target_id": row[6],
+                "reason": row[7],
+                "source": row[8],
+                "old_value": row[9],
+                "new_value": row[10],
+            }
+            for row in rows[:AUDIT_PAGE_SIZE]
+        ]
     cur.close()
     conn.close()
     return templates.TemplateResponse(
         request,
         "admin_audit.html",
-        {"request": request, "role": admin_user["role"], "events": events},
+        {
+            "request": request,
+            "role": admin_user["role"],
+            "events": events,
+            "errors": errors,
+            "filters": filters,
+            "actions": AUDIT_ACTIONS,
+            "action_prefixes": AUDIT_ACTION_PREFIXES,
+            "actor_roles": AUDIT_ACTOR_ROLES,
+            "target_types": AUDIT_TARGET_TYPES,
+            "older_page": before_id is not None,
+            "newest_url": url_with("/admin/audit", filters),
+            "next_url": (
+                url_with("/admin/audit", {**filters, "before_id": events[-1]["id"]})
+                if has_next
+                else None
+            ),
+        },
     )
 
 

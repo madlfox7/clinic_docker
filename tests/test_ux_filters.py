@@ -328,3 +328,129 @@ def test_my_filters_never_show_other_patients():
             assert "Appointment confirmed" in own.text
     finally:
         _cleanup_slots([slot])
+
+
+# --- 4. Audit log: filters and keyset pagination ------------------------------
+
+def _audit_ids(html: str) -> list[int]:
+    return [int(x) for x in re.findall(r'data-audit-id="(\d+)"', html)]
+
+
+def _seed_audit_rows(count: int, target_id: int) -> None:
+    admin = _user_id(ADMIN)
+    _psql(
+        "INSERT INTO audit_events (actor_user_id, actor_role, action, target_type, target_id) "
+        f"SELECT {admin}, 'admin', 'clinic.settings.update', 'clinic', {target_id} "
+        f"FROM generate_series(1, {count})"
+    )
+
+
+def _drop_audit_rows(target_id: int) -> None:
+    _psql(
+        "DELETE FROM audit_events WHERE action = 'clinic.settings.update' "
+        f"AND target_type = 'clinic' AND target_id = {target_id}"
+    )
+
+
+def test_audit_log_is_admin_only_with_any_filter():
+    with _client() as pat, _client() as doc, _client() as reg, _client() as guest:
+        _login(pat, PAT)
+        _login(doc, DOC)
+        _login(reg, REG)
+        for c in (pat, doc, reg):
+            for params in ({}, {"action": "auth."}, {"before_id": "5"}, {"actor": ADMIN}):
+                assert c.get("/admin/audit", params=params).status_code == 403
+        assert guest.get("/admin/audit", params={"action": "auth."}).url.path == "/login"
+    denied = _as_role("app_registrar", _user_id(REG), "SELECT count(*) FROM audit_events")
+    assert denied.returncode != 0 and "permission denied" in denied.stderr
+
+
+def test_audit_log_filters_narrow_and_reject_garbage():
+    target = 900_000_000 + int(uuid.uuid4().int % 1_000_000)
+    _seed_audit_rows(3, target)
+    try:
+        with _client() as admin:
+            _login(admin, ADMIN)
+            base = _audit_ids(admin.get("/admin/audit").text)
+            assert base
+            narrowed = admin.get("/admin/audit", params={"target_type": "clinic", "target_id": str(target)})
+            assert len(_audit_ids(narrowed.text)) == 3
+            by_action = admin.get("/admin/audit", params={"action": "auth.login.success"})
+            assert by_action.status_code == 200
+            assert "clinic.settings.update" not in by_action.text.split("<tbody>", 1)[1]
+            group = admin.get("/admin/audit", params={"action": "auth."})
+            body = group.text.split("<tbody>", 1)[1]
+            assert re.findall(r"<code>([^<]+)</code>", body)
+            assert all(a.startswith("auth.") for a in re.findall(r"<code>([^<]+)</code>", body))
+            role = admin.get("/admin/audit", params={"actor_role": "anonymous"})
+            assert all(r == "anonymous" for r in re.findall(
+                r"<td>(admin|doctor|patient|registrar|anonymous)</td>", role.text.split("<tbody>", 1)[1]))
+            for bad in ({"action": "x' OR 1=1 --"}, {"actor_role": "root"},
+                        {"target_type": "users; DROP"}, {"target_id": "1 OR 1=1"},
+                        {"before_id": "-1"}, {"from": "2026-99-01"},
+                        {"from": "2020-01-01", "to": "2026-01-01"}):
+                page = admin.get("/admin/audit", params=bad)
+                assert page.status_code == 200, bad
+                assert "were not valid" in page.text, bad
+            sqli = admin.get("/admin/audit", params={"action": "x' OR 1=1 --", "target_id": str(target)})
+            assert len(_audit_ids(sqli.text)) == 3
+            # actor: exact normalized email only
+            reg_email_part = REG.split("@")[0]
+            for partial in (reg_email_part, REG[:-3], "%", "reg@%"):
+                page = admin.get("/admin/audit", params={"actor": partial})
+                assert _audit_ids(page.text) == [], partial
+            exact = admin.get("/admin/audit", params={"actor": "  " + ADMIN.upper() + " "})
+            exact_body = exact.text.split("<tbody>", 1)[1]
+            assert _audit_ids(exact.text)
+            assert set(re.findall(r"<td>([^<@]+@[^<]+)</td>", exact_body)) == {ADMIN}
+            missing = admin.get("/admin/audit", params={"actor": f"nobody-{uuid.uuid4().hex}@example.com"})
+            assert missing.status_code == 200 and _audit_ids(missing.text) == []
+            today = _psql("SELECT CURRENT_DATE")[0]
+            dated = admin.get("/admin/audit", params={"from": today, "to": today, "target_id": str(target)})
+            assert len(_audit_ids(dated.text)) == 3
+            old = admin.get("/admin/audit", params={"from": "2001-01-01", "to": "2001-12-31"})
+            assert _audit_ids(old.text) == []
+    finally:
+        _drop_audit_rows(target)
+
+
+def test_audit_log_keyset_pages_without_gaps_or_repeats():
+    target = 800_000_000 + int(uuid.uuid4().int % 1_000_000)
+    _seed_audit_rows(120, target)
+    try:
+        expected = [int(x) for x in _psql(
+            "SELECT id FROM audit_events WHERE target_type = 'clinic' "
+            f"AND target_id = {target} ORDER BY id DESC"
+        )]
+        before = int(_psql("SELECT count(*) FROM audit_events WHERE action LIKE 'audit.%'")[0])
+        with _client() as admin:
+            _login(admin, ADMIN)
+            params = {"target_type": "clinic", "target_id": str(target)}
+            first = admin.get("/admin/audit", params=params)
+            page1 = _audit_ids(first.text)
+            assert page1 == expected[:50]
+            next_link = re.search(r'href="(/admin/audit\?[^"]*before_id=\d+[^"]*)"', first.text)
+            assert next_link and "Newest" not in first.text
+            # a row on the next page disappears between requests (S-01 style delete)
+            _psql(f"DELETE FROM audit_events WHERE id = {expected[60]}")
+            second = admin.get(next_link.group(1).replace("&amp;", "&"))
+            page2 = _audit_ids(second.text)
+            assert page2 == [i for i in expected[50:101] if i != expected[60]][:50]
+            assert "Newest" in second.text and "target_id=" in second.text
+            third_link = re.search(r'href="(/admin/audit\?[^"]*before_id=\d+[^"]*)"', second.text)
+            third = admin.get(third_link.group(1).replace("&amp;", "&"))
+            page3 = _audit_ids(third.text)
+            remaining = [i for i in expected if i != expected[60]]
+            assert page1 + page2 + page3 == remaining
+            assert len(set(page1 + page2 + page3)) == len(remaining)
+            assert not re.search(r'before_id=\d+', third.text.split("Newest", 1)[-1])
+            newest = re.search(r'href="(/admin/audit\?[^"]*)">Newest', third.text)
+            assert _audit_ids(admin.get(newest.group(1).replace("&amp;", "&")).text) == page1
+            full = admin.get("/admin/audit").text
+            assert PAT_NAME not in full and PAT_PHONE not in full
+            patients = admin.get("/admin/audit", params={"target_type": "patient"}).text
+            assert PAT_NAME not in patients and PAT_PHONE not in patients
+        after = int(_psql("SELECT count(*) FROM audit_events WHERE action LIKE 'audit.%'")[0])
+        assert before == after == 0
+    finally:
+        _drop_audit_rows(target)

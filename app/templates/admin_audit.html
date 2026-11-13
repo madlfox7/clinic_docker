@@ -2,7 +2,45 @@
 {% block title %}Audit log{% endblock %}
 {% block content %}
 <h1>Audit log</h1>
-<p class="text-body-secondary">Latest 100 access and change events. Medical note and prescription text is never included.</p>
+<p class="text-body-secondary">Access and change events, newest first, {{ events|length }} on this page{% if filters %} for the filters below{% endif %}. Medical note and prescription text is never included.</p>
+{% if errors %}<div class="alert alert-warning">Some filters were not valid and were ignored or matched nothing.</div>{% endif %}
+<div class="card mb-3"><div class="card-body">
+<form class="row g-2 align-items-end" method="get" action="/admin/audit">
+  <div class="col-md-3"><label class="form-label w-100 mb-0">Action
+    <select class="form-select" name="action">
+      <option value="">All actions</option>
+      <optgroup label="Groups">
+        {% for prefix in action_prefixes %}<option value="{{ prefix }}" {% if filters.action == prefix %}selected{% endif %}>{{ prefix }}*</option>{% endfor %}
+      </optgroup>
+      <optgroup label="Actions">
+        {% for item in actions %}<option value="{{ item }}" {% if filters.action == item %}selected{% endif %}>{{ item }}</option>{% endfor %}
+      </optgroup>
+    </select>
+  </label></div>
+  <div class="col-md-2"><label class="form-label w-100 mb-0">Role
+    <select class="form-select" name="actor_role">
+      <option value="">Any role</option>
+      {% for item in actor_roles %}<option value="{{ item }}" {% if filters.actor_role == item %}selected{% endif %}>{{ item }}</option>{% endfor %}
+    </select>
+  </label></div>
+  <div class="col-md-3"><label class="form-label w-100 mb-0">Actor email (exact)
+    <input class="form-control" type="email" name="actor" maxlength="254" value="{{ filters.actor or '' }}">
+  </label></div>
+  <div class="col-md-2"><label class="form-label w-100 mb-0">Target
+    <select class="form-select" name="target_type">
+      <option value="">Any target</option>
+      {% for item in target_types %}<option value="{{ item }}" {% if filters.target_type == item %}selected{% endif %}>{{ item }}</option>{% endfor %}
+    </select>
+  </label></div>
+  <div class="col-md-2"><label class="form-label w-100 mb-0">Target id
+    <input class="form-control" type="number" name="target_id" min="0" value="{{ filters.target_id if filters.target_id is not none else '' }}">
+  </label></div>
+  <div class="col-sm-6 col-md-3"><label class="form-label w-100 mb-0">From <input class="form-control" type="date" name="from" value="{{ filters.get('from', '') }}"></label></div>
+  <div class="col-sm-6 col-md-3"><label class="form-label w-100 mb-0">To <input class="form-control" type="date" name="to" value="{{ filters.get('to', '') }}"></label></div>
+  <div class="col-md-3"><button class="btn btn-primary w-100" type="submit">Filter</button></div>
+  <div class="col-md-3"><a class="btn btn-outline-secondary w-100" href="/admin/audit">Clear filters</a></div>
+</form>
+</div></div>
 <div class="card">
 <div class="table-responsive">
 <table class="table table-striped table-sm align-middle mb-0">
@@ -11,7 +49,7 @@
   </thead>
   <tbody>
     {% for event in events %}
-      <tr>
+      <tr data-audit-id="{{ event.id }}">
         <td>{{ event.created_at }}</td>
         <td>{{ event.actor_email or "—" }}</td>
         <td>{{ event.actor_role }}</td>
@@ -22,10 +60,16 @@
         <td>{% if event.old_value is not none and event.new_value is not none %}{{ event.old_value }} → {{ event.new_value }}{% endif %}</td>
       </tr>
     {% else %}
-      <tr><td colspan="8">No events recorded.</td></tr>
+      <tr><td colspan="8">No events match.</td></tr>
     {% endfor %}
   </tbody>
 </table>
 </div>
 </div>
+{% if older_page or next_url %}
+<nav class="d-flex gap-2 mt-3" aria-label="Pages">
+  {% if older_page %}<a class="btn btn-outline-primary btn-sm" href="{{ newest_url }}">Newest</a>{% endif %}
+  {% if next_url %}<a class="btn btn-outline-primary btn-sm" href="{{ next_url }}">Next</a>{% endif %}
+</nav>
+{% endif %}
 {% endblock %}
