@@ -339,8 +339,15 @@ def test_bootstrap_checksum_matches_docs():
 
 def test_nginx_includes_security_headers_in_every_location():
     conf = (ROOT / "docker" / "proxy" / "nginx.conf").read_text(encoding="utf-8")
+    locations = (ROOT / "docker" / "proxy" / "clinic_locations.conf").read_text(encoding="utf-8")
     snippet = (ROOT / "docker" / "proxy" / "security_headers.conf").read_text(encoding="utf-8")
-    blocks = re.findall(r"location\s+[^{]+\{(.*?)\n    \}", conf, re.S)
+    # Every server either includes the shared locations or has none of its own.
+    servers = conf.split("server {")[1:]
+    assert servers
+    for server in servers:
+        assert "include /etc/nginx/clinic/security_headers.conf;" in server, server
+    assert "include /etc/nginx/clinic/clinic_locations.conf;" in conf.split("listen 8443 ssl;", 1)[1]
+    blocks = re.findall(r"location\s+[^{]+\{(.*?)\n    \}", conf + locations, re.S)
     assert len(blocks) >= 4
     for block in blocks:
         assert "include /etc/nginx/clinic/security_headers.conf;" in block, block

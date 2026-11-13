@@ -32,12 +32,12 @@ def _psql(sql: str) -> list[str]:
     return [line for line in out.splitlines() if line.strip()]
 
 
-def _proxy_publications(config: dict) -> list[dict]:
-    return [p for p in config["services"]["proxy"].get("ports", []) if int(p["target"]) == 8080]
+def _proxy_publications(config: dict, target: int = 8080) -> list[dict]:
+    return [p for p in config["services"]["proxy"].get("ports", []) if int(p["target"]) == target]
 
 
 def test_compose_networks_and_bind():
-    env = {"CLINIC_PROXY_BIND": "", "CLINIC_PROXY_PORT": ""}
+    env = {"CLINIC_PROXY_BIND": "", "CLINIC_PROXY_PORT": "", "CLINIC_PROXY_TLS_PORT": ""}
     config = _config({k: v for k, v in env.items()})
     services = config["services"]
     assert set(services["api"]["networks"]) == {"app", "backend", "mail"}
@@ -48,17 +48,24 @@ def test_compose_networks_and_bind():
     assert config["networks"]["backend"].get("internal") is True
     assert not config["networks"]["frontend"].get("internal")
     assert not config["networks"]["mail"].get("internal")
-    default = _proxy_publications(config)
-    assert len(default) == 1 and default[0]["host_ip"] == "0.0.0.0" and default[0]["published"] == "8080"
-    narrowed = _proxy_publications(_config({"CLINIC_PROXY_BIND": "127.0.0.1", "CLINIC_PROXY_PORT": "8083"}))
-    assert len(narrowed) == 1 and narrowed[0]["host_ip"] == "127.0.0.1" and narrowed[0]["published"] == "8083"
+    assert len(services["proxy"]["ports"]) == 2
+    for target, port in ((8080, "8080"), (8443, "8450")):
+        default = _proxy_publications(config, target)
+        assert len(default) == 1 and default[0]["host_ip"] == "0.0.0.0" and default[0]["published"] == port
+    narrowed_config = _config({"CLINIC_PROXY_BIND": "127.0.0.1", "CLINIC_PROXY_PORT": "8083",
+                               "CLINIC_PROXY_TLS_PORT": "8453"})
+    for target, port in ((8080, "8083"), (8443, "8453")):
+        narrowed = _proxy_publications(narrowed_config, target)
+        assert len(narrowed) == 1 and narrowed[0]["host_ip"] == "127.0.0.1" and narrowed[0]["published"] == port
 
 
 def test_running_stack_publishes_proxy_once():
     completed = subprocess.run(["docker", "compose", "config", "--format", "json"],
                                cwd=ROOT, capture_output=True, text=True)
     assert completed.returncode == 0, completed.stderr
-    assert len(_proxy_publications(json.loads(completed.stdout))) == 1
+    config = json.loads(completed.stdout)
+    assert len(_proxy_publications(config, 8080)) == 1
+    assert len(_proxy_publications(config, 8443)) == 1
 
 
 def test_site_through_proxy_is_not_forbidden():

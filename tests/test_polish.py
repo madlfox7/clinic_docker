@@ -118,6 +118,7 @@ def test_nginx_unavailable_page_names_match():
     assert "The clinic service is temporarily unavailable." in text
     assert "<script" not in text and "<style" not in text and "style=" not in text
     conf = (ROOT / "docker" / "proxy" / "nginx.conf").read_text()
+    conf += (ROOT / "docker" / "proxy" / "clinic_locations.conf").read_text()
     assert "error_page 502 504 /clinic-unavailable.html;" in conf
     assert "location = /clinic-unavailable.html {" in conf
     assert "root /etc/nginx/clinic/errors;" in conf

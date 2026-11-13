@@ -4,8 +4,12 @@ import hashlib
 import json
 import os
 import pathlib
+import re
 import shutil
+import socket
+import ssl
 import subprocess
+import threading
 
 import pytest
 
@@ -190,3 +194,147 @@ def test_tls_file_modes_and_proxy_access():
     assert ok.returncode == 0, ok.stderr
     denied = _compose("exec", "-T", "-u", "12345", "proxy", "sh", "-c", read)
     assert denied.returncode != 0
+
+
+# --- 2. HTTPS on the proxy -----------------------------------------------------
+
+def _published(target: int) -> int:
+    config = json.loads(_compose("config", "--format", "json").stdout)
+    ports = [p for p in config["services"]["proxy"]["ports"] if int(p["target"]) == target]
+    assert len(ports) == 1, ports
+    return int(ports[0]["published"])
+
+
+def _tls_port() -> int:
+    return _published(8443)
+
+
+def _strict_context() -> ssl.SSLContext:
+    context = ssl.create_default_context(cafile=str(TLS / "ca.crt"))
+    assert context.verify_flags & ssl.VERIFY_X509_STRICT, "Python default context is not strict"
+    return context
+
+
+def _handshake(host: str, context: ssl.SSLContext, server_hostname=None):
+    with socket.create_connection((host, _tls_port()), timeout=5) as raw:
+        with context.wrap_socket(raw, server_hostname=server_hostname or host) as tls:
+            return tls.version(), tls.getpeercert()
+
+
+def _https_get(path: str, host: str = "localhost", context=None) -> tuple[int, dict, bytes]:
+    """One HTTP/1.1 request over a verified TLS socket (no redirects followed)."""
+    context = context or _strict_context()
+    with socket.create_connection((host, _tls_port()), timeout=10) as raw:
+        with context.wrap_socket(raw, server_hostname=host) as tls:
+            tls.sendall(f"GET {path} HTTP/1.1\r\nHost: {host}:{_tls_port()}\r\nConnection: close\r\n\r\n".encode())
+            data = b""
+            while chunk := tls.recv(65536):
+                data += chunk
+    head, _, body = data.partition(b"\r\n\r\n")
+    lines = head.decode("latin-1").split("\r\n")
+    status = int(lines[0].split()[1])
+    headers: dict[str, list[str]] = {}
+    for line in lines[1:]:
+        name, _, value = line.partition(":")
+        headers.setdefault(name.strip().lower(), []).append(value.strip())
+    return status, headers, body
+
+
+def test_strict_python_handshake_by_name_and_by_ip():
+    context = _strict_context()
+    for host in ("localhost", "127.0.0.1"):
+        version, cert = _handshake(host, context)
+        assert version in ("TLSv1.2", "TLSv1.3"), version
+        assert ("DNS", "localhost") in cert["subjectAltName"]
+
+
+def test_tls_12_and_13_pass_and_tls_11_is_refused_by_the_server():
+    for version in (ssl.TLSVersion.TLSv1_2, ssl.TLSVersion.TLSv1_3):
+        context = _strict_context()
+        context.minimum_version = context.maximum_version = version
+        assert _handshake("127.0.0.1", context)[0] == version.name.replace("v1_", "v1.")
+    old = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+    old.load_verify_locations(str(TLS / "ca.crt"))
+    try:
+        old.set_ciphers("DEFAULT:@SECLEVEL=0")
+        old.minimum_version = old.maximum_version = ssl.TLSVersion.TLSv1_1
+    except (ValueError, ssl.SSLError) as exc:
+        pytest.skip(f"this client cannot speak TLS 1.1 at all: {exc}")
+    # Control: the same client talks TLS 1.1 to a local server that allows it.
+    if not _client_can_speak_tls11(old):
+        pytest.skip("this OpenSSL refuses TLS 1.1 on the client side; the server refusal cannot be shown")
+    with pytest.raises(ssl.SSLError) as refused:
+        _handshake("127.0.0.1", old)
+    text = str(refused.value)
+    if "NO_PROTOCOLS_AVAILABLE" in text:
+        pytest.skip("the client refused TLS 1.1 itself (NO_PROTOCOLS_AVAILABLE), not the server")
+    assert "PROTOCOL_VERSION" in text or "protocol version" in text, text
+    conf = (ROOT / "docker" / "proxy" / "nginx.conf").read_text()
+    assert "    ssl_protocols TLSv1.2 TLSv1.3;\n" in conf
+
+
+def _client_can_speak_tls11(client: ssl.SSLContext) -> bool:
+    server = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+    try:
+        server.set_ciphers("DEFAULT:@SECLEVEL=0")
+        server.minimum_version = ssl.TLSVersion.TLSv1
+        server.load_cert_chain(str(TLS / "server.crt"), str(TLS / "server.key"))
+    except (ssl.SSLError, OSError, ValueError):
+        return False
+    listener = socket.socket()
+    listener.bind(("127.0.0.1", 0))
+    listener.listen(1)
+    port = listener.getsockname()[1]
+    result = {}
+
+    def accept():
+        try:
+            conn, _ = listener.accept()
+            with server.wrap_socket(conn, server_side=True) as tls:
+                result["server"] = tls.version()
+        except (ssl.SSLError, OSError) as exc:
+            result["error"] = exc
+
+    thread = threading.Thread(target=accept, daemon=True)
+    thread.start()
+    try:
+        with socket.create_connection(("127.0.0.1", port), timeout=5) as raw:
+            with client.wrap_socket(raw, server_hostname="127.0.0.1") as tls:
+                ok = tls.version() == "TLSv1.1"
+    except (ssl.SSLError, OSError):
+        ok = False
+    finally:
+        thread.join(5)
+        listener.close()
+    return ok
+
+
+def test_certificate_is_checked_against_the_stand_ca_only():
+    system_only = ssl.create_default_context()
+    with pytest.raises(ssl.SSLCertVerificationError):
+        _handshake("localhost", system_only)
+    status, _, _ = _https_get("/login")
+    assert status == 200
+
+
+def test_app_redirects_stay_on_https():
+    status, headers, _ = _https_get("/doctors/")
+    assert status in (307, 308), status
+    location = headers["location"][0]
+    assert not location.startswith("http://"), location
+
+
+def test_tls_server_config_statics():
+    conf = (ROOT / "docker" / "proxy" / "nginx.conf").read_text()
+    tls_server = conf.split("listen 8443 ssl;", 1)[1]
+    for needed in ("ssl_session_tickets off;", "ssl_prefer_server_ciphers off;",
+                   "ssl_session_cache shared:clinic_tls:10m;", "http2 on;",
+                   "ssl_certificate     /run/secrets/tls_cert;", "ssl_certificate_key /run/secrets/tls_key;",
+                   "include /etc/nginx/clinic/security_headers.conf;",
+                   "include /etc/nginx/clinic/clinic_locations.conf;"):
+        assert needed in tls_server, needed
+    everything = conf + (ROOT / "docker" / "proxy" / "clinic_locations.conf").read_text()
+    assert "ssl_stapling" not in everything and "limit_req" not in everything
+    ciphers = re.search(r"ssl_ciphers ([^;]+);", tls_server).group(1).split(":")
+    assert ciphers and all(c.startswith("ECDHE-") and ("GCM" in c or "CHACHA20" in c) for c in ciphers), ciphers
+    assert _compose("run", "--rm", "--no-deps", "-T", "proxy", "nginx", "-t").returncode == 0
