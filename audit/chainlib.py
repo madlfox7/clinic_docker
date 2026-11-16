@@ -40,7 +40,7 @@ TRIGGERS = (
 RETIRE_MODES = ("normal", "forced", "offline")
 SWITCH_KINDS = ("new", "reused", "retired_reused")
 BREAK_TYPES = ("gap", "prev_hash", "row_hash", "head", "hash_version", "anchor_mismatch",
-               "truncated", "chain_replaced", "head_missing")
+               "truncated", "chain_replaced", "head_missing", "no_registry")
 
 _HEX64 = re.compile(r"^[0-9a-f]{64}$")
 _UTC = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{6}Z$")

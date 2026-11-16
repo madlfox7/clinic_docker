@@ -7,7 +7,10 @@
 # Used by init_secrets.sh and, before the retire, by make reset/fclean (З-9):
 # a directory Docker creates itself for the bind mount belongs to root and
 # audit_anchor (uid 10002) could never write to it.
-# --strict: exit 1 instead of a warning when uid 10002 cannot get write access.
+# --strict (make reset/fclean): exit 1 instead of a warning when uid 10002
+# cannot get write access, when the directory belongs to someone else (e.g.
+# root 755 after Docker created it), or when the result is not 700 + ACL
+# u:10002:rwx (or, as root, owner 10002 with 700).
 set -eu
 AUDIT_UID=10002
 strict=no
@@ -32,5 +35,34 @@ if [ -O "$anchor_dir" ]; then
     [ "$strict" = no ] || exit 1
   fi
 else
+  if [ "$strict" = yes ] && ! { [ "$(id -u)" = 0 ] && [ "$(stat -c %u "$anchor_dir")" = "$AUDIT_UID" ]; }; then
+    echo "error   $anchor_dir belongs to uid $(stat -c %u "$anchor_dir") (mode $(stat -c %a "$anchor_dir")), not to you ($(id -u))." >&2
+    echo "        audit_anchor (uid $AUDIT_UID) may not be able to write there; fix it by hand, e.g." >&2
+    echo "        sudo chown $(id -u):$(id -g) $anchor_dir && sh scripts/anchor_dir.sh $anchor_dir" >&2
+    exit 1
+  fi
   echo "note    $anchor_dir is not owned by you; permissions left as they are"
+fi
+
+if [ "$strict" = yes ]; then
+  # check the result, not only the commands: no access for group/other, and
+  # uid 10002 can write (ACL entry, or the owner when root chowned it)
+  mode="$(stat -c %a "$anchor_dir")"
+  owner="$(stat -c %u "$anchor_dir")"
+  ok=no
+  if [ "$owner" = "$AUDIT_UID" ] && [ "$mode" = 700 ]; then
+    ok=yes
+  elif command -v getfacl >/dev/null 2>&1; then
+    acl="$(getfacl -cpn "$anchor_dir" 2>/dev/null || true)"
+    if printf '%s\n' "$acl" | grep -qx "user:$AUDIT_UID:rwx" \
+        && printf '%s\n' "$acl" | grep -qx "group::---" \
+        && printf '%s\n' "$acl" | grep -qx "other::---" \
+        && ! printf '%s\n' "$acl" | grep -E '^(user|group):[^:]+:' | grep -vqx "user:$AUDIT_UID:rwx"; then
+      ok=yes
+    fi
+  fi
+  if [ "$ok" != yes ]; then
+    echo "error   $anchor_dir is not 700 + ACL u:$AUDIT_UID:rwx (mode $mode, owner uid $owner)." >&2
+    exit 1
+  fi
 fi

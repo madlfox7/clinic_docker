@@ -62,9 +62,10 @@ endef
 # 2.33). Only "no such volume" counts as missing: any other error (permission
 # denied, no daemon, sudo asking for a password) stops make, nothing deleted,
 # so the offline retire never skips the chain check by mistake.
-# A missing anchor directory is created first (scripts/anchor_dir.sh, 700 +
-# ACL, as init_secrets.sh does); otherwise Docker would create it as root for
-# the bind mount and audit_anchor could not write to it (З-9).
+# The anchor directory is checked first (scripts/anchor_dir.sh --strict, 700 +
+# ACL, as init_secrets.sh does): a missing one is created by you, otherwise
+# Docker would create it as root for the bind mount (З-9); one owned by
+# someone else or without the ACL stops make (З-10).
 # Then down -v and the anonymous volumes listed above (only this project's).
 define wipe_stack
 @stopped() { echo "  proxy and api are stopped; $(MAKE) start COMPOSE='$(COMPOSE)' brings the stand back." >&2; }; \
@@ -80,12 +81,11 @@ anchor_dir="$$($(COMPOSE) config --format json | $(PYTHON) -c 'import json, sys;
 if [ -z "$$anchor_dir" ]; then \
 	echo "cannot find the anchor directory (bind mount /anchors of audit_anchor); nothing was deleted." >&2; stopped; exit 1; \
 fi; \
-if [ ! -d "$$anchor_dir" ]; then \
-	echo "sh scripts/anchor_dir.sh --strict $$anchor_dir   (missing: created by you, not by Docker as root)"; \
-	if ! sh scripts/anchor_dir.sh --strict "$$anchor_dir"; then \
-		echo "cannot prepare the anchor directory $$anchor_dir; the audit chain was not closed, nothing was deleted." >&2; \
-		stopped; exit 1; \
-	fi; \
+[ -d "$$anchor_dir" ] || echo "(missing: created by you, not by Docker as root)"; \
+echo "sh scripts/anchor_dir.sh --strict $$anchor_dir"; \
+if ! sh scripts/anchor_dir.sh --strict "$$anchor_dir"; then \
+	echo "cannot prepare the anchor directory $$anchor_dir; the audit chain was not closed, nothing was deleted." >&2; \
+	stopped; exit 1; \
 fi; \
 if [ -n "$$($(COMPOSE) ps --status running -q audit_anchor 2>/dev/null)" ]; then \
 	db_state=running; \

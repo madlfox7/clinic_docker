@@ -8,9 +8,10 @@ append a HMAC-signed anchor line for the chain head.
     python anchor.py --retire --offline   close it without a database
     python anchor.py --health             healthcheck of the running loop
 
---retire refuses with 2 when the chain is broken or was replaced
-(chain_replaced); --force closes it anyway as forced (<break>@<seq> or
-chain_replaced@-), 3 when the database is unavailable.
+--retire refuses with 2 when the chain is broken, was replaced
+(chain_replaced) or the registry is missing while the database holds a chain;
+--force closes it anyway as forced (<break>@<seq>, chain_replaced@- or
+no_registry@-), 3 when the database is unavailable.
 
 The key (/run/secrets/audit_anchor_key) is mounted only into this service.
 Output carries seq, break type and chain id only: never the key, a MAC input
@@ -171,6 +172,44 @@ def _db_source():
     return cl.DbSource(conn), conn.close
 
 
+NIL_CHAIN = "00000000-0000-0000-0000-000000000000"
+
+
+def _retire_without_registry(registry: Path, key: bytes, force: bool, open_source) -> int:
+    """З-10: no chains.log, but the database may still hold a chain (the anchor
+    directory was removed or renamed). "A chain" = a head with last_seq > 0, or
+    journal rows without a head. An empty chain (fresh volume, genesis only)
+    has nothing to protect. Otherwise refuse (2) unless forced; forced writes
+    the first line of a new registry: retire <chain> ... forced no_registry@-."""
+    try:
+        source, close = open_source()
+    except Exception as exc:
+        say(f"ERROR retire: database unavailable ({type(exc).__name__})")
+        return 3
+    try:
+        head = source.head()
+        if head is not None:
+            chain, last_seq, last_hash = head["chain_id"], head["last_seq"], bytes(head["last_hash"]).hex()
+            present = last_seq > 0
+        else:
+            chain, last_seq, last_hash = NIL_CHAIN, 0, "0" * 64
+            present = next(iter(source.rows_from(1)), None) is not None
+        if not present:
+            say("retire: no chain registry and an empty journal, nothing to close")
+            return 0
+        say(f"BROKEN type=registry_missing chain={chain} last_seq={last_seq} (the database holds a chain)")
+        if not force:
+            say("retire refused: no chain registry (anchor directory missing, renamed or replaced?) while the "
+                "database holds a chain; RETIRE_FORCE=yes CONFIRM=yes closes it as forced no_registry")
+            return 2
+        cl.append_line(registry, key, cl.ZERO_MAC,
+                       f"{cl.VERSION} retire {chain} {last_seq} {last_hash} forced no_registry@- {cl.utc()}")
+        say(f"retired chain={chain} forced no_registry@- (new registry)")
+        return 0
+    finally:
+        close()
+
+
 def retire(key: bytes, force: bool, offline: bool, directory: Path | None = None, open_source=_db_source) -> int:
     """Close the open chain C in the registry (§8.6): normal after a full check,
     forced (only with --force, the break is printed first) or offline."""
@@ -178,8 +217,10 @@ def retire(key: bytes, force: bool, offline: bool, directory: Path | None = None
     with cl.locked(directory):
         registry = directory / cl.REGISTRY
         if not registry.exists():
-            say("retire: no chain registry, nothing to close")
-            return 0
+            if offline:     # no database volume either: nothing to protect (unchanged)
+                say("retire: no chain registry, nothing to close")
+                return 0
+            return _retire_without_registry(registry, key, force, open_source)
         try:
             entries, reg_mac = cl.parse_registry(registry, key)
         except cl.Broken as broken:
