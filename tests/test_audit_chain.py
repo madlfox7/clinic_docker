@@ -103,7 +103,14 @@ def _insert_admin_event() -> None:
           f"VALUES ({admin}, 'admin', 'test.chain', 'test', {admin})")
 
 
+def _ensure_rows() -> None:
+    # a fresh volume starts with an empty journal; these checks need one row
+    if _one("SELECT count(*) FROM audit_events") == "0":
+        _insert_admin_event()
+
+
 def test_chain_schema_columns_head_and_constraints():
+    _ensure_rows()
     cols = dict(line.split("|") for line in _psql(
         "SELECT column_name, is_nullable FROM information_schema.columns "
         "WHERE table_schema = 'public' AND table_name = 'audit_events' "
@@ -123,6 +130,7 @@ def test_chain_schema_columns_head_and_constraints():
 def test_seq_has_no_gaps_from_one():
     """Red on the long-lived Fixer volume between commits 7 and 9, when the tests
     still deleted journal rows (plan 17 П9); green on a fresh volume."""
+    _ensure_rows()
     assert _one("SELECT count(*) = max(seq) AND min(seq) = 1 FROM audit_events") == "t"
 
 
@@ -148,6 +156,7 @@ def test_canon_encodes_every_field_with_its_length():
 
 
 def test_first_row_links_to_the_chain_id():
+    _ensure_rows()
     head = _head()
     first = _rows("seq = 1")
     assert first and first[0]["prev_hash"] == canon.genesis_prev_hash(head["chain_id"])
