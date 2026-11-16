@@ -279,8 +279,11 @@ def test_repeat_migrate_keeps_the_chain_triggers_and_checks():
 @pytest.mark.skipif(PROJECT != "e6", reason="only on the disposable stand -p e6 (deletes the chain head)")
 def test_missing_head_stops_migrate_instead_of_a_new_chain():
     """A7: with seq rows but no head, migrate refuses to rebuild (fail closed)."""
-    _psql("ALTER TABLE audit_chain_head DISABLE TRIGGER ALL; DELETE FROM audit_chain_head; "
-          "ALTER TABLE audit_chain_head ENABLE ALWAYS TRIGGER ALL")
+    _ensure_rows()
+    _psql("BEGIN; ALTER TABLE audit_chain_head DISABLE TRIGGER USER; DELETE FROM audit_chain_head; "
+          + "".join(f"ALTER TABLE audit_chain_head ENABLE ALWAYS TRIGGER {name}; " for name in
+                    ("audit_chain_head_guard", "audit_chain_head_no_delete", "audit_chain_head_no_truncate"))
+          + "COMMIT;")
     done = _migrate()
     assert done.returncode != 0 and "refusing to rebuild" in done.stdout + done.stderr
 
