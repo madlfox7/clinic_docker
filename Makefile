@@ -14,7 +14,7 @@ TEST_FILES ?= tests/test_stage4.py tests/test_rls_boundary.py tests/test_secrets
 	tests/test_field_encryption.py tests/test_ui_security.py tests/test_ui_fixes.py \
 	tests/test_audit_fixes.py tests/test_session.py tests/test_network.py \
 	tests/test_r2_fixes.py tests/test_ux_filters.py tests/test_hardening.py \
-	tests/test_polish.py tests/test_tls.py tests/test_ngrok_demo.py
+	tests/test_polish.py tests/test_tls.py tests/test_ngrok_demo.py tests/test_audit_chain.py
 PYTEST_ARGS ?= -q
 CONFIRM ?=
 

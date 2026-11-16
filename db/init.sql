@@ -737,19 +737,55 @@ CREATE INDEX IF NOT EXISTS audit_events_created_at_idx
 ALTER TABLE audit_events ALTER COLUMN actor_user_id DROP NOT NULL;
 ALTER TABLE audit_events ADD COLUMN IF NOT EXISTS reason TEXT;
 ALTER TABLE audit_events ADD COLUMN IF NOT EXISTS source TEXT;
-ALTER TABLE audit_events DROP CONSTRAINT IF EXISTS audit_events_actor_role_check;
-ALTER TABLE audit_events ADD CONSTRAINT audit_events_actor_role_check
-  CHECK (actor_role IN ('admin', 'doctor', 'patient', 'registrar', 'anonymous'));
-ALTER TABLE audit_events DROP CONSTRAINT IF EXISTS audit_events_actor_check;
-ALTER TABLE audit_events ADD CONSTRAINT audit_events_actor_check
-  CHECK (
-    (actor_user_id IS NOT NULL AND actor_role <> 'anonymous')
-    OR (
-      actor_user_id IS NULL
-      AND actor_role = 'anonymous'
-      AND action IN ('auth.login.failure', 'auth.rate_limited')
-    )
-  );
+-- The journal only grows, so a CHECK is rebuilt only when its definition
+-- differs from the one below (plan 17 П5): a normal start does not rescan it.
+DO $$
+BEGIN
+  IF EXISTS (
+    SELECT 1 FROM pg_constraint
+    WHERE conname = 'audit_events_actor_role_check'
+      AND conrelid = 'public.audit_events'::regclass
+      AND pg_get_constraintdef(oid) <> 'CHECK ((actor_role = ANY (ARRAY[''admin''::text, ''doctor''::text, ''patient''::text, ''registrar''::text, ''anonymous''::text])))'
+  ) THEN
+    ALTER TABLE public.audit_events DROP CONSTRAINT audit_events_actor_role_check;
+  END IF;
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_constraint
+    WHERE conname = 'audit_events_actor_role_check'
+      AND conrelid = 'public.audit_events'::regclass
+  ) THEN
+    ALTER TABLE public.audit_events ADD CONSTRAINT audit_events_actor_role_check
+      CHECK (actor_role IN ('admin', 'doctor', 'patient', 'registrar', 'anonymous'));
+  END IF;
+END
+$$;
+DO $$
+BEGIN
+  IF EXISTS (
+    SELECT 1 FROM pg_constraint
+    WHERE conname = 'audit_events_actor_check'
+      AND conrelid = 'public.audit_events'::regclass
+      AND pg_get_constraintdef(oid) <> 'CHECK ((((actor_user_id IS NOT NULL) AND (actor_role <> ''anonymous''::text)) OR ((actor_user_id IS NULL) AND (actor_role = ''anonymous''::text) AND (action = ANY (ARRAY[''auth.login.failure''::text, ''auth.rate_limited''::text])))))'
+  ) THEN
+    ALTER TABLE public.audit_events DROP CONSTRAINT audit_events_actor_check;
+  END IF;
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_constraint
+    WHERE conname = 'audit_events_actor_check'
+      AND conrelid = 'public.audit_events'::regclass
+  ) THEN
+    ALTER TABLE public.audit_events ADD CONSTRAINT audit_events_actor_check
+      CHECK (
+        (actor_user_id IS NOT NULL AND actor_role <> 'anonymous')
+        OR (
+          actor_user_id IS NULL
+          AND actor_role = 'anonymous'
+          AND action IN ('auth.login.failure', 'auth.rate_limited')
+        )
+      );
+  END IF;
+END
+$$;
 -- The reasons CHECK is rebuilt only when its definition lacks the newest
 -- reason, so a normal restart does not rescan audit_events.
 DO $$
@@ -782,9 +818,26 @@ BEGIN
   END IF;
 END
 $$;
-ALTER TABLE audit_events DROP CONSTRAINT IF EXISTS audit_events_source_check;
-ALTER TABLE audit_events ADD CONSTRAINT audit_events_source_check
-  CHECK (source IS NULL OR length(source) <= 64);
+DO $$
+BEGIN
+  IF EXISTS (
+    SELECT 1 FROM pg_constraint
+    WHERE conname = 'audit_events_source_check'
+      AND conrelid = 'public.audit_events'::regclass
+      AND pg_get_constraintdef(oid) <> 'CHECK (((source IS NULL) OR (length(source) <= 64)))'
+  ) THEN
+    ALTER TABLE public.audit_events DROP CONSTRAINT audit_events_source_check;
+  END IF;
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_constraint
+    WHERE conname = 'audit_events_source_check'
+      AND conrelid = 'public.audit_events'::regclass
+  ) THEN
+    ALTER TABLE public.audit_events ADD CONSTRAINT audit_events_source_check
+      CHECK (source IS NULL OR length(source) <= 64);
+  END IF;
+END
+$$;
 
 CREATE INDEX IF NOT EXISTS audit_events_rate_limited_idx
   ON audit_events (created_at)
@@ -867,3 +920,212 @@ $$;
 CREATE INDEX IF NOT EXISTS audit_events_reschedule_actor_idx
   ON audit_events (actor_user_id, created_at)
   WHERE action = 'appointment.reschedule';
+
+-- ---------------------------------------------------------------------------
+-- Audit hash chain (plan 17 §6). Every row carries seq, the hash of the row
+-- before it (prev_hash) and its own hash (row_hash = audit_row_hash_v1(prev_hash,
+-- audit_canon_v1(row)), SHA-256 in v1)). The chain order is seq, not id. The head row keeps
+-- the last seq and hash; the anchors outside the database (audit_anchor) make
+-- a recomputed chain detectable. Grants are in rls.sql (the roles do not
+-- exist yet when the db container runs this file on a fresh volume).
+ALTER TABLE audit_events ADD COLUMN IF NOT EXISTS seq bigint;
+ALTER TABLE audit_events ADD COLUMN IF NOT EXISTS prev_hash bytea;
+ALTER TABLE audit_events ADD COLUMN IF NOT EXISTS row_hash bytea;
+ALTER TABLE audit_events ADD COLUMN IF NOT EXISTS hash_version smallint;
+
+CREATE TABLE IF NOT EXISTS audit_chain_head (
+  id smallint PRIMARY KEY CHECK (id = 1),
+  chain_id uuid NOT NULL,
+  last_seq bigint NOT NULL,
+  last_hash bytea NOT NULL CHECK (octet_length(last_hash) = 32),
+  genesis_at timestamptz NOT NULL,
+  genesis_rows bigint NOT NULL
+);
+REVOKE ALL ON TABLE public.audit_chain_head FROM PUBLIC;
+
+-- One field of the canonical form: '<length in bytes>:<UTF-8 bytes>', NULL is
+-- '-'. Integers are passed as their decimal text, which does not depend on
+-- any session setting.
+CREATE OR REPLACE FUNCTION public.audit_canon_field(v text)
+RETURNS bytea
+LANGUAGE sql
+IMMUTABLE
+SET search_path = pg_catalog, pg_temp
+AS $$
+  SELECT CASE
+    WHEN v IS NULL THEN '\x2d'::bytea
+    ELSE convert_to(octet_length(convert_to(v, 'UTF8'))::text || ':', 'UTF8') || convert_to(v, 'UTF8')
+  END
+$$;
+
+-- Canonical form v1 of a journal row (no ::text of dates, no row_to_json:
+-- their output depends on TimeZone and DateStyle). created_at is whole
+-- microseconds since the UTC epoch. audit/canon.py is the independent Python
+-- implementation that verify_audit and the anchors use.
+CREATE OR REPLACE FUNCTION public.audit_canon_v1(
+  p_seq bigint, p_id bigint, p_created_at timestamptz, p_actor_user_id integer,
+  p_actor_role text, p_action text, p_target_type text, p_target_id integer,
+  p_reason text, p_source text, p_old_value integer, p_new_value integer
+)
+RETURNS bytea
+LANGUAGE sql
+IMMUTABLE
+SET search_path = pg_catalog, public, pg_temp
+AS $$
+  SELECT convert_to('clinic-audit-v1', 'UTF8')
+    || public.audit_canon_field(p_seq::text)
+    || public.audit_canon_field(p_id::text)
+    || public.audit_canon_field(((extract(epoch FROM p_created_at) * 1000000)::bigint)::text)
+    || public.audit_canon_field(p_actor_user_id::text)
+    || public.audit_canon_field(p_actor_role)
+    || public.audit_canon_field(p_action)
+    || public.audit_canon_field(p_target_type)
+    || public.audit_canon_field(p_target_id::text)
+    || public.audit_canon_field(p_reason)
+    || public.audit_canon_field(p_source)
+    || public.audit_canon_field(p_old_value::text)
+    || public.audit_canon_field(p_new_value::text)
+$$;
+
+-- The one place that names the hash algorithm of the chain (v1: SHA-256).
+CREATE OR REPLACE FUNCTION public.audit_row_hash_v1(p_prev bytea, p_canon bytea)
+RETURNS bytea
+LANGUAGE sql
+IMMUTABLE
+SET search_path = pg_catalog, pg_temp
+AS $$
+  SELECT sha256(p_prev || p_canon)
+$$;
+
+-- The first prev_hash of a chain: hash of the 16 raw bytes of chain_id.
+CREATE OR REPLACE FUNCTION public.audit_genesis_hash_v1(p_chain uuid)
+RETURNS bytea
+LANGUAGE sql
+IMMUTABLE
+SET search_path = pg_catalog, pg_temp
+AS $$
+  SELECT sha256(uuid_send(p_chain))
+$$;
+
+-- BEFORE INSERT: the chain values and created_at from the client are always
+-- overwritten. The head row lock is held until COMMIT, so concurrent inserts
+-- get consecutive seq values; a ROLLBACK takes back both the row and the head.
+-- Rule: the journal insert is the last locking step of a transaction.
+CREATE OR REPLACE FUNCTION public.audit_chain_before_insert()
+RETURNS trigger
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = pg_catalog, public, pg_temp
+AS $$
+DECLARE
+  h record;
+BEGIN
+  SELECT chain_id, last_seq, last_hash INTO h
+    FROM public.audit_chain_head WHERE id = 1 FOR UPDATE;
+  IF NOT FOUND THEN
+    RAISE EXCEPTION 'audit chain head missing' USING ERRCODE = '55000';
+  END IF;
+  NEW.created_at := CURRENT_TIMESTAMP;
+  NEW.seq := h.last_seq + 1;
+  NEW.prev_hash := h.last_hash;
+  NEW.hash_version := 1;
+  NEW.row_hash := public.audit_row_hash_v1(NEW.prev_hash, public.audit_canon_v1(
+    NEW.seq, NEW.id, NEW.created_at, NEW.actor_user_id, NEW.actor_role, NEW.action,
+    NEW.target_type, NEW.target_id, NEW.reason, NEW.source, NEW.old_value, NEW.new_value));
+  UPDATE public.audit_chain_head SET last_seq = NEW.seq, last_hash = NEW.row_hash WHERE id = 1;
+  RETURN NEW;
+END
+$$;
+REVOKE ALL ON FUNCTION public.audit_chain_before_insert() FROM PUBLIC;
+
+-- Genesis (once) and the chain constraints and trigger, all in one DO block,
+-- that is one transaction, under ACCESS EXCLUSIVE (a SHARE ROW EXCLUSIVE lock
+-- would deadlock with an api transaction that read the journal first). Rows
+-- that exist before genesis get their hashes now, in id order; changes made
+-- to them before this moment are not covered. If rows have seq but the head
+-- is gone the chain is not rebuilt: that would launder a forgery.
+DO $$
+DECLARE
+  r record;
+  chain uuid;
+  prev bytea;
+  n bigint := 0;
+BEGIN
+  PERFORM set_config('lock_timeout', '30s', true);
+  LOCK TABLE public.audit_events IN ACCESS EXCLUSIVE MODE;
+  IF NOT EXISTS (SELECT 1 FROM public.audit_chain_head WHERE id = 1) THEN
+    IF EXISTS (SELECT 1 FROM public.audit_events WHERE seq IS NOT NULL) THEN
+      RAISE EXCEPTION 'audit chain head missing, refusing to rebuild the chain'
+        USING ERRCODE = '55000';
+    END IF;
+    chain := gen_random_uuid();
+    prev := public.audit_genesis_hash_v1(chain);
+    FOR r IN SELECT * FROM public.audit_events ORDER BY id LOOP
+      n := n + 1;
+      UPDATE public.audit_events
+        SET seq = n, prev_hash = prev, hash_version = 1,
+            row_hash = public.audit_row_hash_v1(prev, public.audit_canon_v1(
+              n, r.id, r.created_at, r.actor_user_id, r.actor_role, r.action,
+              r.target_type, r.target_id, r.reason, r.source, r.old_value, r.new_value))
+        WHERE id = r.id
+        RETURNING row_hash INTO prev;
+    END LOOP;
+    INSERT INTO public.audit_chain_head (id, chain_id, last_seq, last_hash, genesis_at, genesis_rows)
+      VALUES (1, chain, n, prev, now(), n);
+  END IF;
+  IF EXISTS (
+    SELECT 1 FROM pg_attribute
+    WHERE attrelid = 'public.audit_events'::regclass
+      AND attname IN ('seq', 'prev_hash', 'row_hash', 'hash_version')
+      AND NOT attnotnull
+  ) THEN
+    ALTER TABLE public.audit_events
+      ALTER COLUMN seq SET NOT NULL,
+      ALTER COLUMN prev_hash SET NOT NULL,
+      ALTER COLUMN row_hash SET NOT NULL,
+      ALTER COLUMN hash_version SET NOT NULL;
+  END IF;
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_constraint
+    WHERE conname = 'audit_events_seq_key' AND conrelid = 'public.audit_events'::regclass
+  ) THEN
+    ALTER TABLE public.audit_events ADD CONSTRAINT audit_events_seq_key UNIQUE (seq);
+  END IF;
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_constraint
+    WHERE conname = 'audit_events_chain_check' AND conrelid = 'public.audit_events'::regclass
+  ) THEN
+    ALTER TABLE public.audit_events ADD CONSTRAINT audit_events_chain_check
+      CHECK (octet_length(prev_hash) = 32 AND octet_length(row_hash) = 32
+             AND hash_version = 1 AND seq >= 1);
+  END IF;
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_trigger
+    WHERE tgrelid = 'public.audit_events'::regclass AND tgname = 'zz_audit_chain'
+  ) THEN
+    EXECUTE 'CREATE TRIGGER zz_audit_chain BEFORE INSERT ON public.audit_events
+             FOR EACH ROW EXECUTE FUNCTION public.audit_chain_before_insert()';
+  END IF;
+END
+$$;
+
+-- BEGIN audit_trigger_mode
+-- The journal triggers fire ALWAYS, also with session_replication_role =
+-- replica. DISABLE + ENABLE TRIGGER leaves mode 'O', so every migrate puts
+-- 'A' back.
+DO $$
+DECLARE
+  t record;
+BEGIN
+  FOR t IN
+    SELECT tgrelid::regclass AS rel, tgname
+    FROM pg_trigger
+    WHERE tgrelid IN ('public.audit_events'::regclass, 'public.audit_chain_head'::regclass)
+      AND NOT tgisinternal
+      AND tgenabled <> 'A'
+  LOOP
+    EXECUTE format('ALTER TABLE %s ENABLE ALWAYS TRIGGER %I', t.rel, t.tgname);
+  END LOOP;
+END
+$$;
+-- END audit_trigger_mode

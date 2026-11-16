@@ -1902,6 +1902,13 @@ REVOKE ALL ON TABLE public.email_change_requests
   FROM PUBLIC, clinic_api, app_guest, app_patient, app_doctor, app_registrar, app_admin;
 GRANT USAGE, SELECT ON SEQUENCE public.users_id_seq TO app_admin;
 GRANT SELECT ON public.audit_events TO app_admin;
+-- The journal and its chain head are written only by the DEFINER functions and
+-- the chain trigger (owner clinic); nobody else may write or alter them.
+REVOKE INSERT, UPDATE, DELETE, TRUNCATE, TRIGGER, REFERENCES ON public.audit_events
+  FROM PUBLIC, clinic_api, app_guest, app_patient, app_doctor, app_registrar, app_admin;
+REVOKE ALL ON TABLE public.audit_chain_head
+  FROM PUBLIC, clinic_api, app_guest, app_patient, app_doctor, app_registrar, app_admin;
+REVOKE ALL ON FUNCTION public.audit_chain_before_insert() FROM PUBLIC;
 GRANT SELECT ON public.time_off_requests TO app_admin;
 GRANT UPDATE (status, decided_by, decided_at)
   ON public.time_off_requests TO app_admin;
