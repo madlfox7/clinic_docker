@@ -15,7 +15,7 @@ make start
 - `make stop`, `make restart` — остановка и перезапуск контейнеров.
 - `make clean` — удаляет контейнеры и сети Compose (`down`), данные БД сохраняются.
 - `make logs`, `make ps` — логи всех сервисов (`logs -f`) и список контейнеров.
-- `make test` — тесты против запущенного стека; адреса и проект меняются переменными `TEST_BASE` (по умолчанию `http://localhost:8080`), `TEST_MAILPIT` (`http://127.0.0.1:8025`), `TEST_PROJECT`, а также `PYTHON` и `PYTEST_ARGS`.
+- `make test` — тесты против запущенного стека; адреса и проект меняются переменными `TEST_BASE` (по умолчанию `https://localhost:8450`), `TEST_MAILPIT` (`http://127.0.0.1:8025`), `TEST_PROJECT`, а также `PYTHON` и `PYTEST_ARGS`.
 
 **`make reset` и `make fclean` удаляют БД.** `reset` выполняет `down -v` и затем `start`; `fclean` выполняет `down -v --rmi local --remove-orphans` только для этого Compose-проекта (`docker system prune` не вызывается). Обе цели сначала спрашивают подтверждение; `CONFIRM=yes` пропускает вопрос, без `yes` ничего не удаляется.
 
@@ -72,7 +72,7 @@ API и `seed` подключаются к PostgreSQL ролью `clinic_api`; `P
 
 `.env` содержит только несекретные настройки. Пароли БД, ключ сессии и пароль SMTP лежат в `secrets/` (не коммитится) и попадают в контейнеры как Docker secrets в `/run/secrets/`. `scripts/init_secrets.sh` создаёт недостающие файлы, не перезаписывает существующие и удаляет из `.env` устаревшие строки `POSTGRES_PASSWORD`, `CLINIC_API_PASSWORD`, `SESSION_SECRET` и `SMTP_PASSWORD`. Если раньше пароли были в `.env`, после этого пересоздайте стек: `docker compose down -v && ./scripts/init_secrets.sh && docker compose up --build -d`. Подробнее: `docs/sec_doc.md`.
 
-Права на файлы в `secrets/`: `600` для владельца плюс ACL на чтение только тому пользователю контейнера, который читает файл (`postgres_password` — uid 999, `clinic_api_password`, `session_secret`, `smtp_password`, `demo_password` — uid 10001; `migrate` работает от root и ACL не нужен). Fallback без `setfacl` или на ФС без ACL: если `init_secrets.sh` запущен от root, файл отдаётся этому uid (`chown`, права `400`); иначе файл остаётся `644`, а скрипт печатает `warning` с командой `chmod 600 <файл> && sudo setfacl -m u:<uid>:r <файл>` (сначала `chmod`, потом `setfacl`, иначе ACL перестанет действовать). Файлы, которыми вы не владеете, скрипт не трогает (`note`). Ограничения: в rootless Docker uid контейнера отображается на subuid хоста, и ACL на `10001`/`999` не сработает; в Docker Desktop (macOS/Windows) права общих папок не применяются; `cp -r` и zip без сохранения ACL их теряют.
+Права на файлы в `secrets/`: `600` для владельца плюс ACL на чтение только тому пользователю контейнера, который читает файл (`postgres_password` — uid 999, `clinic_api_password`, `session_secret`, `smtp_password`, `demo_password` — uid 10001; `audit_db_password` — uid 10002, пользователь `audit_anchor`; `migrate` работает от root и ACL не нужен). Fallback без `setfacl` или на ФС без ACL: если `init_secrets.sh` запущен от root, файл отдаётся этому uid (`chown`, права `400`); иначе файл остаётся `644` (кроме ключей медполей и `audit_anchor_key`: они остаются `600`), а скрипт печатает `warning` с командой `chmod 600 <файл> && sudo setfacl -m u:<uid>:r <файл>` (сначала `chmod`, потом `setfacl`, иначе ACL перестанет действовать). Файлы, которыми вы не владеете, скрипт не трогает (`note`). Ограничения: в rootless Docker uid контейнера отображается на subuid хоста, и ACL на `10001`/`999` не сработает; в Docker Desktop (macOS/Windows) права общих папок не применяются; `cp -r` и zip без сохранения ACL их теряют.
 
 Внешний вид и заголовки безопасности. Интерфейс собран на Bootstrap 5.3.8 (только CSS, без Bootstrap JS и без CDN): `app/static/vendor/bootstrap/bootstrap.min.css` плюс свои `app/static/app.css`, `app/static/app.js` и SVG-иконки в `app/static/img/`. Статику отдаёт `api` (`StaticFiles`, без листинга каталогов); в шаблонах ссылки вида `/static/app.css?v=<хэш>`, поэтому такие URL кешируются надолго, а HTML-страницы отдаются с `Cache-Control: no-store`. В шаблонах нет `style=`, `on...=`, встроенных `<script>`/`<style>` и `data:`-картинок; подтверждения — атрибут `data-confirm`. nginx ставит строгий `Content-Security-Policy` (без `unsafe-inline`) и остальные заголовки на все ответы. Версия и SHA-256 Bootstrap, политика и правила — в `docs/sec_doc.md`, раздел 8.
 
@@ -84,13 +84,35 @@ API и `seed` подключаются к PostgreSQL ролью `clinic_api`; `P
 
 Смена ключа без потери старых записей: `./scripts/rotate_field_key.sh` переносит текущий ключ в `secrets/field_encryption_previous_keys` (он остаётся для чтения) и создаёт новый с новым `key_id` (`v1` → `v2`). Затем `docker compose up -d --force-recreate api`: новые записи шифруются новым ключом, старые читаются по своему `key_id`. По желанию перешифровать старые строки новым ключом: `docker compose exec api python -m migrate_medical_fields --reencrypt`. Старый ключ удаляйте из `field_encryption_previous_keys` только после этого. Просто заменить `field_encryption_key` нельзя: всё, что записано старым ключом, перестанет читаться. Подробнее: `docs/sec_doc.md`.
 
-http://127.0.0.1:8025.
+Mailpit: http://127.0.0.1:8025 (именно `127.0.0.1`, не `localhost`, см. HSTS ниже).
 
- http://localhost:8080
+Сайт: https://localhost:8450 (стенды Fixer и Planera — 8452 и 8453). HTTP-порт 8080 только перенаправляет на HTTPS (308).
 
-(nginx only, for now without tls)
+### HTTPS на стенде (`CLINIC_TLS_MODE=local`)
 
-По умолчанию proxy слушает все интерфейсы (`0.0.0.0:8080`) и без TLS доступен из локальной сети. Чтобы открыть сайт только на этой машине, добавьте в `.env` строку `CLINIC_PROXY_BIND=127.0.0.1` и выполните `docker compose up -d proxy`.
+`make start` (через `scripts/init_secrets.sh`) выпускает свой CA с `nameConstraints` (только `localhost`, `127.0.0.1`, `::1`; `extendedKeyUsage=serverAuth`) и серверный лист на год. Браузер предупреждает о сертификате, пока вы не импортируете `secrets/tls/ca.crt` (по желанию). Ключ CA не покидает хост и в контейнеры не попадает. Тесты ходят по HTTPS с `SSL_CERT_FILE=secrets/tls/ca.crt` (Makefile и `tests/run_tests.sh` ставят его сами).
+
+**HSTS** на стенде — 1 час (`CLINIC_HSTS_MAX_AGE=3600`). HSTS действует на все порты `localhost`, поэтому после захода на стенд браузер будет открывать по HTTPS и другие локальные сервисы на `localhost`: Mailpit открывайте только по `http://127.0.0.1:<порт>`. Для настоящего домена — `31536000`; `includeSubDomains` и `preload` мы не ставим, это только рекомендация (preload практически необратим).
+
+По умолчанию proxy слушает все интерфейсы (`0.0.0.0`), но сертификат стенда выпущен только на `localhost`/`127.0.0.1`/`::1`: с другой машины браузер предупредит о сертификате, а редирект с HTTP ведёт на `PUBLIC_BASE_URL` (`localhost`). Для доступа по сети используйте режим `provided` с настоящим именем. Чтобы открыть стенд только на этой машине, добавьте в `.env` строку `CLINIC_PROXY_BIND=127.0.0.1` и выполните `docker compose up -d proxy`.
+
+Сессионная cookie: `SESSION_HTTPS_ONLY=true` по умолчанию (флаг `Secure`); `api` не стартует, если `PUBLIC_BASE_URL` не `https://`.
+
+### Прод: `CLINIC_TLS_MODE=provided`
+
+Образец настроек — `.env.prod.example`. Полная цепочка сертификата кладётся в `secrets/tls/server.crt`, ключ — в `secrets/tls/server.key`; `init_secrets.sh` их только проверяет, проверка вручную — `make tls-check`. В `PUBLIC_BASE_URL` — имя (не IP-литерал), без порта и пути. Получение сертификата: ACME DNS-01 (рекомендация) или HTTP-01 через webroot (`CLINIC_ACME_WEBROOT=true` и `docker-compose.acme.yml`). Обновление — только через `scripts/tls_reload.sh NEW_KEY NEW_FULLCHAIN` (проверка, бэкап, запись в те же inode bind-mount, `nginx -t`, graceful reload, сверка serial), например как `--deploy-hook` certbot: `--deploy-hook 'cd /srv/clinic && scripts/tls_reload.sh "$RENEWED_LINEAGE/privkey.pem" "$RENEWED_LINEAGE/fullchain.pem"'`. OCSP не нужен (Let's Encrypt закрыл OCSP в 2025), stapling — опция для корпоративного CA.
+
+### Журнал аудита: хеш-цепочка и якоря
+
+- Журнал `audit_events` только дописывается: `UPDATE`, `DELETE` и `TRUNCATE` запрещены триггерами, в том числе суперпользователю (триггеры в режиме `ENABLE ALWAYS`). Внешнего ключа на `users` нет: удаление неподтверждённого приглашения пишет событие `user.invite_discarded`, история остаётся.
+- Каждая строка получает `seq`, `prev_hash` и `row_hash` = SHA-256 от предыдущего хеша и канонической формы строки v1 (поля по порядку, `<длина>:<байты>`, NULL — `-`, время — микросекунды UTC). Голова цепочки — `audit_chain_head`. Строки, записанные до `genesis_at`, получили хеши задним числом и не гарантированы. Пропала голова при наличии строк — `migrate` не стартует (восстановление из бэкапа), новую цепочку поверх старых строк он не строит.
+- Сервис `audit_anchor` (пользователь БД `clinic_auditor`, только `SELECT` журнала и головы) раз в `CLINIC_AUDIT_ANCHOR_INTERVAL` секунд (по умолчанию 60, допустимо 10–3600) проверяет цепочку от последнего якоря и, только если она цела, дописывает в `audit_anchors/<chain_id>.log` якорь `seq` + хеш с HMAC-SHA256 (цепочка MAC по строкам). Ключ `secrets/audit_anchor_key` монтируется только в `audit_anchor`: права `600` + ACL на чтение uid 10002, либо от root `chown 10002` и `400`; если ни то, ни другое невозможно, ключ остаётся `600` с предупреждением (никогда не `644`) и `audit_anchor` не стартует, пока не получит доступ. Запись якорей и реестра идёт под `flock` на `audit_anchors/.lock`.
+- Проверка: `make audit-verify` (`OK chain=… rows=… anchors=… last_anchor_age=…` или `BROKEN seq=… type=…`, код 1). `--strict` (`VERIFY_ARGS=--strict`) даёт код 3, если какая-то цепочка закрыта `forced` или `offline`.
+- **Окно риска — до 60 с (один интервал):** правку журнала, сделанную суперпользователем БД после последнего якоря (отключить триггеры и пересчитать хеши), якорь не увидит, пока она не попадёт под следующий якорь — а следующий якорь уже не пишется, если цепочка не сходится с предыдущим. Правка строк до последнего якоря обнаруживается всегда (эксперимент E6: 20/20, `experiments/e6_report.md`). Окно можно сжать до 10 с через `CLINIC_AUDIT_ANCHOR_INTERVAL`. Честная модель угроз: суперпользователь БД может отключить триггеры и пересчитать цепочку — его ловят только якоря.
+- Реестр цепочек `audit_anchors/chains.log` (`open`, `retire`, `switch`, тоже с HMAC): новая цепочка без закрытия старой — тревога `chain_replaced` (healthcheck красный, `verify_audit` — `BROKEN type=chain_replaced`). `make reset` и `make fclean` сначала останавливают `proxy` и `api` и закрывают цепочку (`anchor.py --retire`), поэтому плановый сброс тревоги не даёт. При сломанной цепочке сброс останавливается; осознанный сброс — `make reset CONFIRM=yes RETIRE_FORCE=yes` (в реестре `retire … forced`, `verify_audit` печатает `WARN`).
+- **Не выполняйте `git clean -fdx` (или `-X`) в рабочей копии:** `audit_anchors*/` в `.gitignore`, и такая очистка удалит якоря и реестр без следа. Каталог якорей создаёт `init_secrets.sh` (`700` + ACL `u:10002:rwx`); если `setfacl` нет, запустите `init_secrets.sh` от root. не открывайте его всем (права `777`): ключ и якоря станут доступны любому пользователю хоста.
+- Триггеры журнала — в режиме `ENABLE ALWAYS`. После ручного `DISABLE` включайте только `ALTER TABLE … ENABLE ALWAYS TRIGGER …` (простой `ENABLE` даёт режим `O`, `verify_audit` сообщит `trigger_mode`, а `migrate` вернёт `A`). **Восстановление только данных:** `pg_restore --data-only --disable-triggers …`, затем `ENABLE ALWAYS TRIGGER` — без `--disable-triggers` триггер `zz_audit_chain` перепишет `seq`, хеши и `created_at`, и история будет испорчена.
+- На одном хосте root получает и БД, и ключ, и файлы якорей; против него помогают только якоря за пределами хоста. Рекомендация для прода: cron или systemd-timer раз в 5–15 минут копирует `audit_anchors/<chain_id>.log` и `chains.log` в WORM-хранилище (S3 Object Lock в режиме compliance, удалённый append-only syslog или почтовый ящик), а `verify_audit --anchors <копия>` сверяет внешнюю копию с локальной. Ключ `audit_anchor_key` храните и офлайн: без него якоря не проверить.
 
 
 ```bash
@@ -201,4 +223,4 @@ Slot generation on `/admin/schedule` uses one date range for any selected doctor
 TODO: RLS and clean  up
 
 
-GOLIVE opt1: ngrok http 8080
+GOLIVE opt1: ngrok на HTTPS-порт стенда — `make ngrok` (раздел «Demo via ngrok»), то есть `ngrok http https://localhost:<CLINIC_PROXY_TLS_PORT> --url https://$NGROK_DOMAIN --upstream-tls-verify --upstream-tls-verify-cas <абсолютный путь secrets/tls/ca.crt>`. `ngrok http 8080` больше не работает: HTTP-порт отвечает 308 на `https://localhost:…`.

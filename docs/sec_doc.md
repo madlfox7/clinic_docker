@@ -17,6 +17,10 @@
 | `demo_password` | `seed`, один пароль для всех демо-учёток @clinic.local |
 | `field_encryption_key` | только `api`: текущий ключ шифрования медполей, `<key_id>:<64 hex>` |
 | `field_encryption_previous_keys` | только `api`: старые ключи для чтения, по одному `<key_id>:<64 hex>` в строке; пустой до первой ротации |
+| `audit_db_password` | `migrate` задаёт пароль роли `clinic_auditor`, `audit_anchor` подключается с ним (только `SELECT` журнала и головы цепочки) |
+| `audit_anchor_key` | только `audit_anchor`: HMAC-ключ якорей и реестра цепочек; `600` + ACL `u:10002:r` или от root `chown 10002` + `400`, никогда не `644`; не перезаписывается |
+| `tls/ca.key` | только хост (`init_secrets.sh`): ключ учебного CA, в контейнеры не попадает |
+| `tls/server.crt`, `tls/server.key` | `proxy`: серверный сертификат (в `provided` — ваша полная цепочка) и ключ |
 
 В коде секрет читается через `read_secret(name)`. Функция берёт `/run/secrets/<name>` и падает, если файла нет. Запасного варианта через env нет. Хост, имя пользователя и имя базы не секретны и задаются через `PGHOST`, `PGUSER` и `PGDATABASE`.
 
@@ -61,7 +65,7 @@ git grep -n "<значение секрета>"                                 
   2. `docker compose up -d --force-recreate api`: новые записи шифруются новым `key_id`, старые читаются по своему `key_id` старым ключом.
   3. По желанию: `docker compose exec api python -m migrate_medical_fields --reencrypt` перешифровывает строки со старым `key_id` текущим ключом. Только после этого старую строку можно удалить из `field_encryption_previous_keys`.
 - Проверка: `docker compose exec db psql -U clinic -d clinic -c "SELECT left(body, 12) FROM visit_notes LIMIT 5"` показывает только `fe2:...`; `docker compose exec db ls /run/secrets` не содержит `field_encryption_key`.
-- Чего это не закрывает: кто получит и дамп, и файл ключа, прочитает текст. Владелец БД без ключа текст не прочитает и не сможет переставить пакет в другую строку так, чтобы он открылся, но может удалить или испортить строку; подмену журнала закрывает следующий этап (хэш-цепочка аудита). Старые пакеты `fe1` из дампов, снятых до привязки, миграция при старте ещё примет; чтобы закрыть и это, после миграции можно сменить ключ (`rotate_field_key.sh`, затем `--reencrypt`) и удалить старый ключ.
+- Чего это не закрывает: кто получит и дамп, и файл ключа, прочитает текст. Владелец БД без ключа текст не прочитает и не сможет переставить пакет в другую строку так, чтобы он открылся, но может удалить или испортить строку; подмену журнала обнаруживает хеш-цепочка аудита с внешними HMAC-якорями (раздел 9). Старые пакеты `fe1` из дампов, снятых до привязки, миграция при старте ещё примет; чтобы закрыть и это, после миграции можно сменить ключ (`rotate_field_key.sh`, затем `--reencrypt`) и удалить старый ключ.
 
 ## 8. Внешний вид, статика и заголовки безопасности
 - Bootstrap 5.3.8, только `dist/css/bootstrap.min.css` и `LICENSE` (MIT), без Bootstrap JS, без CDN, шрифтов и внешних картинок. Источник — npm-пакет `bootstrap@5.3.8`; его `integrity` (sha512) совпал с реестром, а `bootstrap.min.css` побайтно совпал с файлом из официального релиза GitHub `bootstrap-5.3.8-dist.zip`.
@@ -75,9 +79,23 @@ git grep -n "<значение секрета>"                                 
 - Заголовки ставит nginx из одного файла `docker/proxy/security_headers.conf`, все с `always` (и на 4xx/5xx). Так как nginx не наследует `add_header` в `location` со своими `add_header`, файл подключён `include` в КАЖДОМ `location` (`/reset-password`, `/confirm-email`, `/static/`, `/`) и на уровне `server`:
   - `Content-Security-Policy: default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self'; font-src 'self'; connect-src 'self'; frame-src 'none'; worker-src 'none'; manifest-src 'self'; object-src 'none'; base-uri 'self'; form-action 'self'; frame-ancestors 'none'`
   - `X-Content-Type-Options: nosniff`, `Referrer-Policy: no-referrer` (токены в `/reset-password` и `/confirm-email` не уходят в Referer), `X-Frame-Options: DENY`, `Permissions-Policy: camera=(), microphone=(), geolocation=()`, `Cross-Origin-Opener-Policy: same-origin`, `Cross-Origin-Resource-Policy: same-origin`.
-  - Не ставим: `X-XSS-Protection` (устарел), HSTS (будет вместе с TLS).
+  - Не ставим: `X-XSS-Protection` (устарел), HSTS ставится вместе с TLS: `Strict-Transport-Security: max-age=3600` на стенде, `31536000` в проде, без `includeSubDomains`/`preload`.
 - Лог nginx — формат `clinic_path` (путь без query string) по умолчанию для всего `server` и явно в `/reset-password`, `/confirm-email`.
 - Проверка: `curl -sI http://localhost:8080/`, `.../reset-password?token=x`, `.../static/app.css`, `.../no-such-page` — везде те же заголовки; `pytest tests/test_ui_security.py`.
 
 - Выход: только `POST /logout` из формы в меню со скрытым CSRF-токеном (общая проверка `verify_csrf`). Без токена или с неверным — 403, сессия не завершается. `GET /logout` отвечает 405 и сессию не трогает, поэтому чужая страница не может разлогинить пользователя ссылкой или картинкой.
 - Кнопка «Book» для гостя ведёт на `/login?doctor=<id>`. Свободного адреса возврата (`next`) нет, он игнорируется. После успешного входа сервер сам строит путь `/doctors/<id>/slots` и только если: роль — пациент, значение одно, 1–9 ASCII-цифр, в пределах int4, и врач активен (`doctor_is_active`). Иначе — обычная страница роли (`/me`). В форму входа попадает только проверенное число, сырое значение не отражается. В регистрацию и письма параметр не передаётся.
+
+## 9. Контроли: TLS, журнал аудита, E6
+
+| Контроль | Где | Проверка |
+|---|---|---|
+| TLS 1.2/1.3, свой CA с `nameConstraints` и `serverAuth` (local) или своя цепочка (provided) | `scripts/init_secrets.sh`, `scripts/tls_lib.sh`, `docker/proxy/` | `make tls-check`, `tests/test_tls.py` |
+| HTTP → HTTPS 308 на `PUBLIC_BASE_URL`, HSTS | nginx (`docker/proxy/`) | `tests/test_tls.py` |
+| Cookie `Secure`, `api` не стартует без `https://` в `PUBLIC_BASE_URL` | `app/` | `tests/test_tls.py`, `tests/test_session.py` |
+| Журнал только дописывается (UPDATE/DELETE/TRUNCATE запрещены и суперпользователю) | `db/init.sql` (триггеры `ENABLE ALWAYS`) | `tests/test_audit_chain.py` |
+| SHA-256-цепочка `seq`/`prev_hash`/`row_hash`, канон v1 | `db/init.sql`, `audit/canon.py` (независимая реализация) | `tests/test_audit_chain.py`, `make audit-verify` |
+| HMAC-якоря раз в 60 с, реестр цепочек, `flock` на запись | `audit/anchor.py`, `audit/chainlib.py`, сервис `audit_anchor` | `tests/test_audit_chain.py` (20 параллельных `--once`) |
+| Обнаружение подделки | `audit/verify_audit.py` | E6: `experiments/e6_report.md` (20/20) |
+
+Ограничения: правка после последнего якоря (окно до 60 с) не видна; root хоста получает БД, ключ и якоря, поэтому якоря в проде надо копировать за пределы хоста (README, раздел про журнал).
