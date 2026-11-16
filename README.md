@@ -133,6 +133,8 @@ docker compose logs --tail=100 api
 3. `make ngrok` проверяет ngrok, authtoken и домен, запускает `make start` с `PUBLIC_BASE_URL=https://$NGROK_DOMAIN` и `CLINIC_PUBLIC_TUNNEL=1` через окружение (`.env` не меняется) и открывает туннель на HTTPS-порт стенда (`CLINIC_PROXY_TLS_PORT`) с проверкой сертификата по `secrets/tls/ca.crt`. Ссылки в письмах и 308 с HTTP ведут на адрес туннеля.
 4. Ctrl+C закрывает туннель, стенд продолжает работать со ссылками на туннель. `make ngrok-off` перезапускает стенд с адресом из `.env` (localhost).
 
+Если Docker у вас работает только через `sudo`, обычный `sudo` сбрасывает `PUBLIC_BASE_URL` и `CLINIC_PUBLIC_TUNNEL`, и контейнеры остались бы на адресе из `.env`. Поэтому после `make start` скрипт сверяет адрес в контейнерах `api` и `proxy` с `https://$NGROK_DOMAIN` и при расхождении останавливается с ошибкой, не запуская ngrok. Запускайте Docker без `sudo` (группа `docker`) или сохраняйте окружение: `make ngrok COMPOSE="sudo -E docker compose"` (если sudoers запрещает `-E` — `sudo --preserve-env=PUBLIC_BASE_URL,CLINIC_PUBLIC_TUNNEL docker compose`).
+
 При первом заходе ngrok показывает свою страницу-предупреждение, нажмите «Visit Site». За ngrok все посетители приходят с одного адреса, поэтому лимиты входа и регистрации по источнику общие для всех. Mailpit через туннель не открывается: открывайте его по `http://127.0.0.1:<порт Mailpit>`, не через `localhost` (на `localhost` браузер после HTTPS-стенда включает HSTS).
 
 **Внимание:** пока туннель открыт, сайт доступен всем, у кого есть ссылка. Дополнительную защиту туннеля (пароль ngrok, OAuth, список IP) решено не ставить. Закрывайте туннель и выполняйте `make ngrok-off` сразу после демо.

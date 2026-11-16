@@ -25,12 +25,25 @@ if pathlib.Path(".env").exists():
             k, v = line.split("=", 1)
             dotenv[k.strip()] = v.strip()
 def value(name, default=""):
-    return os.environ[name] if name in os.environ else dotenv.get(name, default)
+    # FAKE_SUDO: like `sudo docker compose`, the environment does not reach Compose
+    if name in os.environ and not os.environ.get("FAKE_SUDO"):
+        return os.environ[name]
+    return dotenv.get(name, default)
 args = sys.argv[1:]
 with open(os.environ["FAKE_CALLS"], "a") as log:
     log.write(json.dumps({"args": args,
                           "PUBLIC_BASE_URL": value("PUBLIC_BASE_URL", "https://localhost:8450"),
                           "CLINIC_PUBLIC_TUNNEL": value("CLINIC_PUBLIC_TUNNEL", "0")}) + "\n")
+if args[:1] == ["exec"] and "printenv" in args:
+    name = args[-1]
+    defaults = {"PUBLIC_BASE_URL": "https://localhost:8450", "CLINIC_PUBLIC_TUNNEL": "0"}
+    service = args[args.index("printenv") - 1]
+    if service in os.environ.get("FAKE_STALE_SERVICES", "").split(","):
+        name_value = dotenv.get(name, defaults.get(name, ""))
+    else:
+        name_value = value(name, defaults.get(name, ""))
+    print(name_value)
+    sys.exit(0)
 if args[:1] == ["config"]:
     bind = value("CLINIC_PROXY_BIND", "0.0.0.0")
     print(json.dumps({"services": {"proxy": {"ports": [
@@ -268,3 +281,50 @@ def test_makefile_ngrok_targets_pass_the_compose_command():
     assert '\tCOMPOSE="$(COMPOSE)" MAKE="$(MAKE)" PYTHON="$(PYTHON)" ./scripts/ngrok_demo.sh on\n' in makefile
     assert '\tCOMPOSE="$(COMPOSE)" MAKE="$(MAKE)" PYTHON="$(PYTHON)" ./scripts/ngrok_demo.sh off\n' in makefile
     assert "tests/test_ngrok_demo.py" in makefile
+
+
+def _ngrok_started(demo: "Demo") -> bool:
+    return demo.ngrok_args.exists()
+
+
+def test_sudo_dropping_the_environment_stops_before_ngrok(tmp_path):
+    demo = Demo(tmp_path)
+    demo.dotenv(NGROK_DOMAIN=DOMAIN, **STAND)
+    done = demo.make("ngrok", FAKE_SUDO="1")
+    assert done.returncode != 0
+    err = done.stderr
+    assert "the api container uses PUBLIC_BASE_URL=https://localhost:8452, not https://" + DOMAIN in err
+    assert "ngrok not started" in err and "sudo -E" in err and "without sudo" in err
+    assert not _ngrok_started(demo)
+    assert "Site:" not in done.stdout
+
+
+@pytest.mark.parametrize("stale", ["proxy", "api"])
+def test_one_container_on_the_old_address_stops_before_ngrok(tmp_path, stale):
+    demo = Demo(tmp_path)
+    demo.dotenv(NGROK_DOMAIN=DOMAIN, **STAND)
+    done = demo.make("ngrok", FAKE_STALE_SERVICES=stale)
+    assert done.returncode != 0 and f"the {stale} container uses PUBLIC_BASE_URL" in done.stderr
+    assert not _ngrok_started(demo)
+
+
+def test_tunnel_flag_missing_in_the_proxy_stops_before_ngrok(tmp_path):
+    demo = Demo(tmp_path)
+    # the address reaches Compose through .env, the flag does not (stale proxy)
+    demo.dotenv(NGROK_DOMAIN=DOMAIN, **{**STAND, "PUBLIC_BASE_URL": f"https://{DOMAIN}"})
+    done = demo.make("ngrok", FAKE_SUDO="1")
+    assert done.returncode != 0 and "CLINIC_PUBLIC_TUNNEL=0, not 1" in done.stderr
+    assert not _ngrok_started(demo)
+
+
+def test_matching_address_starts_ngrok_after_the_check(tmp_path):
+    demo = Demo(tmp_path)
+    demo.dotenv(NGROK_DOMAIN=DOMAIN, **STAND)
+    done = demo.make("ngrok")
+    assert done.returncode == 0, done.stderr
+    assert f"check   api and proxy use PUBLIC_BASE_URL=https://{DOMAIN} (tunnel mode)" in done.stdout
+    assert done.stdout.index("check   api and proxy") < done.stdout.index("Site:")
+    assert _ngrok_started(demo)
+    reads = [c["args"] for c in demo.compose_calls() if c["args"][:1] == ["exec"]]
+    assert reads and all(a[-2] == "printenv" and a[-1] in ("PUBLIC_BASE_URL", "CLINIC_PUBLIC_TUNNEL")
+                         for a in reads)

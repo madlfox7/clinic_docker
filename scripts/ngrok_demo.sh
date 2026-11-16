@@ -40,6 +40,31 @@ print(ports[0]["published"])
 '
 }
 
+# What the running stand actually uses. `sudo docker compose` (COMPOSE="sudo
+# ...") drops PUBLIC_BASE_URL and CLINIC_PUBLIC_TUNNEL from the environment,
+# so the containers would keep the .env address while the tunnel points at
+# them. Only these two non-secret variables are read, by name.
+effective_value() {
+  $COMPOSE exec -T "$1" printenv "$2" 2>/dev/null | tr -d '\r' | tail -n 1
+}
+
+check_effective_address() {
+  want="https://$NGROK_DOMAIN"
+  for service in api proxy; do
+    got="$(effective_value "$service" PUBLIC_BASE_URL || true)"
+    if [ "$got" != "$want" ]; then
+      tls_fail "the $service container uses PUBLIC_BASE_URL=${got:-<unset>}, not $want; ngrok not started.
+        The tunnel settings did not reach Docker Compose: with sudo the environment is dropped.
+        Run docker without sudo (add yourself to the docker group) or keep the environment:
+        make ngrok COMPOSE=\"sudo -E docker compose\". Then make ngrok again."
+    fi
+  done
+  tunnel="$(effective_value proxy CLINIC_PUBLIC_TUNNEL || true)"
+  [ "$tunnel" = 1 ] || tls_fail "the proxy container has CLINIC_PUBLIC_TUNNEL=${tunnel:-<unset>}, not 1; ngrok not started.
+        With sudo use sudo -E (make ngrok COMPOSE=\"sudo -E docker compose\") or run docker without sudo."
+  echo "check   api and proxy use PUBLIC_BASE_URL=$want (tunnel mode)"
+}
+
 ngrok_on() {
   cp -n .env.example .env
   NGROK_DOMAIN="$(env_or_dotenv NGROK_DOMAIN)"
@@ -77,6 +102,7 @@ ngrok_on() {
   https_port="$(proxy_https_port)" || exit 1
   echo "start   PUBLIC_BASE_URL=$PUBLIC_BASE_URL CLINIC_PUBLIC_TUNNEL=1 (environment, .env unchanged)"
   "$MAKE" --no-print-directory start COMPOSE="$COMPOSE"
+  check_effective_address
   ca="$PWD/$TLS_DIR/ca.crt"
   [ -s "$ca" ] || tls_fail "$TLS_DIR/ca.crt is missing; the tunnel verifies the stand certificate with it"
 
