@@ -336,9 +336,11 @@ def _setup_token(address: str) -> str:
 def _discard(token: str) -> str:
     """What _discard_invite (routes_admin.py) runs after a failed delivery.
 
-    Called directly: through the app the call is never reached today, see the
-    note in the plan 17B report (smtp_ready() refuses the invite up front, and
-    deliver_password_reset() revokes the token before _discard_invite runs)."""
+    Called directly: the app does call it (routes_admin.py, after a failed
+    deliver_password_reset), but there it finds nothing to discard: when SMTP
+    fails after smtp_ready(), deliver_password_reset() has already revoked the
+    token, and the function only takes a token with used_at IS NULL. A known
+    defect from before plan 17 part B, left as it is."""
     return _one(f"SELECT discard_undelivered_invite('{token}')")
 
 
@@ -822,6 +824,25 @@ def test_unit_verify_audit_sees_every_switch(tmp_path, kind):
     assert f"type=chain_replaced kind={kind}" in out[-1]
 
 
+def test_unit_verify_audit_exit_2_without_key_or_database(tmp_path, monkeypatch):
+    """Securo 2: no key / no database is not BROKEN (1) but "could not check" (2)."""
+    out = []
+    monkeypatch.setattr(verify_audit, "KEY_FILE", str(tmp_path / "missing_key"))
+    assert verify_audit.main([], out.append) == 2
+    assert out == ["ERROR cannot check: audit_anchor_key unavailable (FileNotFoundError)"]
+    key_file = tmp_path / "key"
+    key_file.write_text(KEY.hex())
+    monkeypatch.setattr(verify_audit, "KEY_FILE", str(key_file))
+
+    def refused():
+        raise ConnectionRefusedError("db:5432")
+    monkeypatch.setattr(cl, "connect", refused)
+    out.clear()
+    assert verify_audit.main([], out.append) == 2
+    assert out == ["ERROR cannot check: database unavailable (ConnectionRefusedError)"]
+    assert KEY.hex() not in "".join(out)
+
+
 def test_unit_verify_audit_warns_on_forced_and_offline_retires(tmp_path):
     d = _dir(tmp_path)
     first = FakeSource(rows=2)
@@ -943,9 +964,44 @@ def test_no_other_container_gets_the_anchor_key():
 
 
 def test_key_file_is_never_world_readable():
-    mode = (ROOT / "secrets" / "audit_anchor_key").stat().st_mode
-    assert not mode & (stat.S_IROTH | stat.S_IWOTH | stat.S_IRGRP | stat.S_IWGRP) or shutil.which("getfacl")
-    assert not mode & (stat.S_IROTH | stat.S_IWOTH)
+    """600, or 600 + ACL u:10002:r (Б-B2): with an ACL the group bits of the mode
+    show the mask, so the ACL itself is read: no group, no other, and the only
+    named entry is the anchor user, read-only."""
+    key = ROOT / "secrets" / "audit_anchor_key"
+    mode = key.stat().st_mode
+    assert not mode & (stat.S_IROTH | stat.S_IWOTH | stat.S_IXOTH)
+    acl = None
+    if shutil.which("getfacl"):
+        done = subprocess.run(["getfacl", "-cp", str(key)], capture_output=True, text=True)
+        assert done.returncode == 0, done.stderr
+        acl = [line for line in done.stdout.split() if line and not line.startswith("#")]
+    if acl is None or acl == ["user::rw-", "group::---", "other::---"]:
+        assert stat.S_IMODE(mode) == 0o600, oct(mode)
+        return
+    named = sorted(e for e in acl if e.startswith(("user:", "group:")) and e.split(":")[1])
+    assert named == ["user:10002:r--"], acl
+    assert "group::---" in acl and "other::---" in acl, acl
+    assert stat.S_IMODE(mode) in (0o600, 0o640), oct(mode)   # 640 = owner rw + mask r
+
+
+@pytest.mark.skipif(PROJECT != "e6", reason="only on a disposable stand -p e6 (make reset wipes its database)")
+def test_live_reset_after_stop_closes_the_chain_with_run():
+    """Н-1: after make stop audit_anchor is not running, the volume exists, so
+    make reset goes through "compose run" (no --no-build) and passes."""
+    env = dict(os.environ)
+    compose = "docker compose"   # -p, files and env file come from COMPOSE_* of the caller
+    stopped = subprocess.run(["make", "-s", "stop", f"COMPOSE={compose}"], cwd=ROOT, env=env,
+                             capture_output=True, text=True, timeout=300)
+    assert stopped.returncode == 0, stopped.stderr[-2000:]
+    old_chain = cl.registry_state(cl.parse_registry(ANCHOR_DIR / cl.REGISTRY, _host_key())[0]).current
+    assert old_chain
+    done = subprocess.run(["make", "reset", "CONFIRM=yes", f"COMPOSE={compose}"], cwd=ROOT, env=env,
+                          capture_output=True, text=True, timeout=1800)
+    assert done.returncode == 0, done.stdout[-3000:] + done.stderr[-3000:]
+    assert "run --rm audit_anchor python anchor.py --retire" in done.stdout
+    entries, _ = cl.parse_registry(ANCHOR_DIR / cl.REGISTRY, _host_key())
+    assert any(e.kind == "retire" and e.chain_id == old_chain and e.mode == "normal"
+               for e in entries), [(e.kind, e.chain_id, e.mode) for e in entries]
 
 
 def _wait_for_anchor(chain_id: str, at_least_seq: int, timeout: float) -> cl.Anchor:
@@ -1071,12 +1127,19 @@ def test_no_world_writable_anchor_directory_anywhere():
 STUB = r"""#!/bin/sh
 echo "$*" >> "$STUB_LOG"
 case "$*" in
-  "config --format json") echo '{"name": "stubproj"}' ;;
+  "config --format json") echo '{"name": "stubproj", "volumes": {"db_data": {"name": "stubproj_db_data"}}}' ;;
   "ps --status running -q audit_anchor") [ "$STUB_MODE" = running ] && echo abc123 ;;
-  "volumes -q") [ "$STUB_MODE" = volume ] && echo stubproj_db_data ;;
   *--retire*) exit "${STUB_RETIRE_RC:-0}" ;;
 esac
 exit 0
+"""
+
+# Fake docker for "docker volume inspect" (Н-2: no "docker compose volumes",
+# which Compose before 2.33 lacks). Only the database volume of mode=volume exists.
+DOCKER_STUB = r"""#!/bin/sh
+echo "docker $*" >> "$STUB_LOG"
+[ "$1 $2" = "volume inspect" ] && [ "$STUB_MODE" = volume ] && [ "$3" = stubproj_db_data ] && exit 0
+exit 1
 """
 
 
@@ -1084,9 +1147,15 @@ def _make_with_stub(tmp_path, mode: str, *args, rc: int = 0):
     stub = tmp_path / "compose.sh"
     stub.write_text(STUB)
     stub.chmod(0o755)
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir(exist_ok=True)
+    docker = bin_dir / "docker"
+    docker.write_text(DOCKER_STUB)
+    docker.chmod(0o755)
     log = tmp_path / "calls.log"
     log.write_text("")
-    env = dict(os.environ, STUB_LOG=str(log), STUB_MODE=mode, STUB_RETIRE_RC=str(rc))
+    env = dict(os.environ, STUB_LOG=str(log), STUB_MODE=mode, STUB_RETIRE_RC=str(rc),
+               PATH=f"{bin_dir}{os.pathsep}{os.environ.get('PATH', '')}")
     done = subprocess.run(["make", *args, f"COMPOSE={stub}"], cwd=ROOT, env=env,
                           capture_output=True, text=True, timeout=60)
     return done, log.read_text().splitlines()
@@ -1109,8 +1178,8 @@ def test_retire_force_without_confirm_changes_nothing(tmp_path):
 
 @pytest.mark.parametrize("mode, expected", [
     ("running", ["exec -T audit_anchor python anchor.py --retire"]),
-    ("volume", ["run --rm --no-build audit_anchor python anchor.py --retire"]),
-    ("none", ["run --rm --no-deps --no-build audit_anchor python anchor.py --retire --offline"]),
+    ("volume", ["run --rm audit_anchor python anchor.py --retire"]),
+    ("none", ["run --rm --no-deps audit_anchor python anchor.py --retire --offline"]),
 ])
 def test_wipe_stack_retires_the_chain_before_down(tmp_path, mode, expected):
     done, calls = _make_with_stub(tmp_path, mode, "fclean", "CONFIRM=yes")
@@ -1119,6 +1188,17 @@ def test_wipe_stack_retires_the_chain_before_down(tmp_path, mode, expected):
     assert retire == expected
     assert calls.index("stop proxy api") < calls.index(next(c for c in calls if "--retire" in c)) \
         < calls.index(next(c for c in calls if c.startswith("down -v")))
+    assert "volumes -q" not in calls
+    if mode != "running":
+        assert "docker volume inspect stubproj_db_data" in calls
+
+
+def test_makefile_run_has_no_no_build_flag():
+    # Н-1: "docker compose run" has no --no-build (Compose 2.32 and 5.x reject it)
+    text = (ROOT / "Makefile").read_text()
+    for line in text.splitlines():
+        if " run " in line:
+            assert "--no-build" not in line, line
 
 
 def test_failed_retire_stops_before_down(tmp_path):
@@ -1126,6 +1206,9 @@ def test_failed_retire_stops_before_down(tmp_path):
         done, calls = _make_with_stub(tmp_path, mode, "fclean", "CONFIRM=yes", rc=2)
         assert done.returncode != 0, mode
         assert not any(c.startswith("down") for c in calls), (mode, calls)
+        # З-4: proxy and api stay stopped; the message says how to get them back
+        assert "nothing was deleted" in done.stderr, (mode, done.stderr)
+        assert "proxy and api are stopped" in done.stderr and "start COMPOSE=" in done.stderr, mode
 
 
 def test_forced_retire_passes_force_and_falls_back_offline(tmp_path):
@@ -1136,8 +1219,8 @@ def test_forced_retire_passes_force_and_falls_back_offline(tmp_path):
     assert done.returncode != 0      # the stub also fails the offline retire
     assert "RETIRE_FORCE=yes -> offline forced" in done.stdout
     assert [c.strip() for c in calls if "--retire" in c] == [
-        "run --rm --no-build audit_anchor python anchor.py --retire --force",
-        "run --rm --no-deps --no-build audit_anchor python anchor.py --retire --offline"]
+        "run --rm audit_anchor python anchor.py --retire --force",
+        "run --rm --no-deps audit_anchor python anchor.py --retire --offline"]
     assert not any(c.startswith("down") for c in calls)
 
 

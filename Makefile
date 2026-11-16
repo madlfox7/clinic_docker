@@ -48,29 +48,39 @@ endef
 # (anchor.py --retire). A failed retire stops make before down -v. Three cases:
 # audit_anchor running -> exec; not running but the database volume exists ->
 # a one-off run (starts db and migrate); no volume -> --offline.
+# The volume is looked up with "docker volume inspect" (its name from
+# "$(COMPOSE) config"): "docker compose volumes" is missing before Compose 2.33.
+# "run" has no --no-build; the image is built only when it is missing.
 # Then down -v and the anonymous volumes listed above (only this project's).
 define wipe_stack
 @anon="$(project_anon_volumes)"; \
 force="$(if $(filter yes,$(RETIRE_FORCE)),--force)"; \
+stopped() { echo "  proxy and api are stopped; $(MAKE) start COMPOSE='$(COMPOSE)' brings the stand back." >&2; }; \
 echo "$(COMPOSE) stop proxy api"; $(COMPOSE) stop proxy api || exit 1; \
-project="$$($(COMPOSE) config --format json | $(PYTHON) -c 'import json, sys; print(json.load(sys.stdin)["name"])')" || exit 1; \
+db_volume="$$($(COMPOSE) config --format json | $(PYTHON) -c 'import json, sys; c = json.load(sys.stdin); print(c.get("volumes", {}).get("db_data", {}).get("name") or c["name"] + "_db_data")')" || exit 1; \
 if [ -n "$$($(COMPOSE) ps --status running -q audit_anchor 2>/dev/null)" ]; then \
 	echo "$(COMPOSE) exec -T audit_anchor python anchor.py --retire $$force"; \
-	$(COMPOSE) exec -T audit_anchor python anchor.py --retire $$force || exit 1; \
-elif $(COMPOSE) volumes -q 2>/dev/null | grep -qx "$${project}_db_data"; then \
-	echo "$(COMPOSE) run --rm --no-build audit_anchor python anchor.py --retire $$force"; \
-	if ! $(COMPOSE) run --rm --no-build audit_anchor python anchor.py --retire $$force; then \
+	if ! $(COMPOSE) exec -T audit_anchor python anchor.py --retire $$force; then \
+		echo "retire failed: the audit chain was not closed, nothing was deleted." >&2; stopped; exit 1; \
+	fi; \
+elif docker volume inspect "$$db_volume" >/dev/null 2>&1; then \
+	echo "$(COMPOSE) run --rm audit_anchor python anchor.py --retire $$force"; \
+	if ! $(COMPOSE) run --rm audit_anchor python anchor.py --retire $$force; then \
 		if [ -z "$$force" ]; then \
 			echo "retire failed: the audit chain was not closed, nothing was deleted." >&2; \
 			echo "  RETIRE_FORCE=yes CONFIRM=yes closes it anyway (offline, forced) if the database cannot start." >&2; \
-			exit 1; \
+			stopped; exit 1; \
 		fi; \
-		echo "RETIRE_FORCE=yes -> offline forced: $(COMPOSE) run --rm --no-deps --no-build audit_anchor python anchor.py --retire --offline"; \
-		$(COMPOSE) run --rm --no-deps --no-build audit_anchor python anchor.py --retire --offline || exit 1; \
+		echo "RETIRE_FORCE=yes -> offline forced: $(COMPOSE) run --rm --no-deps audit_anchor python anchor.py --retire --offline"; \
+		if ! $(COMPOSE) run --rm --no-deps audit_anchor python anchor.py --retire --offline; then \
+			echo "offline retire failed: nothing was deleted." >&2; stopped; exit 1; \
+		fi; \
 	fi; \
 else \
-	echo "$(COMPOSE) run --rm --no-deps --no-build audit_anchor python anchor.py --retire --offline"; \
-	$(COMPOSE) run --rm --no-deps --no-build audit_anchor python anchor.py --retire --offline || exit 1; \
+	echo "$(COMPOSE) run --rm --no-deps audit_anchor python anchor.py --retire --offline"; \
+	if ! $(COMPOSE) run --rm --no-deps audit_anchor python anchor.py --retire --offline; then \
+		echo "offline retire failed: nothing was deleted." >&2; stopped; exit 1; \
+	fi; \
 fi; \
 echo "$(strip $(COMPOSE) down -v $(1))"; $(COMPOSE) down -v $(1) || exit 1; \
 for v in $$anon; do \

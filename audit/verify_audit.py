@@ -9,7 +9,8 @@ row, no truncated tail), the chain registry (§8.6 rules again, not trusting
 anchor.py) and the mode 'A' of the six journal triggers.
 
 Exit codes: 0 OK (WARN lines for forced/offline retires are allowed),
-1 BROKEN, 3 with --strict when a retire was forced or offline.
+1 BROKEN, 2 the check could not run (no key, database unavailable, bad
+arguments), 3 with --strict when a retire was forced or offline.
 """
 from __future__ import annotations
 
@@ -109,17 +110,32 @@ def verify(source, directory: Path, key: bytes, strict: bool, copy: Path | None,
     return 3 if strict and (forced or offline) else 0
 
 
-def main(argv=None) -> int:
+def main(argv=None, out=print) -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--strict", action="store_true", help="exit 3 if any retire was forced or offline")
     parser.add_argument("--anchors", type=Path, help="outside copy of the anchor directory to compare")
     args = parser.parse_args(argv)
     raw = os.environ.get("CLINIC_AUDIT_ANCHOR_INTERVAL", "60")
     every = int(raw) if raw.isdigit() else 60
-    key = cl.load_key(KEY_FILE)
-    conn = cl.connect()
+    # Not BROKEN: nothing was checked. Only the exception type is printed,
+    # never a path content, a password or the key.
     try:
-        return verify(cl.DbSource(conn), ANCHOR_DIR, key, args.strict, args.anchors, every)
+        key = cl.load_key(KEY_FILE)
+    except (OSError, ValueError) as exc:
+        out(f"ERROR cannot check: audit_anchor_key unavailable ({type(exc).__name__})")
+        return 2
+    try:
+        conn = cl.connect()
+    except Exception as exc:  # psycopg2 lives only in the image
+        out(f"ERROR cannot check: database unavailable ({type(exc).__name__})")
+        return 2
+    try:
+        return verify(cl.DbSource(conn), ANCHOR_DIR, key, args.strict, args.anchors, every, out)
+    except Exception as exc:
+        if type(exc).__module__.split(".")[0] != "psycopg2":
+            raise
+        out(f"ERROR cannot check: database error ({type(exc).__name__})")
+        return 2
     finally:
         conn.close()
 
