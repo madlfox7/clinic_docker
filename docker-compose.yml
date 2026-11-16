@@ -119,6 +119,9 @@ services:
     depends_on:
       migrate:
         condition: service_completed_successfully
+      # З-11: the chain registry is opened before anything writes to the journal
+      audit_prepare:
+        condition: service_completed_successfully
     command: ["python", "seed.py"]
 
   # Audit chain anchors (plan 17 §8): reads the journal as clinic_auditor and
@@ -165,6 +168,39 @@ services:
       timeout: 20s
       retries: 4
       start_period: 30s
+
+  # One-shot, after migrate and before seed/api (З-11): on a fresh stand it
+  # writes the "open" line of the chain registry before the first event, so
+  # the loop never mistakes a fresh journal for a lost registry. Same image,
+  # key and directory as audit_anchor; with a registry it does nothing, and
+  # alarms stay the loop's job (anchor.py --prepare).
+  audit_prepare:
+    build:
+      context: .
+      dockerfile: docker/audit_anchor/Dockerfile
+    environment:
+      TZ: Asia/Yerevan
+      PGHOST: db
+      PGUSER: clinic_auditor
+      PGDATABASE: ${POSTGRES_DB:-clinic}
+    secrets:
+      - audit_db_password
+      - audit_anchor_key
+    volumes:
+      - ${CLINIC_AUDIT_ANCHOR_DIR:-./audit_anchors}:/anchors
+    networks:
+      - backend
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    command: ["python", "anchor.py", "--prepare"]
+    read_only: true
+    tmpfs:
+      - /tmp
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
 
   mailpit:
     image: axllent/mailpit:v1.27.1

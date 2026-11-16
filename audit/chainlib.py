@@ -301,11 +301,25 @@ class Decision:
     old: str | None = None
 
 
+def journal_holds_chain(source, head: dict | None, beyond_genesis: bool = False) -> bool:
+    """З-10/З-11: does the database hold a chain worth protecting? A head with
+    last_seq > 0, or journal rows without a head. beyond_genesis (the daemon):
+    a chain of genesis rows only (last_seq == genesis_rows, an old journal
+    hashed at migration and never anchored) counts as empty."""
+    if head is None:
+        return next(iter(source.rows_from(1)), None) is not None
+    floor = head["genesis_rows"] if beyond_genesis else 0
+    return head["last_seq"] > floor
+
+
 def decide(state: RegistryState, head_chain: str, genesis_rows: int, has_registry: bool,
-           has_anchor_files: bool) -> Decision:
-    """§8.6 rules 1-7 for the head chain H against the registry."""
+           has_anchor_files: bool, *, holds_chain: bool) -> Decision:
+    """§8.6 rules 1-7 for the head chain H against the registry. With no
+    registry: anchors left over, or a database that already holds a chain
+    (holds_chain, journal_holds_chain(beyond_genesis=True)) is registry_missing
+    (З-11: the anchor directory was removed or renamed), never a first_open."""
     if not has_registry:
-        if has_anchor_files:
+        if has_anchor_files or holds_chain:
             return Decision("error", "registry_missing")
         return Decision("first_open")
     c = state.current

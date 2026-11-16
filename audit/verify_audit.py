@@ -32,6 +32,9 @@ def check_registry(directory: Path, key: bytes, head: dict, source):
     if not registry.exists():
         if cl.anchor_files(directory):
             raise cl.Broken("registry_missing")
+        if cl.journal_holds_chain(source, head, beyond_genesis=True):
+            raise cl.Broken("registry_missing", detail=f"no registry and no anchors, but the database holds "
+                                                        f"chain={head['chain_id']} last_seq={head['last_seq']}")
         raise cl.Broken("registry_missing", detail="no registry and no anchors yet")
     entries, _ = cl.parse_registry(registry, key)
     warnings, forced, offline = [], 0, 0

@@ -796,6 +796,98 @@ def test_unit_retire_after_chain_replaced_offline_and_retired_reused(tmp_path):
     assert anchor.retire(KEY, False, False, d2, lambda: (src, lambda: None)) == 2
 
 
+def _only_lock(d):
+    return [x.name for x in d.iterdir()] in ([], [".lock"])
+
+
+def test_unit_decide_without_registry_and_anchors():
+    """З-11: no registry and no anchor files: a chain in the database is
+    registry_missing, an empty or genesis-only journal is a first open."""
+    state = cl.registry_state([])
+    h = str(uuid.uuid4())
+    assert cl.decide(state, h, 0, False, False, holds_chain=True) == cl.Decision("error", "registry_missing")
+    assert cl.decide(state, h, 0, False, False, holds_chain=False) == cl.Decision("first_open")
+    assert cl.decide(state, h, 0, False, True, holds_chain=False) == cl.Decision("error", "registry_missing")
+
+
+def test_unit_journal_holds_chain_is_one_rule():
+    """The З-10 rule (retire) and the daemon's (beyond the genesis rows)."""
+    empty, genesis, more = FakeSource(rows=0), FakeSource(rows=3), FakeSource(rows=3, genesis_rows=0)
+    assert not cl.journal_holds_chain(empty, empty.head())
+    assert not cl.journal_holds_chain(empty, empty.head(), beyond_genesis=True)
+    assert cl.journal_holds_chain(genesis, genesis.head())                    # retire: rows are rows
+    assert not cl.journal_holds_chain(genesis, genesis.head(), beyond_genesis=True)
+    assert cl.journal_holds_chain(more, more.head(), beyond_genesis=True)
+    assert cl.journal_holds_chain(more, None) and not cl.journal_holds_chain(empty, None)   # rows, no head
+
+
+def test_unit_lost_registry_is_registry_missing_until_the_directory_is_back(tmp_path, capsys):
+    """З-11: the anchor directory renamed, the loop (re)started over a database
+    that holds a chain: no first_open, nothing written, red, verify BROKEN;
+    the old directory put back: green again."""
+    d, src = _dir(tmp_path), FakeSource(rows=2)
+    assert anchor.cycle(d, KEY, src).ok
+    src.add(3)
+    archive = tmp_path / "archived"
+    d.rename(archive)
+    d.mkdir(mode=0o700)                        # init_secrets / anchor_dir.sh makes an empty one
+    for _ in range(2):
+        result = anchor.cycle(d, KEY, src)
+        assert not result.ok and result.error == "registry_missing"
+        assert result.line.startswith("ERROR audit chain registry missing")
+        assert f"chain={src.chain_id} has last_seq=5" in result.line and "RETIRE_FORCE=yes" in result.line
+        assert _only_lock(d)                   # no chains.log, no anchor file
+    out = []
+    assert verify_audit.verify(src, d, KEY, False, None, 60, out.append) == 1
+    assert out[-1] == (f"BROKEN type=registry_missing no registry and no anchors, but the database holds "
+                       f"chain={src.chain_id} last_seq=5")
+    (d / cl.LOCK).unlink(missing_ok=True)
+    d.rmdir()
+    archive.rename(d)
+    result = anchor.cycle(d, KEY, src)
+    assert result.ok and result.anchored[0] == 5
+    assert _registry(d) == ["open:"]
+
+
+def test_unit_lost_registry_then_forced_retire_and_a_new_volume(tmp_path):
+    """The other way out: reset with RETIRE_FORCE=yes (forced no_registry@-),
+    a new volume, a normal open."""
+    d, src = _dir(tmp_path), FakeSource(rows=4, genesis_rows=0)
+    assert anchor.cycle(d, KEY, src).error == "registry_missing"
+    assert anchor.retire(KEY, False, False, d, lambda: (src, lambda: None)) == 2
+    assert anchor.retire(KEY, True, False, d, lambda: (src, lambda: None)) == 0
+    nxt = FakeSource(rows=0)
+    assert anchor.cycle(d, KEY, nxt).ok
+    assert _registry(d) == ["retire:forced", "open:"]
+
+
+def test_unit_prepare_opens_a_fresh_stand_and_leaves_alarms_to_the_loop(tmp_path, monkeypatch):
+    d = _dir(tmp_path)
+    monkeypatch.setattr(anchor, "ANCHOR_DIR", d)
+    src = FakeSource(rows=0)
+    monkeypatch.setattr(anchor, "run_cycle", lambda key, holder: anchor.cycle(d, KEY, src))
+    assert anchor.prepare(KEY) == 0 and _registry(d) == ["open:"]     # before seed/api: open first
+    src.add(2)                                  # events after the open: a normal anchor later
+    calls = []
+    monkeypatch.setattr(anchor, "run_cycle", lambda key, holder: calls.append(1))
+    assert anchor.prepare(KEY) == 0 and calls == []                   # registry present: nothing to do
+    lost = tmp_path / "lost"
+    lost.mkdir(mode=0o700)
+    monkeypatch.setattr(anchor, "ANCHOR_DIR", lost)
+    held = FakeSource(rows=3, genesis_rows=0)
+    monkeypatch.setattr(anchor, "run_cycle", lambda key, holder: anchor.cycle(lost, KEY, held))
+    assert anchor.prepare(KEY) == 0 and _only_lock(lost)               # registry_missing: the loop's job
+    monkeypatch.setattr(anchor, "run_cycle",
+                        lambda key, holder: anchor.Result(False, "error", "database", line="ERROR db"))
+    assert anchor.prepare(KEY) == 1                                    # cannot open a fresh stand: stop
+    locked = tmp_path / "ro"
+    locked.mkdir(mode=0o500)
+    monkeypatch.setattr(anchor, "ANCHOR_DIR", locked)
+    monkeypatch.setattr(anchor, "run_cycle", lambda key, holder: anchor.cycle(locked, KEY, FakeSource()))
+    if os.geteuid() != 0:
+        assert anchor.prepare(KEY) == 1
+
+
 def test_unit_retire_without_registry_but_a_chain_in_the_database_needs_force(tmp_path, capsys):
     """З-10: the anchor directory removed or renamed: a plain retire refused (2),
     nothing written; --force starts a new registry with forced no_registry@-,
@@ -944,7 +1036,7 @@ def test_unit_verify_audit_warns_on_forced_and_offline_retires(tmp_path):
     second = FakeSource(rows=0)
     assert anchor.cycle(d, KEY, second).ok
     assert anchor.retire(KEY, False, True, d) == 0
-    third = FakeSource(rows=1)
+    third = FakeSource(rows=1, genesis_rows=0)   # fresh volume, one event after genesis
     assert anchor.cycle(d, KEY, third).ok
     out = []
     assert verify_audit.verify(third, d, KEY, False, None, 60, out.append) == 0
@@ -996,21 +1088,36 @@ def _head_chain() -> str:
     return _head()["chain_id"]
 
 
+AUDIT_SERVICES = ("audit_anchor", "audit_prepare")   # the loop and its one-shot first open (З-11)
+
+
 def test_compose_mounts_the_key_only_on_audit_anchor_and_hardens_it():
     services = _compose_config()["services"]
     for name, service in services.items():
         mounted = {item["source"] for item in service.get("secrets") or []}
-        if name == "audit_anchor":
-            assert mounted == {"audit_db_password", "audit_anchor_key"}
+        if name in AUDIT_SERVICES:
+            assert mounted == {"audit_db_password", "audit_anchor_key"}, name
         else:
             assert "audit_anchor_key" not in mounted, name
             assert ("audit_db_password" in mounted) == (name == "migrate"), name
-    anchor_service = services["audit_anchor"]
-    assert set(anchor_service["networks"]) == {"backend"}
-    assert anchor_service.get("read_only") is True
-    assert anchor_service.get("cap_drop") == ["ALL"]
-    assert "no-new-privileges:true" in anchor_service.get("security_opt", [])
-    assert not anchor_service.get("ports")
+    for name in AUDIT_SERVICES:
+        anchor_service = services[name]
+        assert set(anchor_service["networks"]) == {"backend"}, name
+        assert anchor_service.get("read_only") is True, name
+        assert anchor_service.get("cap_drop") == ["ALL"], name
+        assert "no-new-privileges:true" in anchor_service.get("security_opt", []), name
+        assert not anchor_service.get("ports"), name
+    assert services["audit_prepare"]["volumes"] == services["audit_anchor"]["volumes"]
+    assert services["audit_prepare"]["command"] == ["python", "anchor.py", "--prepare"]
+
+
+def test_compose_opens_the_registry_before_anything_writes_to_the_journal():
+    """З-11: seed (and so api) waits for audit_prepare, which waits for migrate."""
+    services = _compose_config()["services"]
+    assert services["seed"]["depends_on"]["audit_prepare"]["condition"] == "service_completed_successfully"
+    assert services["api"]["depends_on"]["seed"]["condition"] == "service_completed_successfully"
+    assert services["audit_prepare"]["depends_on"]["migrate"]["condition"] == "service_completed_successfully"
+    assert "restart" not in services["audit_prepare"] or services["audit_prepare"]["restart"] == "no"
 
 
 @pytest.mark.parametrize("sql", [
@@ -1171,7 +1278,10 @@ def test_make_audit_verify_is_ok_on_an_intact_journal():
 
 def test_registry_starts_with_an_open_line_and_anchors_are_git_ignored():
     entries, _ = cl.parse_registry(ANCHOR_DIR / cl.REGISTRY, _host_key())
-    assert entries and entries[0].kind == "open"
+    # a registry starts with open, or (З-10, after a forced reset without the old
+    # registry) with retire ... forced no_registry@-
+    assert entries and (entries[0].kind == "open"
+                        or (entries[0].kind, entries[0].mode, entries[0].brk) == ("retire", "forced", "no_registry@-"))
     assert any(e.kind == "open" and e.chain_id == _head_chain() for e in entries)
     ignored = subprocess.run(["git", "check-ignore", "audit_anchors/chains.log", "audit_anchors_e6/x", ".env.e6"],
                              cwd=ROOT, capture_output=True, text=True)
@@ -1238,6 +1348,109 @@ def test_live_reset_after_chain_replaced_needs_retire_force():
     assert (last_retire.chain_id, last_retire.mode, last_retire.brk) == (replaced, "forced", "chain_replaced@-")
 
 
+def _put_an_event() -> None:
+    """A fresh volume can hold genesis only: log in once so that the journal
+    holds a chain beyond it (the api may still be starting after a reset)."""
+    before = _head()
+    _wait_login(180)
+    head = _head()
+    assert head["last_seq"] > max(before["last_seq"], head["genesis_rows"])
+
+
+def _wait_login(seconds: int) -> None:
+    deadline = time.time() + seconds
+    while True:
+        with CsrfClient(base_url=BASE, follow_redirects=True, timeout=30.0) as c:
+            try:
+                page = c.post("/login", data={"email": ADMIN, "password": PASSWORD})
+                if page.status_code == 200 and page.url.path == "/me":
+                    return
+            except httpx.HTTPError:
+                pass
+        assert time.time() < deadline, "the api did not come up"
+        time.sleep(3)
+
+
+def _anchors_live(chain: str):
+    return cl.read_anchors(ANCHOR_DIR / f"{chain}.log", _host_key(), chain)[0]
+
+
+def _anchor_health() -> str:
+    return subprocess.run(["docker", "compose", "ps", "--format", "{{.Health}}", "audit_anchor"], cwd=ROOT,
+                          capture_output=True, text=True, timeout=60).stdout.strip()
+
+
+def _wait_health(want: str, seconds: int) -> float:
+    started = time.time()
+    while _anchor_health() != want:
+        assert time.time() - started < seconds, f"audit_anchor is {_anchor_health()!r}, not {want} after {seconds} s"
+        time.sleep(3)
+    return time.time() - started
+
+
+@pytest.mark.skipif(PROJECT != "e6", reason="only on a disposable stand -p e6 (archives its anchor directory)")
+def test_live_start_without_anchor_directory_is_registry_missing_until_it_is_back():
+    """З-11: rename the anchor directory and start/restart without a reset:
+    no silent first open. audit_anchor writes nothing, turns unhealthy within
+    the E6 window (< 200 s), make audit-verify says BROKEN registry_missing
+    (rc 1); the directory put back: healthy again."""
+    compose = "docker compose"
+    _put_an_event()
+    chain = _head_chain()
+    stopped = subprocess.run(["make", "-s", "stop", f"COMPOSE={compose}"], cwd=ROOT,
+                             capture_output=True, text=True, timeout=300)
+    assert stopped.returncode == 0, stopped.stderr[-2000:]
+    registry_before = (ANCHOR_DIR / cl.REGISTRY).read_bytes()
+    archive = ANCHOR_DIR.with_name(f"{ANCHOR_DIR.name}-moved-{int(time.time())}")
+    ANCHOR_DIR.rename(archive)
+    since = dt.datetime.now(dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+    started = subprocess.run(["make", "start", f"COMPOSE={compose}"], cwd=ROOT,
+                             capture_output=True, text=True, timeout=1800)
+    assert started.returncode == 0, started.stdout[-3000:] + started.stderr[-3000:]
+    assert ANCHOR_DIR.is_dir() and ANCHOR_DIR.stat().st_uid == os.getuid()   # init_secrets made it, empty
+    took = _wait_health("unhealthy", 200)
+    for target in ("start", "restart"):
+        if target == "restart":
+            # the loop restarted (a container or host restart); not "make restart",
+            # see the round 23 notes on the proxy after a whole-stack restart
+            again = subprocess.run(["docker", "compose", "restart", "audit_anchor"], cwd=ROOT,
+                                   capture_output=True, text=True, timeout=600)
+            assert again.returncode == 0, again.stderr[-2000:]
+            _wait_health("unhealthy", 200)     # red again after the restart, not a first open
+        assert [p.name for p in ANCHOR_DIR.iterdir()] in ([], [".lock"]), list(ANCHOR_DIR.iterdir())
+        logs = subprocess.run(["docker", "compose", "logs", "--since", since, "audit_anchor", "audit_prepare"],
+                              cwd=ROOT, capture_output=True, text=True, timeout=60).stdout
+        assert f"ERROR audit chain registry missing (no chains.log and no anchors, but chain={chain}" in logs
+        assert "opened chain=" not in logs, logs[-3000:]
+        verify = subprocess.run(["make", "-s", "audit-verify", f"COMPOSE={compose}"], cwd=ROOT,
+                                capture_output=True, text=True, timeout=300)
+        assert verify.returncode != 0
+        assert verify.stdout.strip().splitlines()[-1].startswith(
+            f"BROKEN type=registry_missing no registry and no anchors, but the database holds chain={chain}")
+    assert _anchor_health() == "unhealthy"
+
+    # way out 1: put the directory back (the reset way is the З-10 test below)
+    stopped = subprocess.run(["docker", "compose", "stop", "audit_anchor"], cwd=ROOT,
+                             capture_output=True, text=True, timeout=300)
+    assert stopped.returncode == 0, stopped.stderr
+    (ANCHOR_DIR / ".lock").unlink(missing_ok=True)
+    ANCHOR_DIR.rmdir()
+    archive.rename(ANCHOR_DIR)
+    up = subprocess.run(["docker", "compose", "start", "audit_anchor"], cwd=ROOT,
+                        capture_output=True, text=True, timeout=300)
+    assert up.returncode == 0, up.stderr
+    _wait_health("healthy", 200)
+    assert (ANCHOR_DIR / cl.REGISTRY).read_bytes() == registry_before    # no switch, no new open
+    assert any(a.seq == _head()["last_seq"] for a in _anchors_live(chain))
+    verify = subprocess.run(["make", "-s", "audit-verify", f"COMPOSE={compose}"], cwd=ROOT,
+                            capture_output=True, text=True, timeout=300)
+    assert "registry_missing" not in verify.stdout, verify.stdout
+    if b" switch " not in registry_before:  # an earlier chain_replaced test keeps verify red for good
+        assert verify.returncode == 0, verify.stdout + verify.stderr
+    print(f"unhealthy after {took:.0f} s")
+
+
 @pytest.mark.skipif(PROJECT != "e6", reason="only on a disposable stand -p e6 (archives its anchor directory)")
 def test_live_reset_without_anchor_directory_needs_force_and_leaves_a_record():
     """З-9 + З-10 + the README restart: stop, archive the anchor directory
@@ -1246,18 +1459,7 @@ def test_live_reset_without_anchor_directory_needs_force_and_leaves_a_record():
     still holds the chain) and the volume stays. With RETIRE_FORCE=yes the new
     registry starts with retire ... forced no_registry@-, verify shows a WARN."""
     compose = "docker compose"
-    deadline = time.time() + 180           # a fresh volume can be empty: put an event in the journal
-    while True:                            # (the api may still be starting after the previous reset)
-        with CsrfClient(base_url=BASE, follow_redirects=True, timeout=30.0) as c:
-            try:
-                page = c.post("/login", data={"email": ADMIN, "password": PASSWORD})
-                if page.status_code == 200 and page.url.path == "/me":
-                    break
-            except httpx.HTTPError:
-                pass
-        assert time.time() < deadline, "the api did not come up"
-        time.sleep(3)
-    assert int(_head()["last_seq"]) > 0
+    _put_an_event()
     stopped = subprocess.run(["make", "-s", "stop", f"COMPOSE={compose}"], cwd=ROOT,
                              capture_output=True, text=True, timeout=300)
     assert stopped.returncode == 0, stopped.stderr[-2000:]

@@ -13,14 +13,16 @@ KEY = bytes(range(32))
 
 
 class FakeSource:
-    def __init__(self, chain_id=None, rows=0, genesis_rows=0):
+    def __init__(self, chain_id=None, rows=0, genesis_rows=None):
         self.chain_id = chain_id or str(uuid.uuid4())
         self.rows = []
-        self.genesis_rows = genesis_rows
+        self.genesis_rows = 0
         self.genesis_at = dt.datetime(2026, 11, 16, 10, 0, tzinfo=dt.timezone.utc)
         self.modes = {key: "A" for key in chainlib.TRIGGERS}
         self.head_override = None
         self.add(rows)
+        # the rows given here were there at migration (genesis), unless told otherwise
+        self.genesis_rows = rows if genesis_rows is None else genesis_rows
 
     def add(self, count=1):
         for _ in range(count):

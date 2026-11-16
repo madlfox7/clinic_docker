@@ -7,6 +7,11 @@ append a HMAC-signed anchor line for the chain head.
     python anchor.py --retire [--force]   close the open chain before a wipe
     python anchor.py --retire --offline   close it without a database
     python anchor.py --health             healthcheck of the running loop
+    python anchor.py --prepare            first open before seed/api (audit_prepare)
+
+No registry and no anchors while the database holds a chain (last_seq beyond
+the genesis rows) is registry_missing, not a first open (З-11): the loop
+writes nothing and turns red until the directory is back or a forced reset.
 
 --retire refuses with 2 when the chain is broken, was replaced
 (chain_replaced) or the registry is missing while the database holds a chain;
@@ -73,11 +78,17 @@ def cycle(directory: Path, key: bytes, source) -> Result:
             has_registry = registry.exists()
             entries, reg_mac = cl.parse_registry(registry, key) if has_registry else ([], cl.ZERO_MAC)
             state = cl.registry_state(entries)
-            decision = cl.decide(state, h, head["genesis_rows"], has_registry,
-                                 bool(cl.anchor_files(directory)))
+            has_anchor_files = bool(cl.anchor_files(directory))
+            holds = (not has_registry and not has_anchor_files
+                     and cl.journal_holds_chain(source, head, beyond_genesis=True))
+            decision = cl.decide(state, h, head["genesis_rows"], has_registry, has_anchor_files,
+                                 holds_chain=holds)
             if decision.action == "error":
                 kind = decision.kind
-                text = {"registry_missing": "audit chain registry missing",
+                text = {"registry_missing": "ERROR audit chain registry missing"
+                        + (f" (no chains.log and no anchors, but chain={h} has last_seq={head['last_seq']}:"
+                           " anchor directory removed or renamed? restore it, or"
+                           " make reset RETIRE_FORCE=yes CONFIRM=yes)" if holds else ""),
                         "genesis_rows": f"new chain {h} opened over a non-empty journal"}[kind]
                 return Result(False, "error", kind, line=text)
             if decision.action in ("first_open", "open"):
@@ -167,6 +178,26 @@ def run_cycle(key: bytes, conn_holder: dict) -> Result:
         return Result(False, "error", "database", line=f"ERROR audit cycle failed: {type(exc).__name__}")
 
 
+def prepare(key: bytes) -> int:
+    """--prepare, the one-shot audit_prepare service: runs after migrate and
+    before seed and api (docker-compose.yml), so a fresh stand gets its open
+    line before anything can write to the journal; otherwise the first event
+    could beat the first loop cycle and look like a lost registry (З-11).
+    With a registry or anchors there is nothing to do (the loop checks them).
+    1 only when a first cycle was needed and could not run (database, anchor
+    directory): seed and api then do not start on a stand without anchors.
+    Alarms (registry_missing, a broken chain) are the loop's job: 0."""
+    try:
+        if (ANCHOR_DIR / cl.REGISTRY).exists() or cl.anchor_files(ANCHOR_DIR):
+            say("audit_prepare: chain registry present, nothing to prepare")
+            return 0
+    except OSError:
+        pass
+    result = run_cycle(key, {})
+    say(f"audit_prepare: {result.line}")
+    return 1 if result.error in ("anchor_dir", "database") else 0
+
+
 def _db_source():
     conn = cl.connect()
     return cl.DbSource(conn), conn.close
@@ -190,11 +221,9 @@ def _retire_without_registry(registry: Path, key: bytes, force: bool, open_sourc
         head = source.head()
         if head is not None:
             chain, last_seq, last_hash = head["chain_id"], head["last_seq"], bytes(head["last_hash"]).hex()
-            present = last_seq > 0
         else:
             chain, last_seq, last_hash = NIL_CHAIN, 0, "0" * 64
-            present = next(iter(source.rows_from(1)), None) is not None
-        if not present:
+        if not cl.journal_holds_chain(source, head):
             say("retire: no chain registry and an empty journal, nothing to close")
             return 0
         say(f"BROKEN type=registry_missing chain={chain} last_seq={last_seq} (the database holds a chain)")
@@ -296,6 +325,7 @@ def main(argv=None) -> int:
     parser.add_argument("--force", action="store_true")
     parser.add_argument("--offline", action="store_true")
     parser.add_argument("--health", action="store_true")
+    parser.add_argument("--prepare", action="store_true")
     args = parser.parse_args(argv)
     if args.health:
         return health()
@@ -304,6 +334,8 @@ def main(argv=None) -> int:
     key = cl.load_key(KEY_FILE)
     if args.retire:
         return retire(key, args.force, args.offline)
+    if args.prepare:
+        return prepare(key)
     every = interval()
     holder: dict = {}
     if args.once:

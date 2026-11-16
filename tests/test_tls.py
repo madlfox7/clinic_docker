@@ -17,7 +17,7 @@ import pytest
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 TLS = ROOT / "secrets" / "tls"
-SERVICES_WITHOUT_TLS = ("api", "db", "migrate", "seed", "mailpit", "audit_anchor")
+SERVICES_WITHOUT_TLS = ("api", "db", "migrate", "seed", "mailpit", "audit_anchor", "audit_prepare")
 
 
 def _compose(*args, timeout=120):
