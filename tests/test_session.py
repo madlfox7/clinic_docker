@@ -16,6 +16,7 @@ import pytest
 from tests.registration import PATIENT_FIELDS, confirm_registration, registration_limit_reset  # noqa: F401 (autouse)
 from tests.csrf_client import CsrfClient
 from tests.demo_secret import demo_password
+from tests.fresh_patient import create_fresh_patient, drop_fresh_patient
 from tests.test_rls_boundary import compose_exec, compose_exec_run
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -106,9 +107,13 @@ def _expired_events(user_id: int, reason: str) -> list[str]:
     )
 
 
-def _forget_expired_events(user_id: int) -> None:
-    # One event per account and reason in 15 minutes: start each check clean.
-    _psql(f"DELETE FROM audit_events WHERE action = 'auth.session_expired' AND actor_user_id = {user_id}")
+@pytest.fixture
+def fresh_pat():
+    """A new patient per test: the journal is append-only and keeps one
+    auth.session_expired per account and reason in 15 minutes (plan 17 §9.2)."""
+    email, user_id = create_fresh_patient("session")
+    yield email, user_id
+    drop_fresh_patient(user_id)
 
 
 def _aged_cookie(email: str, *, seen_ago: int = 0, iat_ago: int | None = None, drop=(), extra=None) -> str:
@@ -161,10 +166,9 @@ def test_set_cookie_attributes():
     assert re.search(r";\s*secure(;|$)", header, re.I), header
 
 
-def test_idle_timeout_expires_session_once():
-    pat_id = _user_id(PAT)
-    _forget_expired_events(pat_id)
-    cookie = _aged_cookie(PAT, seen_ago=31 * 60)
+def test_idle_timeout_expires_session_once(fresh_pat):
+    email, pat_id = fresh_pat
+    cookie = _aged_cookie(email, seen_ago=31 * 60)
     with _client(cookie) as c:
         response = c.get("/me")
         assert response.status_code == 303
@@ -190,10 +194,9 @@ def test_fresh_activity_keeps_session_and_refreshes_seen():
     assert refreshed["iat"] == _payload(cookie)["iat"]
 
 
-def test_absolute_timeout():
-    pat_id = _user_id(PAT)
-    _forget_expired_events(pat_id)
-    cookie = _aged_cookie(PAT, seen_ago=0, iat_ago=13 * 3600)
+def test_absolute_timeout(fresh_pat):
+    email, pat_id = fresh_pat
+    cookie = _aged_cookie(email, seen_ago=0, iat_ago=13 * 3600)
     with _client(cookie) as c:
         response = c.get("/me")
     assert response.status_code == 303 and response.headers["location"] == "/login?expired=1"
@@ -201,13 +204,12 @@ def test_absolute_timeout():
 
 
 @pytest.mark.parametrize("kind", ["legacy", "future_seen"])
-def test_legacy_or_forged_timestamps_are_cleared_without_event(kind):
-    pat_id = _user_id(PAT)
-    _forget_expired_events(pat_id)
+def test_legacy_or_forged_timestamps_are_cleared_without_event(kind, fresh_pat):
+    email, pat_id = fresh_pat
     if kind == "legacy":
-        cookie = _aged_cookie(PAT, drop=("iat", "seen"), extra={"email": PAT})
+        cookie = _aged_cookie(email, drop=("iat", "seen"), extra={"email": email})
     else:
-        cookie = _aged_cookie(PAT, extra={"seen": int(time.time()) + 3600})
+        cookie = _aged_cookie(email, extra={"seen": int(time.time()) + 3600})
     with _client(cookie) as c:
         response = c.get("/me")
         assert response.status_code == 303
@@ -253,11 +255,10 @@ def test_post_with_expired_session_goes_to_login_without_booking():
     assert _psql(f"SELECT count(*) FROM appointments WHERE patient_user_id = {pat_id}") == before
 
 
-def test_logout_with_expired_session():
-    pat_id = _user_id(PAT)
-    _forget_expired_events(pat_id)
+def test_logout_with_expired_session(fresh_pat):
+    email, pat_id = fresh_pat
     logouts = _psql(f"SELECT count(*) FROM audit_events WHERE action = 'auth.logout' AND actor_user_id = {pat_id}")
-    cookie = _aged_cookie(PAT, seen_ago=31 * 60)
+    cookie = _aged_cookie(email, seen_ago=31 * 60)
     with _client(cookie) as c:
         response = c.post("/logout")
     assert response.status_code == 303 and response.headers["location"] == "/"
@@ -289,8 +290,6 @@ def test_password_change_keeps_sign_in_time():
             assert c.get("/me").status_code == 200
     finally:
         _psql(
-            f"DELETE FROM audit_events WHERE actor_user_id = (SELECT id FROM users WHERE email = '{email}') "
-            f"OR target_id = (SELECT id FROM users WHERE email = '{email}'); "
             f"DELETE FROM login_attempts WHERE email_fingerprint = public.digest('{email}', 'sha256'); "
             f"DELETE FROM users WHERE email = '{email}'"
         )
@@ -442,16 +441,15 @@ def test_idle_change_is_journaled_with_old_and_new_value():
     assert "30 → 45" in audit.text
 
 
-def test_new_idle_value_applies_on_next_request():
-    pat_id = _user_id(PAT)
-    _forget_expired_events(pat_id)
+def test_new_idle_value_applies_on_next_request(fresh_pat):
+    email, pat_id = fresh_pat
     with _admin() as admin:
         admin.post("/admin/settings/session", data={"idle_minutes": "10"})
-    with _client(_aged_cookie(PAT, seen_ago=11 * 60)) as c:
+    with _client(_aged_cookie(email, seen_ago=11 * 60)) as c:
         assert c.get("/me").headers["location"] == "/login?expired=1"
     with _admin() as admin:
         admin.post("/admin/settings/session", data={"idle_minutes": "120"})
-    with _client(_aged_cookie(PAT, seen_ago=60 * 60)) as c:
+    with _client(_aged_cookie(email, seen_ago=60 * 60)) as c:
         assert c.get("/me").status_code == 200
 
 

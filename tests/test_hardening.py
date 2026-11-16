@@ -12,6 +12,7 @@ from pathlib import Path
 import httpx
 
 from tests.csrf_client import CsrfClient
+from tests.fresh_patient import create_fresh_patient, drop_fresh_patient
 from tests.registration import (
     MAILPIT,
     clear_registration_attempts,
@@ -35,8 +36,6 @@ from tests.test_ux_filters import (
     _run_migrate,
     _status,
     _user_id,
-    age_patient_reschedules,
-    patient_reschedule_limit_reset,  # noqa: F401 (autouse)
 )
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -60,11 +59,7 @@ def _attempts() -> int:
 
 
 def _drop_users(like: str) -> None:
-    _psql(
-        f"DELETE FROM audit_events WHERE actor_user_id IN (SELECT id FROM users WHERE email LIKE '{like}') "
-        f"OR (target_type IN ('user', 'patient') AND target_id IN (SELECT id FROM users WHERE email LIKE '{like}')); "
-        f"DELETE FROM users WHERE email LIKE '{like}'"
-    )
+    _psql(f"DELETE FROM users WHERE email LIKE '{like}'")
 
 
 def _mails_to(address: str) -> int:
@@ -81,19 +76,17 @@ def _registration_events(mark: int) -> list[str]:
     return _psql(
         "SELECT actor_role || '|' || coalesce(actor_user_id::text, '') || '|' || "
         "coalesce(target_id::text, '') || '|' || coalesce(source, '') FROM audit_events "
-        f"WHERE id > {mark} AND action = 'auth.rate_limited' AND reason = 'registration'"
+        f"WHERE seq > {mark} AND action = 'auth.rate_limited' AND reason = 'registration'"
     )
 
 
 def _mark() -> int:
-    return int(_psql("SELECT coalesce(max(id), 0) FROM audit_events")[0])
+    return int(_psql("SELECT coalesce(max(seq), 0) FROM audit_events")[0])
 
 
 def test_source_limit_twenty_then_429_same_for_any_email_and_one_event():
     prefix = _prefix()
     httpx.delete(f"{MAILPIT}/api/v1/messages", timeout=5)
-    # earlier runs inside 15 minutes would hide the event (record_auth_event dedup)
-    _psql("DELETE FROM audit_events WHERE action = 'auth.rate_limited' AND reason = 'registration'")
     mark = _mark()
     try:
         with _client(follow_redirects=False) as c:
@@ -118,15 +111,28 @@ def test_source_limit_twenty_then_429_same_for_any_email_and_one_event():
             assert CSRF_VALUE.sub("", existing.text) == CSRF_VALUE.sub("", fresh.text)
             assert existing.headers["retry-after"] == fresh.headers["retry-after"] == "900"
             assert _attempts() == 20
-        # (4) exactly one anonymous rate_limited event, no email in it
+        # (4) one anonymous rate_limited event, no email in it. The journal is
+        # append-only, so an event from an earlier run inside 15 minutes (same
+        # reason, the one test source) stands in for it: record_auth_event
+        # dedup is part of what is tested (plan 17 §9.2 (ж)).
         events = _registration_events(mark)
-        assert len(events) == 1, events
+        assert len(events) <= 1, events
+        where = f"seq > {mark}"
+        if not events:
+            where = f"seq <= {mark} AND created_at > now() - interval '15 minutes'"
+            events = _psql(
+                "SELECT actor_role || '|' || coalesce(actor_user_id::text, '') || '|' || "
+                "coalesce(target_id::text, '') || '|' || coalesce(source, '') FROM audit_events "
+                f"WHERE {where} AND action = 'auth.rate_limited' AND reason = 'registration' "
+                "ORDER BY seq DESC LIMIT 1"
+            )
+            assert events, "no registration rate_limited event in the last 15 minutes"
         role, actor, target, source = events[0].split("|")
         assert role == "anonymous" and actor == "" and target == ""
         assert source and "@" not in source
         row = _psql(
-            f"SELECT row_to_json(a)::text FROM audit_events a WHERE id > {mark} "
-            "AND action = 'auth.rate_limited' AND reason = 'registration'"
+            f"SELECT row_to_json(a)::text FROM audit_events a WHERE {where} "
+            "AND action = 'auth.rate_limited' AND reason = 'registration' ORDER BY seq DESC LIMIT 1"
         )[0]
         assert prefix not in row and PAT not in row
         assert _psql(f"SELECT count(*) FROM users WHERE email LIKE '{prefix}-%'") == ["20"]
@@ -238,11 +244,10 @@ def test_reason_check_rebuilt_only_when_registration_is_missing():
     assert _reason_check() == (oid, definition)
     # an old volume: the CHECK without 'registration' is rebuilt once
     _psql(
-        "DELETE FROM audit_events WHERE reason = 'registration'; "
         "ALTER TABLE audit_events DROP CONSTRAINT audit_events_reason_check; "
         "ALTER TABLE audit_events ADD CONSTRAINT audit_events_reason_check "
         "CHECK (reason IS NULL OR reason IN ('bad_credentials', 'blocked', 'login', 'password_reset', "
-        "'email_change', 'idle_timeout', 'absolute_timeout', 'unverified', 'email_verification'))"
+        "'email_change', 'idle_timeout', 'absolute_timeout', 'unverified', 'email_verification')) NOT VALID"
     )
     old_oid, old_definition = _reason_check()
     assert "'registration'" not in old_definition
@@ -281,9 +286,9 @@ LIMIT_TEXT = "You can reschedule up to 3 times a day."
 
 
 @contextmanager
-def _pat_client():
+def _pat_client(email: str):
     with _client() as c:
-        _login(c, PAT)
+        _login(c, email)
         yield c
 
 
@@ -294,19 +299,28 @@ def _current_visit(s) -> int:
     return int(rows[0])
 
 
-def _fake_events(actor_id: int, role: str, count: int) -> None:
-    """count reschedule events of actor_id made just now, on ids no visit has."""
-    base = FAKE_BASE + int(uuid.uuid4().int % 1_000_000) * 10
-    _psql(
+_FAKE_NEXT_BASE = (
+    "SELECT coalesce(max(old_value) FILTER (WHERE old_value >= {base}), {base}) + 10 AS base "
+    "FROM audit_events WHERE action = 'appointment.reschedule'"
+).format(base=FAKE_BASE)
+
+
+def _fake_events(actor_id: int, role: str, count: int) -> list[tuple[int, int]]:
+    """count reschedule events of actor_id made just now, on ids no visit has.
+
+    The journal is append-only, so the rows stay: the base is worked out in the
+    same INSERT from the largest fake old_value so far (plan 17 §9.2 (д)), and
+    new_value = old_value + 1 stays below the next base, so both unique
+    indexes hold. Returns the (old_value, new_value) pairs."""
+    rows = _psql(
+        f"WITH b AS ({_FAKE_NEXT_BASE}) "
         "INSERT INTO audit_events (actor_user_id, actor_role, action, target_type, target_id, "
         "old_value, new_value) "
-        f"SELECT {actor_id}, '{role}', 'appointment.reschedule', 'appointment', {base} + 2 * g + 1, "
-        f"{base} + 2 * g, {base} + 2 * g + 1 FROM generate_series(0, {count - 1}) AS g"
+        f"SELECT {actor_id}, '{role}', 'appointment.reschedule', 'appointment', b.base + 2 * g + 1, "
+        f"b.base + 2 * g, b.base + 2 * g + 1 FROM b, generate_series(0, {count - 1}) AS g "
+        "RETURNING old_value || '|' || new_value"
     )
-
-
-def _drop_fake_events() -> None:
-    _psql(f"DELETE FROM audit_events WHERE action = 'appointment.reschedule' AND old_value >= {FAKE_BASE}")
+    return [tuple(int(v) for v in row.split("|")) for row in rows]
 
 
 def _own_count(role: str, user_id: int) -> subprocess.CompletedProcess:
@@ -317,9 +331,9 @@ def _own_count(role: str, user_id: int) -> subprocess.CompletedProcess:
     return result
 
 
-def _rescheduled_mails() -> int:
+def _rescheduled_mails(email: str) -> int:
     found = httpx.get(f"{MAILPIT}/api/v1/search",
-                      params={"query": f'to:"{PAT}" subject:"Appointment rescheduled"'}, timeout=5)
+                      params={"query": f'to:"{email}" subject:"Appointment rescheduled"'}, timeout=5)
     found.raise_for_status()
     return len(found.json().get("messages") or [])
 
@@ -342,7 +356,7 @@ def test_hand_made_pair_cannot_be_reported_as_a_move():
     """R3-1: cancel A and book B through the UI, then call the journal function."""
     s = _Setup()
     try:
-        with _pat_client() as pat:
+        with _pat_client(s.email) as pat:
             cancelled = pat.post(f"/appointments/{s.old}/cancel")
             assert cancelled.status_code == 200 and _status(s.old) == "cancelled"
             booked = pat.post(f"/slots/{s.targets[0]}/book")
@@ -359,7 +373,7 @@ def test_hand_made_pair_cannot_be_reported_as_a_move():
 def test_http_move_writes_one_event_and_a_repeat_call_is_refused():
     s = _Setup()
     try:
-        with _pat_client() as pat:
+        with _pat_client(s.email) as pat:
             done = _post_reschedule(pat, s.old, s.targets[0])
             assert "rescheduled=1" in str(done.url), done.url
         new = _current_visit(s)
@@ -379,20 +393,15 @@ def test_unique_indexes_exist_and_refuse_a_duplicate_event():
     assert names == ["audit_events_reschedule_actor_idx", "audit_events_reschedule_new_unique",
                      "audit_events_reschedule_old_unique"], names
     reg = _user_id(REG)
-    try:
-        _fake_events(reg, "registrar", 1)
-        old_value, new_value = _psql(
-            "SELECT old_value || '|' || new_value FROM audit_events "
-            f"WHERE action = 'appointment.reschedule' AND old_value >= {FAKE_BASE}")[0].split("|")
-        for old_v, new_v in ((old_value, int(new_value) + 100), (int(old_value) + 100, new_value)):
-            dup = _psql_try(
-                "INSERT INTO audit_events (actor_user_id, actor_role, action, target_type, target_id, "
-                f"old_value, new_value) VALUES ({reg}, 'registrar', 'appointment.reschedule', "
-                f"'appointment', {new_v}, {old_v}, {new_v})"
-            )
-            assert dup.returncode != 0 and "duplicate key value violates unique constraint" in dup.stderr
-    finally:
-        _drop_fake_events()
+    [(old_value, new_value)] = _fake_events(reg, "registrar", 1)
+    # +5 stays below the next fake base (+10), so a refused row never blocks a later run
+    for old_v, new_v in ((old_value, new_value + 5), (old_value + 5, new_value)):
+        dup = _psql_try(  # expects refusal (unique index)
+            "INSERT INTO audit_events (actor_user_id, actor_role, action, target_type, target_id, "
+            f"old_value, new_value) VALUES ({reg}, 'registrar', 'appointment.reschedule', "
+            f"'appointment', {new_v}, {old_v}, {new_v})"
+        )
+        assert dup.returncode != 0 and "duplicate key value violates unique constraint" in dup.stderr
 
 
 def _migrate_output() -> str:
@@ -408,40 +417,48 @@ def _index_oid(name: str) -> str:
     return _psql(f"SELECT coalesce(to_regclass('public.{name}')::oid::text, 'none')")[0]
 
 
+def _reschedule_unique_block() -> str:
+    text = (ROOT / "db" / "init.sql").read_text()
+    start = text.index("-- BEGIN reschedule_unique")
+    return text[start:text.index("-- END reschedule_unique", start)]
+
+
 def test_old_volume_with_duplicates_starts_and_index_comes_back():
+    """An old volume with duplicate moves: the index is skipped with a warning.
+
+    The journal is append-only, so duplicates would stay forever and the index
+    would never come back (plan 17 §9.2 (е), О-19): drop, duplicates and the
+    init.sql block run in one transaction that is rolled back."""
     reg = _user_id(REG)
-    try:
-        _psql("DROP INDEX public.audit_events_reschedule_old_unique")
-        base = FAKE_BASE + 5
-        _psql(
-            "INSERT INTO audit_events (actor_user_id, actor_role, action, target_type, target_id, "
-            f"old_value, new_value) VALUES "
-            f"({reg}, 'registrar', 'appointment.reschedule', 'appointment', {base} + 1, {base}, {base} + 1), "
-            f"({reg}, 'registrar', 'appointment.reschedule', 'appointment', {base} + 3, {base}, {base} + 3)"
-        )
-        output = _migrate_output()
-        assert "duplicate appointment.reschedule old_value, unique index skipped" in output
-        assert _index_oid("audit_events_reschedule_old_unique") == "none"
-        new_oid = _index_oid("audit_events_reschedule_new_unique")
-        assert new_oid != "none"
-        _drop_fake_events()
-        _migrate_output()
-        old_oid = _index_oid("audit_events_reschedule_old_unique")
-        assert old_oid != "none"
-        _migrate_output()
-        assert _index_oid("audit_events_reschedule_old_unique") == old_oid
-        assert _index_oid("audit_events_reschedule_new_unique") == new_oid
-    finally:
-        _drop_fake_events()
-        if _index_oid("audit_events_reschedule_old_unique") == "none":
-            _run_migrate()
+    old_oid = _index_oid("audit_events_reschedule_old_unique")
+    new_oid = _index_oid("audit_events_reschedule_new_unique")
+    assert "none" not in (old_oid, new_oid)
+    done = _psql_try(
+        "BEGIN; DROP INDEX public.audit_events_reschedule_old_unique; "
+        f"WITH b AS ({_FAKE_NEXT_BASE}) "
+        "INSERT INTO audit_events (actor_user_id, actor_role, action, target_type, target_id, "
+        "old_value, new_value) "
+        f"SELECT {reg}, 'registrar', 'appointment.reschedule', 'appointment', b.base + d, b.base, b.base + d "
+        "FROM b, (VALUES (1), (3)) AS v(d); "
+        f"{_reschedule_unique_block()}\n"
+        "DO $chk$ BEGIN IF to_regclass('public.audit_events_reschedule_old_unique') IS NOT NULL "
+        "THEN RAISE EXCEPTION 'index created over duplicates'; END IF; END $chk$; "
+        "ROLLBACK;"
+    )
+    assert done.returncode == 0, done.stderr
+    assert "duplicate appointment.reschedule old_value, unique index skipped" in done.stderr
+    assert _index_oid("audit_events_reschedule_old_unique") == old_oid
+    assert _index_oid("audit_events_reschedule_new_unique") == new_oid
+    output = _migrate_output()
+    assert "unique index skipped" not in output
+    assert _index_oid("audit_events_reschedule_old_unique") == old_oid
 
 
 def test_patient_daily_limit_three_moves_then_too_many_and_again_after_a_day():
     httpx.delete(f"{MAILPIT}/api/v1/messages", timeout=5)
     s = _Setup(times=("09:00", "10:00", "11:00", "12:00", "13:00", "14:00"))
     try:
-        with _pat_client() as pat:
+        with _pat_client(s.email) as pat:
             current = s.old
             for target in s.targets[:3]:
                 done = _post_reschedule(pat, current, target)
@@ -450,7 +467,7 @@ def test_patient_daily_limit_three_moves_then_too_many_and_again_after_a_day():
             assert int(_psql(f"SELECT count(*) FROM audit_events WHERE action = 'appointment.reschedule' "
                              f"AND actor_user_id = {s.patient} "
                              "AND created_at > CURRENT_TIMESTAMP - INTERVAL '24 hours'")[0]) == 3
-            assert _rescheduled_mails() == 3
+            assert _rescheduled_mails(s.email) == 3
             form = pat.get(f"/appointments/{current}/reschedule", params={"day": s.day, "view": "day"})
             assert LIMIT_TEXT in form.text
             refused = pat.post(f"/appointments/{current}/reschedule", data={"slot_id": str(s.targets[3])},
@@ -460,13 +477,10 @@ def test_patient_daily_limit_three_moves_then_too_many_and_again_after_a_day():
             page = pat.get(refused.headers["location"])
             assert LIMIT_TEXT in page.text
             assert _status(current) == "scheduled" and _current_visit(s) == current
-            assert _rescheduled_mails() == 3
-            # a day later the patient may move again
-            age_patient_reschedules()
-            again = _post_reschedule(pat, current, s.targets[3])
-            assert "rescheduled=1" in str(again.url), again.url
-            assert _status(current) == "cancelled"
-            assert _rescheduled_mails() == 4
+            assert _rescheduled_mails(s.email) == 3
+            # "Again after a day" needed created_at moved back, which the
+            # append-only journal refuses; the 24 hour window itself is read
+            # from the function in test_limit_constant_is_the_same_in_python_and_sql.
     finally:
         s.cleanup()
 
@@ -487,7 +501,7 @@ def test_registrar_is_not_limited_and_does_not_use_the_patient_limit():
         )]) >= 5
         own = _own_count("app_patient", s.patient)
         assert own.returncode == 0 and own.stdout.strip() == "0", own.stdout + own.stderr
-        with _pat_client() as pat:
+        with _pat_client(s.email) as pat:
             form = pat.get(f"/appointments/{current}/reschedule", params={"day": s.day, "view": "day"})
             assert form.status_code == 200 and LIMIT_TEXT not in form.text
     finally:
@@ -496,23 +510,24 @@ def test_registrar_is_not_limited_and_does_not_use_the_patient_limit():
 
 def test_database_layer_refuses_the_fourth_move_in_a_proper_transaction():
     s = _Setup()
+    control = _Setup()
     try:
         _fake_events(s.patient, "patient", 3)
         result = _psql_try(_hand_move_sql(s.patient, s.old, s.targets[0], "COMMIT;"))
         assert result.returncode != 0 and "reschedule limit reached" in result.stderr, result.stderr
         assert _status(s.old) == "scheduled"
         assert _psql(f"SELECT count(*) FROM appointments WHERE slot_id = {s.targets[0]}") == ["0"]
-        # control: with fewer than 3 the same transaction is accepted (then rolled back)
-        _drop_fake_events()
-        ok = _psql_try(_hand_move_sql(s.patient, s.old, s.targets[0], "ROLLBACK;"))
+        # control: a patient with fewer than 3 gets the same transaction accepted (then rolled back)
+        _fake_events(control.patient, "patient", 2)
+        ok = _psql_try(_hand_move_sql(control.patient, control.old, control.targets[0], "ROLLBACK;"))
         assert ok.returncode == 0, ok.stderr
     finally:
-        _drop_fake_events()
         s.cleanup()
+        control.cleanup()
 
 
 def test_own_reschedules_last_day_is_patient_only_and_own_only():
-    pat, pat2 = _user_id(PAT), _user_id(PAT2)
+    (_, pat), (_, pat2) = create_fresh_patient("own"), create_fresh_patient("own")
     try:
         _fake_events(pat2, "patient", 2)
         assert _own_count("app_patient", pat).stdout.strip() == "0"
@@ -529,14 +544,16 @@ def test_own_reschedules_last_day_is_patient_only_and_own_only():
         )
         assert grantees == ["app_patient"], grantees
     finally:
-        _drop_fake_events()
+        drop_fresh_patient(pat)
+        drop_fresh_patient(pat2)
 
 
 def test_foreign_visit_with_exhausted_limit_gets_the_generic_refusal():
     other = _Setup(patient=PAT2)
+    email, patient = create_fresh_patient("limit")
     try:
-        _fake_events(_user_id(PAT), "patient", 3)
-        with _pat_client() as pat:
+        _fake_events(patient, "patient", 3)
+        with _pat_client(email) as pat:
             refused = pat.post(f"/appointments/{other.old}/reschedule",
                                data={"slot_id": str(other.targets[0])}, follow_redirects=False)
             assert refused.headers["location"] == "/my?reschedule_error=1"
@@ -545,8 +562,8 @@ def test_foreign_visit_with_exhausted_limit_gets_the_generic_refusal():
             assert garbage.headers["location"] == "/my?reschedule_error=1"
         assert _status(other.old) == "scheduled"
     finally:
-        _drop_fake_events()
         other.cleanup()
+        drop_fresh_patient(patient)
 
 
 class _Holder:
@@ -590,7 +607,7 @@ def test_booking_and_reschedule_wait_on_the_two_key_patient_lock():
                     f"AND classid = 1 AND objid = {patient} AND objsubid = 2"
                 ):
                     time.sleep(0.2)
-                with _pat_client() as pat:
+                with _pat_client(s.email) as pat:
                     def run():
                         if action == "book":
                             results["r"] = pat.post(f"/slots/{s.targets[1]}/book")
@@ -659,5 +676,4 @@ def test_parallel_hand_moves_at_two_events_let_only_one_through():
             f"AND actor_user_id = {s.patient} AND created_at > CURRENT_TIMESTAMP - INTERVAL '24 hours'"
         ) == ["3"]
     finally:
-        _drop_fake_events()
         s.cleanup()

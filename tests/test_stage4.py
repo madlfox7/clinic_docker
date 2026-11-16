@@ -200,8 +200,6 @@ def test_login_throttles_repeated_failed_attempts():
 				f"""
 				DELETE FROM login_attempts
 				WHERE email_fingerprint = public.digest(lower('{email}'), 'sha256');
-				DELETE FROM audit_events
-				WHERE actor_user_id = (SELECT id FROM users WHERE email = '{email}');
 				DELETE FROM users WHERE email = '{email}'
 				"""
 			)
@@ -357,9 +355,6 @@ def test_weak_passwords_are_rejected_without_creating_users():
 			assert "Invalid email or password" in denied_chosen.text
 		psql(
 			f"""
-			DELETE FROM audit_events
-			WHERE target_id = (SELECT id FROM users WHERE email = '{staff_email}')
-			   OR actor_user_id = (SELECT id FROM users WHERE email = '{staff_email}');
 			DELETE FROM password_reset_tokens
 			WHERE user_id = (SELECT id FROM users WHERE email = '{staff_email}');
 			DELETE FROM users WHERE email = '{staff_email}';
@@ -443,13 +438,7 @@ def test_weak_passwords_are_rejected_without_creating_users():
 		assert "Invalid email or password" in stripped_login.text
 		psql(
 			f"""
-			DELETE FROM audit_events
-			WHERE target_id = (SELECT id FROM users WHERE email = '{policy_email}')
-			   OR actor_user_id = (SELECT id FROM users WHERE email = '{policy_email}');
 			DELETE FROM users WHERE email = '{policy_email}';
-			DELETE FROM audit_events
-			WHERE target_id = (SELECT id FROM users WHERE email = '{stored_email}')
-			   OR actor_user_id = (SELECT id FROM users WHERE email = '{stored_email}');
 			DELETE FROM users WHERE email = '{stored_email}';
 			"""
 		)
@@ -513,8 +502,6 @@ def test_login_timing_does_not_reveal_whether_email_exists():
 			f"""
 			DELETE FROM login_attempts
 			WHERE email_fingerprint = public.digest(lower('{email}'), 'sha256');
-			DELETE FROM audit_events
-			WHERE actor_user_id = (SELECT id FROM users WHERE email = '{email}');
 			DELETE FROM users WHERE email = '{email}'
 			"""
 		)
@@ -1017,8 +1004,6 @@ def test_patient_recovers_password_without_admin_reset():
 		if user_id:
 			psql(
 				f"""
-				DELETE FROM audit_events
-				WHERE actor_user_id = {user_id} OR target_id = {user_id};
 				DELETE FROM users WHERE id = {user_id};
 				"""
 			)
@@ -1142,12 +1127,6 @@ def test_owner_confirms_email_change_on_both_addresses():
 	finally:
 		psql(
 			f"""
-			DELETE FROM audit_events
-			WHERE actor_user_id IN (
-			  SELECT id FROM users WHERE email IN ('{email}', '{new_email}')
-			) OR target_id IN (
-			  SELECT id FROM users WHERE email IN ('{email}', '{new_email}')
-			);
 			DELETE FROM users WHERE email IN ('{email}', '{new_email}');
 			"""
 		)
@@ -3729,7 +3708,6 @@ def test_public_registration_is_patient_only_and_can_book(request):
 		if registered_user_id.isdigit():
 			psql(
 				f"""
-				DELETE FROM audit_events WHERE actor_user_id = {registered_user_id};
 				DELETE FROM appointments WHERE patient_user_id = {registered_user_id};
 				DELETE FROM users WHERE id = {registered_user_id};
 				"""
@@ -3911,7 +3889,6 @@ def test_public_registration_is_patient_only_and_can_book(request):
 		finally:
 			psql(
 				f"""
-				DELETE FROM audit_events WHERE actor_user_id = {user_id};
 				DELETE FROM appointments WHERE patient_user_id = {user_id};
 				DELETE FROM users WHERE id = {user_id};
 				"""
@@ -4090,9 +4067,6 @@ def test_admin_can_create_update_deactivate_and_reactivate_doctor():
 		if doctor_id is not None:
 			psql(
 				f"""
-				DELETE FROM audit_events
-				WHERE target_type = 'doctor'
-				  AND target_id IN ({doctor_id}, COALESCE({user_id}, 0));
 				DELETE FROM appointments
 				WHERE slot_id IN (SELECT id FROM slots WHERE doctor_id = {doctor_id});
 				DELETE FROM slots WHERE doctor_id = {doctor_id};
@@ -4102,9 +4076,6 @@ def test_admin_can_create_update_deactivate_and_reactivate_doctor():
 		if user_id is not None:
 			psql(
 				f"""
-				DELETE FROM audit_events
-				WHERE actor_user_id = {user_id}
-				   OR (target_id = {user_id} AND target_type IN ('doctor', 'user'));
 				DELETE FROM users WHERE id = {user_id};
 				"""
 			)
@@ -4362,8 +4333,6 @@ def test_admin_can_create_staff_and_reset_password():
 			ids_csv = ", ".join(str(target_id) for target_id in target_ids)
 			psql(
 				f"""
-				DELETE FROM audit_events
-				WHERE target_id IN ({ids_csv}) OR actor_user_id IN ({ids_csv});
 				DELETE FROM users WHERE id IN ({ids_csv});
 				"""
 			)
@@ -4541,7 +4510,7 @@ def test_patient_cannot_forge_audit_events():
 		)
 		assert forged.returncode != 0, (action, forged.stdout)
 		assert "not allowed" in forged.stderr or "permission denied" in forged.stderr
-	direct = _as_role(
+	direct = _as_role(  # expects refusal
 		"app_patient", PAT,
 		"INSERT INTO audit_events (actor_user_id, actor_role, action, target_type) "
 		"VALUES (1, 'admin', 'x', 'y');",
@@ -4579,7 +4548,6 @@ def test_cancelled_only_patient_is_not_own_patient_of_doctor():
 	finally:
 		_drop_visit(visit)
 		psql(
-			f"DELETE FROM audit_events WHERE actor_user_id = {patient_id}; "
 			f"DELETE FROM users WHERE id = {patient_id}"
 		)
 

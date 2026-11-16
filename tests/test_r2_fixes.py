@@ -94,8 +94,6 @@ def _restore_demo_profiles() -> None:
 
 def _delete_user(email: str) -> None:
     _psql(
-        f"DELETE FROM audit_events WHERE actor_user_id = (SELECT id FROM users WHERE email = '{email}') "
-        f"OR (target_type IN ('user', 'patient') AND target_id = (SELECT id FROM users WHERE email = '{email}')); "
         f"DELETE FROM login_attempts WHERE email_fingerprint = public.digest('{email}', 'sha256'); "
         f"DELETE FROM email_verification_attempts WHERE email_fingerprint = public.digest('{email}', 'sha256'); "
         f"DELETE FROM password_reset_attempts WHERE email_fingerprint = public.digest('{email}', 'sha256'); "
@@ -680,10 +678,6 @@ def test_staff_invite_is_unconfirmed_until_the_setup_link_is_used():
             assert _verified_at(email) != "NULL"
             _login(staff, email, password)
     finally:
-        _psql(
-            f"DELETE FROM audit_events WHERE actor_user_id = (SELECT id FROM users WHERE email = '{email}') "
-            f"OR (target_type IN ('user', 'registrar') AND target_id = (SELECT id FROM users WHERE email = '{email}'))"
-        )
         _delete_user(email)
 
 

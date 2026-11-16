@@ -908,7 +908,9 @@ $$;
 -- One reschedule event per old visit and per new visit (old_value and
 -- new_value are INTEGER). An old volume that already holds duplicates (only
 -- possible through direct SQL before this change) keeps starting: the index
--- is skipped with a warning.
+-- is skipped with a warning. The block between the markers is also run by
+-- tests/test_hardening.py inside a rolled-back transaction.
+-- BEGIN reschedule_unique
 DO $$
 BEGIN
   IF to_regclass('public.audit_events_reschedule_old_unique') IS NULL THEN
@@ -933,6 +935,7 @@ BEGIN
   END IF;
 END
 $$;
+-- END reschedule_unique
 
 -- The daily patient reschedule limit counts these rows.
 CREATE INDEX IF NOT EXISTS audit_events_reschedule_actor_idx

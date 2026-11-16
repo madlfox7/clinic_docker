@@ -38,8 +38,8 @@ from tests.test_ux_filters import (
     _as_role,
     _cleanup_slots,
     _status,
-    age_patient_reschedules,
 )
+from tests.fresh_patient import create_fresh_patient, drop_fresh_patient
 
 ROOT = Path(__file__).resolve().parents[1]
 BASE = os.environ.get("CLINIC_TEST_BASE", "https://localhost:8450")
@@ -160,7 +160,7 @@ def test_patient_and_registrar_booking_forms_ask_with_visit_details():
     try:
         doctor, service, when = _names(s.targets[0])
         with _client() as pat, _client() as reg:
-            _login(pat, PAT)
+            _login(pat, s.email)
             _login(reg, REG)
             params = {"service_id": "1", "day": s.day, "view": "day"}
             page = pat.get(f"/doctors/{s.doctor}/slots", params=params).text
@@ -196,7 +196,7 @@ def test_cancel_and_reschedule_forms_carry_visit_details_everywhere():
         _, _, new_when = _names(s.targets[0])
         cancel_text = f"Cancel the appointment: {service} with {doctor} on {when}?"
         with _client() as pat, _client() as reg, _client() as admin:
-            _login(pat, PAT)
+            _login(pat, s.email)
             _login(reg, REG)
             _login(admin, ADMIN)
             my = pat.get("/my", params={"from": s.day, "to": s.day}).text
@@ -214,7 +214,7 @@ def test_cancel_and_reschedule_forms_carry_visit_details_everywhere():
             assert tags
             for tag in tags:
                 assert _attr(tag, "data-confirm") == \
-                    f"Cancel the appointment: {service} with {doctor} on {when} for Narek Hakobyan?"
+                    f"Cancel the appointment: {service} with {doctor} on {when} for Fresh Patient?"
     finally:
         s.cleanup()
     for template in (ROOT / "app" / "templates").glob("*.html"):
@@ -254,7 +254,7 @@ def test_confirmation_is_not_a_control_csrf_and_methods_stay():
     s = _Setup(times=("10:00", "12:00"))
     try:
         with _client() as pat:
-            _login(pat, PAT)
+            _login(pat, s.email)
             assert pat.post(f"/slots/{s.targets[0]}/book", data={"service_id": "1"}, csrf=False).status_code == 403
             assert pat.get(f"/slots/{s.targets[0]}/book").status_code == 405
             assert pat.get(f"/appointments/{s.old}/cancel").status_code == 405
@@ -288,8 +288,6 @@ def _unique(prefix: str) -> str:
 
 def _drop_user(email: str) -> None:
     _psql(
-        f"DELETE FROM audit_events WHERE actor_user_id = (SELECT id FROM users WHERE email = '{email}') "
-        f"OR (target_type IN ('user', 'patient') AND target_id = (SELECT id FROM users WHERE email = '{email}')); "
         f"DELETE FROM login_attempts WHERE email_fingerprint = public.digest('{email}', 'sha256'); "
         f"DELETE FROM password_reset_attempts WHERE email_fingerprint = public.digest('{email}', 'sha256'); "
         f"DELETE FROM email_verification_attempts WHERE email_fingerprint = public.digest('{email}', 'sha256'); "
@@ -589,7 +587,6 @@ YEREVAN_NOW = "(CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Yerevan')"
 @pytest.fixture(autouse=True)
 def deadline_two_hours():
     _psql("UPDATE clinic_settings SET patient_change_deadline_hours = 2 WHERE id = 1")
-    age_patient_reschedules()
     yield
     _psql("UPDATE clinic_settings SET patient_change_deadline_hours = 2 WHERE id = 1")
 
@@ -740,12 +737,14 @@ def test_reschedule_inside_the_deadline_is_refused_before_the_lock_live_for_upda
 
 def test_patient_can_cancel_and_move_outside_the_deadline(deadline_two_hours):
     near = _Near()
+    # The move stays in the journal: a fresh patient keeps PAT's 3 a day free.
+    email, _patient = create_fresh_patient("deadline")
     try:
-        to_cancel = near.visit(180)
-        to_move = near.visit(240)
+        to_cancel = near.visit(180, patient=email)
+        to_move = near.visit(240, patient=email)
         target = near.slot(400)
         with _client() as pat:
-            _login(pat, PAT)
+            _login(pat, email)
             my = pat.get("/my", params={"status": "all"})
             assert f'action="/appointments/{to_cancel}/cancel"' in my.text
             done = pat.post(f"/appointments/{to_cancel}/cancel", follow_redirects=False)
@@ -757,6 +756,7 @@ def test_patient_can_cancel_and_move_outside_the_deadline(deadline_two_hours):
         assert _status(to_move) == "cancelled"
     finally:
         near.cleanup()
+        drop_fresh_patient(_patient)
 
 
 def test_database_refuses_late_and_past_patient_updates_in_any_session_zone(deadline_two_hours):

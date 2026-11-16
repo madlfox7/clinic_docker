@@ -409,3 +409,29 @@ def test_discard_without_an_invite_event_fails_closed_and_warns_without_data():
     assert "without an invite event" in done.stderr
     assert email not in done.stderr and token not in done.stderr
 
+
+# --- §9.2: the tests themselves never edit the journal -----------------------
+
+def test_no_test_edits_the_audit_journal():
+    """grep -niE '(DELETE FROM|UPDATE|TRUNCATE)[^;]*audit_events' tests/ is empty,
+    except for statements that expect the refusal (marked on the same line)."""
+    pattern = re.compile(r"(DELETE FROM|UPDATE|TRUNCATE)[^;]*audit_events", re.I)
+    found = []
+    for path in sorted((ROOT / "tests").glob("*.py")):
+        for number, line in enumerate(path.read_text().splitlines(), 1):
+            if pattern.search(line) and "# expects refusal" not in line and "pattern = re.compile" not in line:
+                found.append(f"{path.name}:{number}: {line.strip()}")
+    assert found == []
+
+
+def test_a_login_gets_the_next_seq_and_a_valid_row_hash():
+    """O-26: auth.login.success after the mark has seq = head.last_seq."""
+    mark = _mark()
+    with CsrfClient(base_url=BASE, follow_redirects=True, timeout=10.0) as c:
+        page = c.post("/login", data={"email": PAT, "password": PASSWORD})
+        assert page.status_code == 200 and page.url.path == "/me"
+    rows = _rows(f"seq >= {mark}")
+    logins = [r for r in rows if r["seq"] > mark and r["action"] == "auth.login.success"]
+    assert logins and logins[-1]["seq"] == _head()["last_seq"]
+    _check_links(rows)
+

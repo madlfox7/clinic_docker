@@ -10,6 +10,7 @@ import httpx
 import pytest
 
 from tests.csrf_client import CsrfClient
+from tests.fresh_patient import create_fresh_patient, drop_fresh_patient
 from tests.demo_secret import demo_password
 from tests.field_key import seal_pending, sql_packet
 
@@ -25,24 +26,6 @@ REG = "reg@clinic.local"
 ADMIN = "admin@clinic.local"
 PAT_NAME, PAT_PHONE = "Narek Hakobyan", "+374 10 123456"
 RAW_DATETIME = re.compile(r"\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}")
-
-
-def age_patient_reschedules() -> None:
-    """Move patients' reschedule events 25 hours back (superuser psql, tests only).
-
-    Patients may make 3 moves in 24 hours and the volume survives between runs;
-    the limit is not raised for tests and the app has no bypass.
-    """
-    _psql(
-        "UPDATE audit_events SET created_at = created_at - INTERVAL '25 hours' "
-        "WHERE action = 'appointment.reschedule' AND actor_role = 'patient'"
-    )
-
-
-@pytest.fixture(autouse=True)
-def patient_reschedule_limit_reset():
-    age_patient_reschedules()
-    yield
 
 
 def _client(**kwargs):
@@ -128,8 +111,6 @@ def _cleanup_slots(slot_ids) -> None:
         "DELETE FROM visit_notes WHERE appointment_id IN "
         f"(SELECT id FROM appointments WHERE slot_id IN ({ids})); "
         "DELETE FROM prescriptions WHERE appointment_id IN "
-        f"(SELECT id FROM appointments WHERE slot_id IN ({ids})); "
-        "DELETE FROM audit_events WHERE target_type = 'appointment' AND target_id IN "
         f"(SELECT id FROM appointments WHERE slot_id IN ({ids})); "
         f"DELETE FROM appointments WHERE slot_id IN ({ids}); "
         f"DELETE FROM slots WHERE id IN ({ids})"
@@ -355,20 +336,23 @@ def _audit_ids(html: str) -> list[int]:
     return [int(x) for x in re.findall(r'data-audit-id="(\d+)"', html)]
 
 
-def _seed_audit_rows(count: int, target_id: int) -> None:
+SEED_BASE = 800_000_000
+
+
+def _seed_audit_rows(count: int) -> int:
+    """count clinic.settings.update rows on a target no earlier run used.
+
+    The journal is append-only, so seeded rows stay: the target is the largest
+    seeded target so far plus a step, worked out in the same statement
+    (plan 17 §9.2, Securo review fix 7), not a random number."""
     admin = _user_id(ADMIN)
-    _psql(
+    return int(_psql(
+        "WITH b AS (SELECT coalesce(max(target_id) FILTER (WHERE target_id >= "
+        f"{SEED_BASE}), {SEED_BASE}) + 10 AS t FROM audit_events WHERE target_type = 'clinic') "
         "INSERT INTO audit_events (actor_user_id, actor_role, action, target_type, target_id) "
-        f"SELECT {admin}, 'admin', 'clinic.settings.update', 'clinic', {target_id} "
-        f"FROM generate_series(1, {count})"
-    )
-
-
-def _drop_audit_rows(target_id: int) -> None:
-    _psql(
-        "DELETE FROM audit_events WHERE action = 'clinic.settings.update' "
-        f"AND target_type = 'clinic' AND target_id = {target_id}"
-    )
+        f"SELECT {admin}, 'admin', 'clinic.settings.update', 'clinic', b.t "
+        f"FROM b, generate_series(1, {count}) RETURNING target_id"
+    )[0])
 
 
 def test_audit_log_is_admin_only_with_any_filter():
@@ -385,94 +369,84 @@ def test_audit_log_is_admin_only_with_any_filter():
 
 
 def test_audit_log_filters_narrow_and_reject_garbage():
-    target = 900_000_000 + int(uuid.uuid4().int % 1_000_000)
-    _seed_audit_rows(3, target)
-    try:
-        with _client() as admin:
-            _login(admin, ADMIN)
-            base = _audit_ids(admin.get("/admin/audit").text)
-            assert base
-            narrowed = admin.get("/admin/audit", params={"target_type": "clinic", "target_id": str(target)})
-            assert len(_audit_ids(narrowed.text)) == 3
-            by_action = admin.get("/admin/audit", params={"action": "auth.login.success"})
-            assert by_action.status_code == 200
-            assert "clinic.settings.update" not in by_action.text.split("<tbody>", 1)[1]
-            group = admin.get("/admin/audit", params={"action": "auth."})
-            body = group.text.split("<tbody>", 1)[1]
-            assert re.findall(r"<code>([^<]+)</code>", body)
-            assert all(a.startswith("auth.") for a in re.findall(r"<code>([^<]+)</code>", body))
-            role = admin.get("/admin/audit", params={"actor_role": "anonymous"})
-            assert all(r == "anonymous" for r in re.findall(
-                r"<td>(admin|doctor|patient|registrar|anonymous)</td>", role.text.split("<tbody>", 1)[1]))
-            for bad in ({"action": "x' OR 1=1 --"}, {"actor_role": "root"},
-                        {"target_type": "users; DROP"}, {"target_id": "1 OR 1=1"},
-                        {"before_id": "-1"}, {"from": "2026-99-01"},
-                        {"from": "2020-01-01", "to": "2026-01-01"}):
-                page = admin.get("/admin/audit", params=bad)
-                assert page.status_code == 200, bad
-                assert "were not valid" in page.text, bad
-            sqli = admin.get("/admin/audit", params={"action": "x' OR 1=1 --", "target_id": str(target)})
-            assert len(_audit_ids(sqli.text)) == 3
-            # actor: exact normalized email only
-            reg_email_part = REG.split("@")[0]
-            for partial in (reg_email_part, REG[:-3], "%", "reg@%"):
-                page = admin.get("/admin/audit", params={"actor": partial})
-                assert _audit_ids(page.text) == [], partial
-            exact = admin.get("/admin/audit", params={"actor": "  " + ADMIN.upper() + " "})
-            exact_body = exact.text.split("<tbody>", 1)[1]
-            assert _audit_ids(exact.text)
-            assert set(re.findall(r"<td>([^<@]+@[^<]+)</td>", exact_body)) == {ADMIN}
-            missing = admin.get("/admin/audit", params={"actor": f"nobody-{uuid.uuid4().hex}@example.com"})
-            assert missing.status_code == 200 and _audit_ids(missing.text) == []
-            today = _psql("SELECT CURRENT_DATE")[0]
-            dated = admin.get("/admin/audit", params={"from": today, "to": today, "target_id": str(target)})
-            assert len(_audit_ids(dated.text)) == 3
-            old = admin.get("/admin/audit", params={"from": "2001-01-01", "to": "2001-12-31"})
-            assert _audit_ids(old.text) == []
-    finally:
-        _drop_audit_rows(target)
+    target = _seed_audit_rows(3)
+    with _client() as admin:
+        _login(admin, ADMIN)
+        base = _audit_ids(admin.get("/admin/audit").text)
+        assert base
+        narrowed = admin.get("/admin/audit", params={"target_type": "clinic", "target_id": str(target)})
+        assert len(_audit_ids(narrowed.text)) == 3
+        by_action = admin.get("/admin/audit", params={"action": "auth.login.success"})
+        assert by_action.status_code == 200
+        assert "clinic.settings.update" not in by_action.text.split("<tbody>", 1)[1]
+        group = admin.get("/admin/audit", params={"action": "auth."})
+        body = group.text.split("<tbody>", 1)[1]
+        assert re.findall(r"<code>([^<]+)</code>", body)
+        assert all(a.startswith("auth.") for a in re.findall(r"<code>([^<]+)</code>", body))
+        role = admin.get("/admin/audit", params={"actor_role": "anonymous"})
+        assert all(r == "anonymous" for r in re.findall(
+            r"<td>(admin|doctor|patient|registrar|anonymous)</td>", role.text.split("<tbody>", 1)[1]))
+        for bad in ({"action": "x' OR 1=1 --"}, {"actor_role": "root"},
+                    {"target_type": "users; DROP"}, {"target_id": "1 OR 1=1"},
+                    {"before_id": "-1"}, {"from": "2026-99-01"},
+                    {"from": "2020-01-01", "to": "2026-01-01"}):
+            page = admin.get("/admin/audit", params=bad)
+            assert page.status_code == 200, bad
+            assert "were not valid" in page.text, bad
+        sqli = admin.get("/admin/audit", params={"action": "x' OR 1=1 --", "target_id": str(target)})
+        assert len(_audit_ids(sqli.text)) == 3
+        # actor: exact normalized email only
+        reg_email_part = REG.split("@")[0]
+        for partial in (reg_email_part, REG[:-3], "%", "reg@%"):
+            page = admin.get("/admin/audit", params={"actor": partial})
+            assert _audit_ids(page.text) == [], partial
+        exact = admin.get("/admin/audit", params={"actor": "  " + ADMIN.upper() + " "})
+        exact_body = exact.text.split("<tbody>", 1)[1]
+        assert _audit_ids(exact.text)
+        assert set(re.findall(r"<td>([^<@]+@[^<]+)</td>", exact_body)) == {ADMIN}
+        missing = admin.get("/admin/audit", params={"actor": f"nobody-{uuid.uuid4().hex}@example.com"})
+        assert missing.status_code == 200 and _audit_ids(missing.text) == []
+        today = _psql("SELECT CURRENT_DATE")[0]
+        dated = admin.get("/admin/audit", params={"from": today, "to": today, "target_id": str(target)})
+        assert len(_audit_ids(dated.text)) == 3
+        old = admin.get("/admin/audit", params={"from": "2001-01-01", "to": "2001-12-31"})
+        assert _audit_ids(old.text) == []
 
 
 def test_audit_log_keyset_pages_without_gaps_or_repeats():
-    target = 800_000_000 + int(uuid.uuid4().int % 1_000_000)
-    _seed_audit_rows(120, target)
-    try:
-        expected = [int(x) for x in _psql(
-            "SELECT id FROM audit_events WHERE target_type = 'clinic' "
-            f"AND target_id = {target} ORDER BY id DESC"
-        )]
-        before = int(_psql("SELECT count(*) FROM audit_events WHERE action LIKE 'audit.%'")[0])
-        with _client() as admin:
-            _login(admin, ADMIN)
-            params = {"target_type": "clinic", "target_id": str(target)}
-            first = admin.get("/admin/audit", params=params)
-            page1 = _audit_ids(first.text)
-            assert page1 == expected[:50]
-            next_link = re.search(r'href="(/admin/audit\?[^"]*before_id=\d+[^"]*)"', first.text)
-            assert next_link and "Newest" not in first.text
-            # a row on the next page disappears between requests (S-01 style delete)
-            _psql(f"DELETE FROM audit_events WHERE id = {expected[60]}")
-            second = admin.get(next_link.group(1).replace("&amp;", "&"))
-            page2 = _audit_ids(second.text)
-            assert page2 == [i for i in expected[50:101] if i != expected[60]][:50]
-            assert "Newest" in second.text and "target_id=" in second.text
-            third_link = re.search(r'href="(/admin/audit\?[^"]*before_id=\d+[^"]*)"', second.text)
-            third = admin.get(third_link.group(1).replace("&amp;", "&"))
-            page3 = _audit_ids(third.text)
-            remaining = [i for i in expected if i != expected[60]]
-            assert page1 + page2 + page3 == remaining
-            assert len(set(page1 + page2 + page3)) == len(remaining)
-            assert not re.search(r'before_id=\d+', third.text.split("Newest", 1)[-1])
-            newest = re.search(r'href="(/admin/audit\?[^"]*)">Newest', third.text)
-            assert _audit_ids(admin.get(newest.group(1).replace("&amp;", "&")).text) == page1
-            full = admin.get("/admin/audit").text
-            assert PAT_NAME not in full and PAT_PHONE not in full
-            patients = admin.get("/admin/audit", params={"target_type": "patient"}).text
-            assert PAT_NAME not in patients and PAT_PHONE not in patients
-        after = int(_psql("SELECT count(*) FROM audit_events WHERE action LIKE 'audit.%'")[0])
-        assert before == after == 0
-    finally:
-        _drop_audit_rows(target)
+    target = _seed_audit_rows(120)
+    expected = [int(x) for x in _psql(
+        "SELECT id FROM audit_events WHERE target_type = 'clinic' "
+        f"AND target_id = {target} ORDER BY id DESC"
+    )]
+    before = int(_psql("SELECT count(*) FROM audit_events WHERE action LIKE 'audit.%'")[0])
+    with _client() as admin:
+        _login(admin, ADMIN)
+        params = {"target_type": "clinic", "target_id": str(target)}
+        first = admin.get("/admin/audit", params=params)
+        page1 = _audit_ids(first.text)
+        assert page1 == expected[:50]
+        next_link = re.search(r'href="(/admin/audit\?[^"]*before_id=\d+[^"]*)"', first.text)
+        assert next_link and "Newest" not in first.text
+        second = admin.get(next_link.group(1).replace("&amp;", "&"))
+        page2 = _audit_ids(second.text)
+        assert page2 == expected[50:100]
+        assert "Newest" in second.text and "target_id=" in second.text
+        third_link = re.search(r'href="(/admin/audit\?[^"]*before_id=\d+[^"]*)"', second.text)
+        third = admin.get(third_link.group(1).replace("&amp;", "&"))
+        page3 = _audit_ids(third.text)
+        # A row vanishing between pages is tamper detection now (E6, plan 17 §10).
+        assert page1 + page2 + page3 == expected
+        assert len(set(page1 + page2 + page3)) == len(expected)
+        assert not re.search(r'before_id=\d+', third.text.split("Newest", 1)[-1])
+        newest = re.search(r'href="(/admin/audit\?[^"]*)">Newest', third.text)
+        assert _audit_ids(admin.get(newest.group(1).replace("&amp;", "&")).text) == page1
+        full = admin.get("/admin/audit").text
+        assert PAT_NAME not in full and PAT_PHONE not in full
+        patients = admin.get("/admin/audit", params={"target_type": "patient"}).text
+        assert PAT_NAME not in patients and PAT_PHONE not in patients
+    after = int(_psql("SELECT count(*) FROM audit_events WHERE action LIKE 'audit.%'")[0])
+    assert before == after == 0
 
 
 # --- 5. Reschedule (5.9) ------------------------------------------------------
@@ -511,8 +485,14 @@ def _max_appointment_id() -> int:
 class _Setup:
     """Old visit of `patient` on DOC at 10:00 of a free far-future day plus target slots."""
 
-    def __init__(self, patient=PAT, times=("10:00", "12:00", "13:00", "14:00")):
-        self.patient = _user_id(patient)
+    def __init__(self, patient=None, times=("10:00", "12:00", "13:00", "14:00")):
+        # A fresh patient unless one is named: the journal keeps every move, and
+        # PAT would run out of its 3 reschedules a day (plan 17 §9.2 (а)).
+        self.fresh = patient is None
+        if self.fresh:
+            self.email, self.patient = create_fresh_patient("move")
+        else:
+            self.email, self.patient = patient, _user_id(patient)
         self.doctor = _doctor_id(DOC)
         self.day = _free_days(1)[0]
         self.slots = [_make_slot(self.doctor, f"{self.day} {t}") for t in times]
@@ -527,6 +507,8 @@ class _Setup:
 
     def cleanup(self):
         _cleanup_slots(self.slots + self.extra_slots)
+        if self.fresh:
+            drop_fresh_patient(self.patient)
 
 
 def _post_reschedule(c, appointment_id, slot_id):
@@ -539,7 +521,7 @@ def test_patient_reschedules_own_visit_and_old_slot_is_free_again():
     target = s.targets[0]
     try:
         with _client() as pat, _client() as pat2:
-            _login(pat, PAT)
+            _login(pat, s.email)
             _login(pat2, PAT2)
             my = pat.get("/my", params={"from": s.day, "to": s.day})
             assert f'href="/appointments/{s.old}/reschedule"' in my.text
@@ -563,7 +545,7 @@ def test_patient_reschedules_own_visit_and_old_slot_is_free_again():
             again = pat2.post(f"/slots/{s.old_slot}/book")
             assert "unavailable" not in str(again.url)
             assert len(_scheduled_on(s.old_slot)) == 1
-            messages = httpx.get(f"{MAILPIT}/api/v1/search", params={"query": f"to:{PAT}"},
+            messages = httpx.get(f"{MAILPIT}/api/v1/search", params={"query": f"to:{s.email}"},
                                  timeout=5).json().get("messages") or []
             assert any(m.get("Subject") == "Appointment rescheduled" for m in messages)
     finally:
@@ -582,7 +564,7 @@ def test_patient_gets_one_answer_for_foreign_missing_closed_or_garbage_visits():
     try:
         before_max = _max_appointment_id()
         with _client() as pat:
-            _login(pat, PAT)
+            _login(pat, s.email)
             for bad in (other.old, NO_SUCH_ID, cancelled, completed, past_visit,
                         "abc", "1e3", "-1", "0", "\u00b2", "99999999999"):
                 got = pat.get(f"/appointments/{bad}/reschedule")
@@ -619,7 +601,7 @@ def test_patient_new_slot_must_match_and_be_free():
         _book_sql(taken, _user_id(PAT2))
         before_max = _max_appointment_id()
         with _client() as pat:
-            _login(pat, PAT)
+            _login(pat, s.email)
             for slot_id, code in ((other_doctor, "slot_mismatch"), (other_service, "slot_mismatch"),
                                   (past, "unavailable"), (closed, "unavailable"),
                                   (taken, "unavailable"), (s.old_slot, "same_slot"),
@@ -644,7 +626,7 @@ def test_patient_overlap_with_other_visit_keeps_original():
         own_other = s.slot(_doctor_id(DOC2), f"{s.day} 12:00")
         _book_sql(own_other, s.patient)
         with _client() as pat:
-            _login(pat, PAT)
+            _login(pat, s.email)
             page = _post_reschedule(pat, s.old, s.targets[0])
             assert "error=overlap" in str(page.url)
             query = str(page.url).split("?", 1)[1]
@@ -657,7 +639,7 @@ def test_patient_overlap_with_other_visit_keeps_original():
 
 def test_reschedule_to_slot_overlapping_old_reservation_succeeds():
     """Б1: the old visit is cancelled before the taken/overlap checks."""
-    patient = _user_id(PAT)
+    email, patient = create_fresh_patient("move")
     doctor = _doctor_id(DOC)
     day = _free_days(1)[0]
     old_slot = _make_slot(doctor, f"{day} 10:00")
@@ -670,7 +652,7 @@ def test_reschedule_to_slot_overlapping_old_reservation_succeeds():
     try:
         assert _psql(f"SELECT public.scheduled_slot_is_taken({neighbour})") == ["t"]
         with _client() as pat:
-            _login(pat, PAT)
+            _login(pat, email)
             form = pat.get(f"/appointments/{old}/reschedule", params={"day": day, "view": "day"})
             assert f'name="slot_id" value="{neighbour}"' in form.text
             done = _post_reschedule(pat, old, neighbour)
@@ -679,6 +661,7 @@ def test_reschedule_to_slot_overlapping_old_reservation_succeeds():
         assert len(_scheduled_on(neighbour)) == 1
     finally:
         _cleanup_slots([old_slot, neighbour])
+        drop_fresh_patient(patient)
 
 
 def _parallel(*calls):
@@ -709,7 +692,7 @@ def test_race_reschedule_against_booking_of_the_same_slot():
         target = s.targets[0]
         try:
             with _client() as pat, _client() as pat2:
-                _login(pat, PAT)
+                _login(pat, s.email)
                 _login(pat2, PAT2)
                 _parallel(lambda: _post_reschedule(pat, s.old, target),
                           lambda: pat2.post(f"/slots/{target}/book"))
@@ -730,8 +713,8 @@ def test_two_parallel_reschedules_of_one_visit_make_one_new_visit():
     s = _Setup()
     try:
         with _client() as a, _client() as b:
-            _login(a, PAT)
-            _login(b, PAT)
+            _login(a, s.email)
+            _login(b, s.email)
             _parallel(lambda: _post_reschedule(a, s.old, s.targets[0]),
                       lambda: _post_reschedule(b, s.old, s.targets[1]))
         new_ids = _new_visits_for(s.patient, s.old)
@@ -807,7 +790,7 @@ def test_other_roles_and_missing_csrf_cannot_reschedule():
         with _client() as doc, _client() as admin, _client() as guest, _client() as pat:
             _login(doc, DOC)
             _login(admin, ADMIN)
-            _login(pat, PAT)
+            _login(pat, s.email)
             for c in (doc, admin):
                 assert c.get(f"/appointments/{s.old}/reschedule").status_code == 403
                 assert _post_reschedule(c, s.old, s.targets[0]).status_code == 403
@@ -839,7 +822,7 @@ def test_visit_with_medical_records_is_not_moved():
         )
         seal_pending()
         with _client() as pat, _client() as reg:
-            _login(pat, PAT)
+            _login(pat, s.email)
             _login(reg, REG)
             page = _post_reschedule(pat, s.old, s.targets[0])
             assert "error=has_records" in str(page.url) and "contact the clinic" in page.text
@@ -868,12 +851,12 @@ def test_reschedule_event_has_no_pii_and_cannot_be_forged():
     other = _Setup(patient=PAT2)
     try:
         with _client() as pat:
-            _login(pat, PAT)
+            _login(pat, s.email)
             _post_reschedule(pat, s.old, s.targets[0])
         new = _new_visits_for(s.patient, s.old)[0]
         row = " ".join(_psql(f"SELECT e::text FROM audit_events e WHERE action = 'appointment.reschedule' "
                              f"AND target_id = {new}"))
-        for pii in (PAT, PAT_NAME, PAT_PHONE, "Narek", "clinic.local"):
+        for pii in (PAT, s.email, PAT_NAME, PAT_PHONE, "Narek", "Fresh Patient", "clinic.local", "example.test"):
             assert pii not in row
         event_id = _psql(f"SELECT id FROM audit_events WHERE action = 'appointment.reschedule' "
                          f"AND target_id = {new}")[0]
@@ -934,7 +917,7 @@ def test_second_post_and_cancel_race_do_one_thing():
     s = _Setup()
     try:
         with _client() as pat:
-            _login(pat, PAT)
+            _login(pat, s.email)
             first = _post_reschedule(pat, s.old, s.targets[0])
             assert "rescheduled=1" in str(first.url)
             again = _post_reschedule(pat, s.old, s.targets[1])
@@ -947,8 +930,8 @@ def test_second_post_and_cancel_race_do_one_thing():
         s = _Setup()
         try:
             with _client() as a, _client() as b:
-                _login(a, PAT)
-                _login(b, PAT)
+                _login(a, s.email)
+                _login(b, s.email)
                 _parallel(lambda: _post_reschedule(a, s.old, s.targets[0]),
                           lambda: b.post(f"/appointments/{s.old}/cancel"))
             moved = _new_visits_for(s.patient, s.old)
@@ -987,9 +970,8 @@ def test_old_volume_check_is_upgraded_once_and_reschedule_works():
     """Б6: a volume whose CHECK lacks appointment.reschedule is fixed on start."""
     _psql(
         "ALTER TABLE audit_events DROP CONSTRAINT audit_events_change_values_check; "
-        "DELETE FROM audit_events WHERE action IN ('appointment.reschedule', 'clinic.change_deadline.update'); "
         "ALTER TABLE audit_events ADD CONSTRAINT audit_events_change_values_check CHECK ("
-        "(old_value IS NULL AND new_value IS NULL) OR action = 'clinic.session_idle.update')"
+        "(old_value IS NULL AND new_value IS NULL) OR action = 'clinic.session_idle.update') NOT VALID"
     )
     assert "appointment.reschedule" not in _change_check()[1]
     _run_migrate()
@@ -999,7 +981,7 @@ def test_old_volume_check_is_upgraded_once_and_reschedule_works():
     s = _Setup()
     try:
         with _client() as pat:
-            _login(pat, PAT)
+            _login(pat, s.email)
             done = _post_reschedule(pat, s.old, s.targets[0])
             assert "rescheduled=1" in str(done.url), done.url
         assert len(_reschedule_events(s.old)) == 1
