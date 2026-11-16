@@ -3,11 +3,16 @@ append-only rules and the independent Python canon (audit/canon.py)."""
 import datetime as dt
 import json
 import os
+import re
+import time
+import uuid
 import subprocess
 import sys
 import threading
+from contextlib import contextmanager
 from pathlib import Path
 
+import httpx
 import pytest
 
 from tests.csrf_client import CsrfClient
@@ -22,6 +27,7 @@ PROJECT = os.environ.get("COMPOSE_PROJECT_NAME", "")
 PASSWORD = demo_password()
 ADMIN = "admin@clinic.local"
 PAT = "pat@clinic.local"
+MAILPIT = os.environ.get("CLINIC_MAILPIT", "http://127.0.0.1:8025")
 
 
 def _psql_try(sql: str) -> subprocess.CompletedProcess:
@@ -111,7 +117,12 @@ def test_chain_schema_columns_head_and_constraints():
     head = _head()
     last = _rows(f"seq = {head['last_seq']}")
     assert last and last[0]["row_hash"] == head["last_hash"]
-    assert _one("SELECT count(*) = max(seq) FROM audit_events") == "t"
+
+
+def test_seq_has_no_gaps_from_one():
+    """Red on the long-lived Fixer volume between commits 7 and 9, when the tests
+    still deleted journal rows (plan 17 П9); green on a fresh volume."""
+    assert _one("SELECT count(*) = max(seq) AND min(seq) = 1 FROM audit_events") == "t"
 
 
 def test_canon_covers_every_journal_column():
@@ -241,6 +252,7 @@ def _migrate() -> subprocess.CompletedProcess:
 
 
 def test_repeat_migrate_keeps_the_chain_triggers_and_checks():
+    mark = _mark()
     before = _chain_state()
     names = [c.split(":")[0] for c in before["checks"]]
     for name in ("audit_events_actor_role_check", "audit_events_actor_check", "audit_events_source_check"):
@@ -249,7 +261,9 @@ def test_repeat_migrate_keeps_the_chain_triggers_and_checks():
     done = _migrate()
     assert done.returncode == 0, done.stderr[-2000:]
     assert _chain_state() == before
-    _check_links(_rows(f"seq >= {max(1, _mark() - 50)}"))
+    assert _foreign_keys() == "0"
+    _insert_admin_event()
+    _check_links(_rows(f"seq >= {mark}"))
 
 
 @pytest.mark.skipif(PROJECT != "e6", reason="only on the disposable stand -p e6 (deletes the chain head)")
@@ -267,3 +281,131 @@ def test_fresh_volume_has_an_empty_genesis_and_triggers_in_mode_a():
     modes = _psql("SELECT tgname || ':' || tgenabled::text FROM pg_trigger WHERE tgrelid IN "
                   "('public.audit_events'::regclass, 'public.audit_chain_head'::regclass) AND NOT tgisinternal")
     assert modes and all(m.endswith(":A") for m in modes)
+
+
+# --- §7.2-7.3: no actor foreign key, discarded invites keep their history ---
+
+def _foreign_keys() -> str:
+    return _one("SELECT count(*) FROM pg_constraint "
+                "WHERE conrelid = 'public.audit_events'::regclass AND contype = 'f'")
+
+
+@contextmanager
+def _admin_client():
+    with CsrfClient(base_url=BASE, follow_redirects=True, timeout=30.0) as c:
+        page = c.post("/login", data={"email": ADMIN, "password": PASSWORD})
+        assert page.status_code == 200 and page.url.path == "/me"
+        yield c
+
+
+def _events(where: str) -> list[str]:
+    return _psql("SELECT concat_ws('|', actor_user_id, actor_role, action, target_type, target_id) "
+                 f"FROM audit_events WHERE {where} ORDER BY seq")
+
+
+def test_audit_events_have_no_foreign_key():
+    assert _foreign_keys() == "0"
+
+
+def _setup_token(address: str) -> str:
+    found = httpx.get(f"{MAILPIT}/api/v1/search", timeout=5,
+                      params={"query": f'to:"{address}" subject:"Reset your clinic password"'})
+    found.raise_for_status()
+    messages = found.json().get("messages") or []
+    assert messages, "setup email was not delivered"
+    message_id = messages[0].get("ID") or messages[0].get("Id")
+    body = httpx.get(f"{MAILPIT}/api/v1/message/{message_id}", timeout=5).json().get("Text") or ""
+    match = re.search(r"reset-password\?token=([0-9a-f]{64})", body)
+    assert match, "setup link missing"
+    return match.group(1)
+
+
+def _discard(token: str) -> str:
+    """What _discard_invite (routes_admin.py) runs after a failed delivery.
+
+    Called directly: through the app the call is never reached today, see the
+    note in the plan 17B report (smtp_ready() refuses the invite up front, and
+    deliver_password_reset() revokes the token before _discard_invite runs)."""
+    return _one(f"SELECT discard_undelivered_invite('{token}')")
+
+
+def test_discarded_registrar_invite_keeps_the_invite_and_adds_an_event():
+    email = f"discard-reg-{uuid.uuid4().hex}@example.com"
+    admin = _user_id(ADMIN)
+    mark = _mark()
+    with _admin_client() as c:
+        created = c.post("/admin/users", data={"email": email, "role": "registrar"})
+        assert "Staff account created." in created.text
+    invited = _user_id(email)
+    assert _discard(_setup_token(email)) == "t"
+    assert _psql(f"SELECT count(*) FROM users WHERE email = '{email}'") == ["0"]
+    assert _events(f"seq > {mark} AND action = 'user.invite'") == [
+        f"{admin}|admin|user.invite|registrar|{invited}"
+    ]
+    assert _events(f"seq > {mark} AND action = 'user.invite_discarded'") == [
+        f"{admin}|admin|user.invite_discarded|user|{invited}"
+    ]
+    _check_links(_rows(f"seq >= {mark}"))
+
+
+def test_discarded_doctor_invite_is_found_by_doctor_id_and_written_with_user_id():
+    email = f"discard-doc-{uuid.uuid4().hex}@example.com"
+    admin = _user_id(ADMIN)
+    mark = _mark()
+    with _admin_client() as c:
+        created = c.post("/admin/doctors", data={
+            "email": email, "full_name": "Discard Check", "specialty": "Therapy", "experience_years": "3",
+        })
+        assert "created=1" in str(created.url), created.url
+    invited = _user_id(email)
+    doctor_id = int(_one(f"SELECT id FROM doctors WHERE user_id = {invited}"))
+    assert _discard(_setup_token(email)) == "t"
+    assert _psql(f"SELECT count(*) FROM users WHERE id = {invited}") == ["0"]
+    assert _psql(f"SELECT count(*) FROM doctors WHERE id = {doctor_id}") == ["0"]
+    assert _events(f"seq > {mark} AND action = 'doctor.invite'") == [
+        f"{admin}|admin|doctor.invite|doctor|{doctor_id}"
+    ]
+    # P4: the invite names the doctors.id, the discard event the users.id.
+    assert _events(f"seq > {mark} AND action = 'user.invite_discarded'") == [
+        f"{admin}|admin|user.invite_discarded|user|{invited}"
+    ]
+
+
+def test_discard_after_a_login_attempt_keeps_the_login_event_without_fk_errors():
+    email = f"discard-login-{uuid.uuid4().hex}@example.com"
+    mark = _mark()
+    with _admin_client() as admin:
+        created = admin.post("/admin/users", data={"email": email, "role": "registrar"})
+        assert "Staff account created." in created.text
+    invited = _user_id(email)
+    token = _setup_token(email)
+    with CsrfClient(base_url=BASE, follow_redirects=True, timeout=10.0) as c:
+        assert c.post("/login", data={"email": email, "password": "Wrong-Password-2026!"}).status_code == 401
+    assert _discard(token) == "t"
+    assert _psql(f"SELECT count(*) FROM users WHERE id = {invited}") == ["0"]
+    assert _events(f"seq > {mark} AND action = 'auth.login.failure' AND actor_user_id = {invited}")
+    assert _events(f"seq > {mark} AND action = 'user.invite_discarded' AND target_id = {invited}")
+    with _admin_client() as admin:
+        page = admin.get("/admin/audit", params={"action": "auth.login.failure"})
+        assert page.status_code == 200
+        listed = admin.get("/admin/audit", params={"action": "user.invite_discarded"})
+        assert listed.status_code == 200 and "user.invite_discarded" in listed.text
+
+
+def test_discard_without_an_invite_event_fails_closed_and_warns_without_data():
+    email = f"discard-none-{uuid.uuid4().hex}@example.com"
+    token = uuid.uuid4().hex + uuid.uuid4().hex
+    done = _psql_try(
+        "BEGIN; "
+        f"INSERT INTO users (email, password_hash, role) VALUES ('{email}', 'x', 'registrar'); "
+        "INSERT INTO password_reset_tokens (user_id, token_hash, expires_at) "
+        f"SELECT id, public.digest('{token}', 'sha256'), now() + interval '1 hour' FROM users WHERE email = '{email}'; "
+        f"SELECT 'result=' || discard_undelivered_invite('{token}'); "
+        f"SELECT 'left=' || count(*) FROM users WHERE email = '{email}'; "
+        "ROLLBACK;"
+    )
+    assert done.returncode == 0, done.stderr
+    assert "result=false" in done.stdout and "left=1" in done.stdout
+    assert "without an invite event" in done.stderr
+    assert email not in done.stderr and token not in done.stderr
+

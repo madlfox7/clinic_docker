@@ -718,7 +718,7 @@ $$;
 
 CREATE TABLE IF NOT EXISTS audit_events (
   id BIGSERIAL PRIMARY KEY,
-  actor_user_id INTEGER NOT NULL REFERENCES users(id),
+  actor_user_id INTEGER NOT NULL,
   actor_role TEXT NOT NULL CHECK (actor_role IN ('admin', 'doctor', 'patient', 'registrar')),
   action TEXT NOT NULL CHECK (length(action) BETWEEN 1 AND 80),
   target_type TEXT NOT NULL CHECK (length(target_type) BETWEEN 1 AND 80),
@@ -734,6 +734,24 @@ CREATE INDEX IF NOT EXISTS audit_events_created_at_idx
 -- and actor_role is 'anonymous'. The email itself is never stored, not even
 -- hashed. source is the client address the api already passes to the auth
 -- functions.
+-- No foreign key to users (plan 17 Р6): the journal must not depend on rows
+-- that can be deleted (a discarded invite), user ids are never reused (SERIAL)
+-- and the admin journal reads users through a LEFT JOIN. Older volumes lose
+-- the key here, found by its definition rather than its name.
+DO $$
+DECLARE
+  fk record;
+BEGIN
+  FOR fk IN
+    SELECT conname FROM pg_constraint
+    WHERE conrelid = 'public.audit_events'::regclass
+      AND contype = 'f'
+      AND confrelid = 'public.users'::regclass
+  LOOP
+    EXECUTE format('ALTER TABLE public.audit_events DROP CONSTRAINT %I', fk.conname);
+  END LOOP;
+END
+$$;
 ALTER TABLE audit_events ALTER COLUMN actor_user_id DROP NOT NULL;
 ALTER TABLE audit_events ADD COLUMN IF NOT EXISTS reason TEXT;
 ALTER TABLE audit_events ADD COLUMN IF NOT EXISTS source TEXT;

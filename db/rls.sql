@@ -1602,6 +1602,7 @@ AS $function$
 DECLARE
   invited_id integer;
   invited_doctor_id integer;
+  inviter_id integer;
 BEGIN
   IF raw_token IS NULL OR raw_token !~ '^[0-9a-f]{64}$' THEN
     RETURN FALSE;
@@ -1625,16 +1626,33 @@ BEGIN
   END IF;
 
   SELECT id INTO invited_doctor_id FROM public.doctors WHERE user_id = invited_id;
+  -- The journal is append-only: the invite stays in it and the discard is a
+  -- new event by the admin who sent the invite (a doctor invite names the
+  -- doctors.id, the other invites the users.id). Without an invite event
+  -- nothing is discarded (fail closed); the warning carries no email or id.
+  SELECT actor_user_id
+  INTO inviter_id
+  FROM public.audit_events
+  WHERE (action IN ('user.invite', 'admin.create')
+         AND target_type IN ('registrar', 'admin', 'doctor', 'patient')
+         AND audit_events.target_id = invited_id)
+     OR (action = 'doctor.invite'
+         AND target_type = 'doctor'
+         AND audit_events.target_id = invited_doctor_id)
+  ORDER BY seq DESC
+  LIMIT 1;
+  IF inviter_id IS NULL THEN
+    RAISE WARNING 'undelivered invite without an invite event, nothing discarded';
+    RETURN FALSE;
+  END IF;
   DELETE FROM public.doctor_services WHERE doctor_id = invited_doctor_id;
   DELETE FROM public.doctors WHERE id = invited_doctor_id;
-  DELETE FROM public.audit_events
-  WHERE actor_user_id = invited_id
-     OR (
-       audit_events.target_id = invited_id
-       AND target_type IN ('user', 'registrar', 'admin', 'doctor', 'patient')
-     )
-     OR (target_type = 'doctor' AND audit_events.target_id = invited_doctor_id);
   DELETE FROM public.users WHERE id = invited_id;
+  -- Last locking step of the transaction (the chain head lock).
+  INSERT INTO public.audit_events (
+    actor_user_id, actor_role, action, target_type, target_id
+  )
+  VALUES (inviter_id, 'admin', 'user.invite_discarded', 'user', invited_id);
   RETURN TRUE;
 END;
 $function$;

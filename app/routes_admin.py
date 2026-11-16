@@ -84,7 +84,7 @@ AUDIT_ACTIONS = (
     "service.activate", "service.create", "service.deactivate", "service.delete",
     "service.update",
     "user.block", "user.email_change", "user.email_notifications",
-    "user.email_verified", "user.invite", "user.password_change",
+    "user.email_verified", "user.invite", "user.invite_discarded", "user.password_change",
     "user.password_link", "user.password_recovery", "user.unblock",
 )
 AUDIT_ACTION_PREFIXES = (
