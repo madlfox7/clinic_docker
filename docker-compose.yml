@@ -155,11 +155,15 @@ services:
     security_opt:
       - no-new-privileges:true
     restart: unless-stopped
+    # --health only reads the status file of the loop (red: last cycle not ok,
+    # e.g. chain_replaced or a broken chain, or no cycle/anchor for 2 intervals).
+    # timeout/retries leave room for a slow python start on a loaded host;
+    # a red status still turns unhealthy within about 4 x 15 s.
     healthcheck:
       test: ["CMD", "python", "anchor.py", "--health"]
       interval: 15s
-      timeout: 10s
-      retries: 3
+      timeout: 20s
+      retries: 4
       start_period: 30s
 
   mailpit:

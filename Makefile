@@ -22,6 +22,12 @@ CONFIRM ?=
 RETIRE_FORCE ?=
 # Extra arguments of make audit-verify, e.g. VERIFY_ARGS=--strict
 VERIFY_ARGS ?=
+# The docker command for "volume inspect" and "volume rm" in reset/fclean: the
+# words of $(COMPOSE) before "compose", so the same prefix (sudo -n docker,
+# env ... docker) and the same daemon. Empty if COMPOSE has no "compose" word
+# (then reset/fclean stop and ask for DOCKER=...).
+words_before_compose = $(if $(1),$(if $(filter compose,$(firstword $(1))),,$(firstword $(1)) $(call words_before_compose,$(wordlist 2,$(words $(1)),$(1)))))
+DOCKER ?= $(if $(filter compose,$(COMPOSE)),$(strip $(call words_before_compose,$(COMPOSE))))
 
 .DEFAULT_GOAL := help
 .PHONY: help start stop restart clean reset fclean logs ps test tls-check ngrok ngrok-off audit-verify
@@ -31,7 +37,7 @@ VERIFY_ARGS ?=
 # "up" has recreated a container, so the wipe targets remove them by name.
 define project_anon_volumes
 $$(for c in $$($(COMPOSE) ps -aq); do \
-	docker inspect -f '{{range .Mounts}}{{if eq .Type "volume"}}{{.Name}} {{end}}{{end}}' "$$c"; \
+	$(DOCKER) inspect -f '{{range .Mounts}}{{if eq .Type "volume"}}{{.Name}} {{end}}{{end}}' "$$c"; \
 done | tr ' ' '\n' | grep -E '^[0-9a-f]{64}$$' | sort -u)
 endef
 
@@ -47,23 +53,45 @@ endef
 # so nothing more is written, then close the open audit chain in the registry
 # (anchor.py --retire). A failed retire stops make before down -v. Three cases:
 # audit_anchor running -> exec; not running but the database volume exists ->
-# a one-off run (starts db and migrate); no volume -> --offline.
-# The volume is looked up with "docker volume inspect" (its name from
-# "$(COMPOSE) config"): "docker compose volumes" is missing before Compose 2.33.
-# "run" has no --no-build; the image is built only when it is missing.
+# a one-off run (starts db and migrate); the volume certainly missing ->
+# --offline. "run" has no --no-build; the image is built only when missing.
+# The volume is looked up with "$(DOCKER) volume inspect" (name from
+# "$(COMPOSE) config"; "docker compose volumes" is missing before Compose
+# 2.33). Only "no such volume" counts as missing: any other error (permission
+# denied, no daemon, sudo asking for a password) stops make, nothing deleted,
+# so the offline retire never skips the chain check by mistake.
 # Then down -v and the anonymous volumes listed above (only this project's).
 define wipe_stack
-@anon="$(project_anon_volumes)"; \
+@stopped() { echo "  proxy and api are stopped; $(MAKE) start COMPOSE='$(COMPOSE)' brings the stand back." >&2; }; \
+if [ -z "$(DOCKER)" ]; then \
+	echo "cannot derive the docker command from COMPOSE='$(COMPOSE)' (no 'compose' word); set DOCKER=... Nothing was changed." >&2; \
+	exit 1; \
+fi; \
+anon="$(project_anon_volumes)"; \
 force="$(if $(filter yes,$(RETIRE_FORCE)),--force)"; \
-stopped() { echo "  proxy and api are stopped; $(MAKE) start COMPOSE='$(COMPOSE)' brings the stand back." >&2; }; \
 echo "$(COMPOSE) stop proxy api"; $(COMPOSE) stop proxy api || exit 1; \
-db_volume="$$($(COMPOSE) config --format json | $(PYTHON) -c 'import json, sys; c = json.load(sys.stdin); print(c.get("volumes", {}).get("db_data", {}).get("name") or c["name"] + "_db_data")')" || exit 1; \
+db_volume="$$($(COMPOSE) config --format json | $(PYTHON) -c 'import json, sys; c = json.load(sys.stdin); print(c.get("volumes", {}).get("db_data", {}).get("name") or c["name"] + "_db_data")')" || { stopped; exit 1; }; \
 if [ -n "$$($(COMPOSE) ps --status running -q audit_anchor 2>/dev/null)" ]; then \
+	db_state=running; \
+else \
+	inspect_err="$$($(DOCKER) volume inspect "$$db_volume" 2>&1 >/dev/null)"; inspect_rc=$$?; \
+	if [ "$$inspect_rc" = 0 ]; then \
+		db_state=volume; \
+	elif printf '%s\n' "$$inspect_err" | grep -qi 'no such volume'; then \
+		db_state=none; \
+	else \
+		echo "cannot tell whether the volume $$db_volume exists: $(DOCKER) volume inspect failed (rc=$$inspect_rc):" >&2; \
+		printf '%s\n' "$$inspect_err" | head -n 3 | sed 's/^/    /' >&2; \
+		echo "  The audit chain was not closed, nothing was deleted. Check DOCKER='$(DOCKER)' (the same access as COMPOSE)." >&2; \
+		stopped; exit 1; \
+	fi; \
+fi; \
+if [ "$$db_state" = running ]; then \
 	echo "$(COMPOSE) exec -T audit_anchor python anchor.py --retire $$force"; \
 	if ! $(COMPOSE) exec -T audit_anchor python anchor.py --retire $$force; then \
 		echo "retire failed: the audit chain was not closed, nothing was deleted." >&2; stopped; exit 1; \
 	fi; \
-elif docker volume inspect "$$db_volume" >/dev/null 2>&1; then \
+elif [ "$$db_state" = volume ]; then \
 	echo "$(COMPOSE) run --rm audit_anchor python anchor.py --retire $$force"; \
 	if ! $(COMPOSE) run --rm audit_anchor python anchor.py --retire $$force; then \
 		if [ -z "$$force" ]; then \
@@ -77,15 +105,15 @@ elif docker volume inspect "$$db_volume" >/dev/null 2>&1; then \
 		fi; \
 	fi; \
 else \
-	echo "$(COMPOSE) run --rm --no-deps audit_anchor python anchor.py --retire --offline"; \
+	echo "no volume $$db_volume: $(COMPOSE) run --rm --no-deps audit_anchor python anchor.py --retire --offline"; \
 	if ! $(COMPOSE) run --rm --no-deps audit_anchor python anchor.py --retire --offline; then \
 		echo "offline retire failed: nothing was deleted." >&2; stopped; exit 1; \
 	fi; \
 fi; \
 echo "$(strip $(COMPOSE) down -v $(1))"; $(COMPOSE) down -v $(1) || exit 1; \
 for v in $$anon; do \
-	if docker volume inspect "$$v" >/dev/null 2>&1; then \
-		echo "docker volume rm $$v"; docker volume rm "$$v" >/dev/null || exit 1; \
+	if $(DOCKER) volume inspect "$$v" >/dev/null 2>&1; then \
+		echo "$(DOCKER) volume rm $$v"; $(DOCKER) volume rm "$$v" >/dev/null || exit 1; \
 	fi; \
 done
 endef
@@ -140,6 +168,7 @@ help:
 	@echo "  reset    WIPES THE DATABASE: down -v, then start (asks first; CONFIRM=yes skips)"
 	@echo "  fclean   WIPES THE DATABASE: down -v --rmi local --remove-orphans for this project only (asks first; CONFIRM=yes skips)"
 	@echo "  RETIRE_FORCE=yes  with CONFIRM=yes: reset/fclean even if the audit chain is broken (logged as forced)"
+	@echo "  DOCKER   docker command of reset/fclean (default: COMPOSE before 'compose', now: $(DOCKER))"
 
 start:
 	$(start_stack)

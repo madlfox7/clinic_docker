@@ -1037,10 +1037,36 @@ def test_once_anchors_the_new_max_seq():
     assert "mac" not in done.stdout.lower() and "key" not in done.stdout.lower()
 
 
+def test_audit_anchor_healthcheck_still_turns_red_in_time():
+    """A red status (chain_replaced, broken chain) must reach "unhealthy" well
+    inside the 200 s that E6 waits: retries x (interval + timeout) under 200 s."""
+    check = _compose_config()["services"]["audit_anchor"]["healthcheck"]
+    assert check["test"] == ["CMD", "python", "anchor.py", "--health"]
+
+    def seconds(value):
+        value = str(value)
+        return int(value[:-1]) if value.endswith("s") else int(value) / 1e9   # config gives "15s" or ns
+
+    interval, timeout, retries = seconds(check["interval"]), seconds(check["timeout"]), int(check["retries"])
+    assert timeout >= 20 and retries >= 4
+    assert retries * (interval + timeout) < 200, check
+
+
 def test_audit_anchor_is_healthy():
-    state = subprocess.run(["docker", "compose", "ps", "--format", "{{.Health}}", "audit_anchor"],
-                           cwd=ROOT, capture_output=True, text=True, timeout=60)
-    assert state.stdout.strip() == "healthy", state.stdout
+    # the status file itself must be green now ...
+    own = subprocess.run(["docker", "compose", "exec", "-T", "audit_anchor", "python", "anchor.py", "--health"],
+                         cwd=ROOT, capture_output=True, text=True, timeout=120)
+    assert own.returncode == 0, own.stdout + own.stderr
+    # ... and Docker's view follows within two healthcheck intervals (a red status
+    # needs 4 failed checks in a row, so a real fault does not pass this)
+    deadline, state = time.time() + 30, ""
+    while True:
+        state = subprocess.run(["docker", "compose", "ps", "--format", "{{.Health}}", "audit_anchor"],
+                               cwd=ROOT, capture_output=True, text=True, timeout=60).stdout.strip()
+        if state == "healthy" or time.time() > deadline:
+            break
+        time.sleep(3)
+    assert state == "healthy", state
 
 
 def test_make_audit_verify_is_ok_on_an_intact_journal():
@@ -1134,31 +1160,75 @@ esac
 exit 0
 """
 
-# Fake docker for "docker volume inspect" (Н-2: no "docker compose volumes",
-# which Compose before 2.33 lacks). Only the database volume of mode=volume exists.
+# Fake docker for "volume inspect" (Н-2: no "docker compose volumes" before
+# Compose 2.33). STUB_INSPECT picks the answer: ok, missing (the daemon's
+# "no such volume"), denied, nodaemon, password (Н-3: only "missing" may lead
+# to the offline retire).
 DOCKER_STUB = r"""#!/bin/sh
 echo "docker $*" >> "$STUB_LOG"
-[ "$1 $2" = "volume inspect" ] && [ "$STUB_MODE" = volume ] && [ "$3" = stubproj_db_data ] && exit 0
+if [ "$1 $2" = "volume inspect" ]; then
+  case "$STUB_INSPECT" in
+    ok) exit 0 ;;
+    missing) echo "Error response from daemon: get $3: no such volume" >&2 ;;
+    denied) echo "permission denied while trying to connect to the docker API at unix:///var/run/docker.sock" >&2 ;;
+    nodaemon) echo "Cannot connect to the Docker daemon at unix:///var/run/docker.sock. Is the docker daemon running?" >&2 ;;
+    password) echo "sudo: a password is required" >&2 ;;
+  esac
+fi
 exit 1
 """
 
+# "docker" in PATH: a user without the docker group. Never to be used when
+# COMPOSE (or DOCKER) says otherwise.
+BARE_DOCKER = r"""#!/bin/sh
+echo "BARE docker $*" >> "$STUB_LOG"
+echo "permission denied while trying to connect to the docker API at unix:///var/run/docker.sock" >&2
+exit 1
+"""
 
-def _make_with_stub(tmp_path, mode: str, *args, rc: int = 0):
-    stub = tmp_path / "compose.sh"
-    stub.write_text(STUB)
-    stub.chmod(0o755)
+# Fake "sudo -n": "docker compose ..." goes to the compose stub, "docker ..." to
+# the docker stub, both logged with the sudo prefix.
+SUDO_STUB = r"""#!/bin/sh
+[ "$1" = -n ] || { echo "stub sudo wants -n" >&2; exit 1; }
+shift
+echo "sudo -n $*" >> "$STUB_LOG"
+[ "$1" = docker ] || exit 1
+shift
+if [ "$1" = compose ]; then shift; exec "$STUB_COMPOSE" "$@"; fi
+exec "$STUB_DOCKER" "$@"
+"""
+
+
+def _exe(path, text):
+    path.write_text(text)
+    path.chmod(0o755)
+    return path
+
+
+def _make_with_stub(tmp_path, mode: str, *args, rc: int = 0, inspect: str | None = None, sudo: bool = False):
+    stub = _exe(tmp_path / "compose.sh", STUB)
+    fake_docker = _exe(tmp_path / "fake-docker", DOCKER_STUB)
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir(exist_ok=True)
-    docker = bin_dir / "docker"
-    docker.write_text(DOCKER_STUB)
-    docker.chmod(0o755)
+    _exe(bin_dir / "docker", BARE_DOCKER)
+    _exe(bin_dir / "sudo", SUDO_STUB)
     log = tmp_path / "calls.log"
     log.write_text("")
-    env = dict(os.environ, STUB_LOG=str(log), STUB_MODE=mode, STUB_RETIRE_RC=str(rc),
+    if inspect is None:
+        inspect = "ok" if mode == "volume" else "missing"
+    env = dict(os.environ, STUB_LOG=str(log), STUB_MODE=mode, STUB_RETIRE_RC=str(rc), STUB_INSPECT=inspect,
+               STUB_COMPOSE=str(stub), STUB_DOCKER=str(fake_docker),
                PATH=f"{bin_dir}{os.pathsep}{os.environ.get('PATH', '')}")
-    done = subprocess.run(["make", *args, f"COMPOSE={stub}"], cwd=ROOT, env=env,
+    env.pop("DOCKER", None)
+    if sudo:
+        compose = ["COMPOSE=sudo -n docker compose"]           # DOCKER derived: "sudo -n docker"
+    else:
+        compose = [f"COMPOSE={stub}", f"DOCKER={fake_docker}"]
+    done = subprocess.run(["make", *args, *compose], cwd=ROOT, env=env,
                           capture_output=True, text=True, timeout=60)
-    return done, log.read_text().splitlines()
+    calls = log.read_text().splitlines()
+    assert not any(c.startswith("BARE docker") for c in calls), calls
+    return done, [c for c in calls if not c.startswith("sudo -n ")]   # the sudo log lines doubled
 
 
 def test_makefile_wipe_stack_order_and_retire_force_text():
@@ -1191,6 +1261,71 @@ def test_wipe_stack_retires_the_chain_before_down(tmp_path, mode, expected):
     assert "volumes -q" not in calls
     if mode != "running":
         assert "docker volume inspect stubproj_db_data" in calls
+
+
+@pytest.mark.parametrize("inspect, hint", [
+    ("denied", "permission denied"),
+    ("nodaemon", "Cannot connect to the Docker daemon"),
+    ("password", "a password is required"),
+])
+def test_volume_lookup_error_fails_closed(tmp_path, inspect, hint):
+    """Н-3: an error other than "no such volume" is not "no volume": no offline
+    retire (it skips the chain check), no down -v, rc != 0, how to get back."""
+    for target in ("fclean", "reset"):
+        done, calls = _make_with_stub(tmp_path, "volume", target, "CONFIRM=yes", inspect=inspect)
+        assert done.returncode != 0, (target, done.stdout)
+        assert not any("--retire" in c for c in calls), calls
+        assert not any(c.startswith("down") or c.startswith("up") for c in calls), calls
+        assert "cannot tell whether the volume stubproj_db_data exists" in done.stderr
+        assert hint in done.stderr and "nothing was deleted" in done.stderr
+        assert "proxy and api are stopped" in done.stderr and "start COMPOSE=" in done.stderr
+
+
+def test_no_such_volume_is_the_only_way_to_offline(tmp_path):
+    done, calls = _make_with_stub(tmp_path, "none", "fclean", "CONFIRM=yes", inspect="missing")
+    assert done.returncode == 0, done.stderr
+    assert [c.strip() for c in calls if "--retire" in c] == [
+        "run --rm --no-deps audit_anchor python anchor.py --retire --offline"]
+    assert "no volume stubproj_db_data:" in done.stdout
+
+
+def test_volume_lookup_uses_the_compose_prefix(tmp_path):
+    """COMPOSE="sudo -n docker compose" -> "sudo -n docker volume inspect", never a bare docker."""
+    raw = tmp_path / "calls.log"
+    for inspect, expected in (("ok", "run --rm audit_anchor python anchor.py --retire"),
+                              ("missing", "run --rm --no-deps audit_anchor python anchor.py --retire --offline")):
+        done, calls = _make_with_stub(tmp_path, "volume", "fclean", "CONFIRM=yes", inspect=inspect, sudo=True)
+        assert done.returncode == 0, done.stderr
+        lines = raw.read_text().splitlines()
+        assert "sudo -n docker volume inspect stubproj_db_data" in lines, lines
+        assert "sudo -n docker compose stop proxy api" in lines
+        assert [c.strip() for c in calls if "--retire" in c] == [expected]
+    # denied through sudo too: fail closed
+    done, calls = _make_with_stub(tmp_path, "volume", "fclean", "CONFIRM=yes", inspect="denied", sudo=True)
+    assert done.returncode != 0 and not any(c.startswith("down") for c in calls)
+
+
+def test_docker_prefix_is_derived_from_compose():
+    for compose, docker in (("docker compose -p fixer", "docker"),
+                            ("sudo -n docker compose -p planera -f docker-compose.yml -f docker-compose.planera.yml",
+                             "sudo -n docker"),
+                            ("env A=1 /usr/bin/docker compose", "env A=1 /usr/bin/docker"),
+                            ("/tmp/compose-stub.sh", "")):
+        env = {k: v for k, v in os.environ.items() if k != "DOCKER"}
+        done = subprocess.run(["make", "-s", "help", f"COMPOSE={compose}"], cwd=ROOT, env=env,
+                              capture_output=True, text=True, timeout=60)
+        assert done.stdout.rstrip().endswith(f"now: {docker})"), (compose, done.stdout)
+
+
+def test_compose_without_a_compose_word_needs_docker(tmp_path):
+    stub = _exe(tmp_path / "compose.sh", STUB)
+    log = tmp_path / "calls.log"
+    env = {k: v for k, v in os.environ.items() if k != "DOCKER"}
+    env.update(STUB_LOG=str(log), STUB_MODE="volume")
+    done = subprocess.run(["make", "fclean", "CONFIRM=yes", f"COMPOSE={stub}"], cwd=ROOT, env=env,
+                          capture_output=True, text=True, timeout=60)
+    assert done.returncode != 0 and "set DOCKER=" in done.stderr
+    assert not log.exists() or log.read_text() == ""
 
 
 def test_makefile_run_has_no_no_build_flag():
