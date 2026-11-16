@@ -34,6 +34,7 @@ services:
     secrets:
       - postgres_password
       - clinic_api_password
+      - audit_db_password
     networks:
       - backend
     depends_on:
@@ -56,6 +57,9 @@ services:
         [ -s /run/secrets/clinic_api_password ] || { echo 'clinic_api_password missing' >&2; exit 1; }
         psql -X -v ON_ERROR_STOP=1 -h db -U "$$POSTGRES_USER" -d "$$POSTGRES_DB" \
           -f /migrations/set_api_password.sql
+        [ -s /run/secrets/audit_db_password ] || { echo 'audit_db_password missing' >&2; exit 1; }
+        psql -X -v ON_ERROR_STOP=1 -h db -U "$$POSTGRES_USER" -d "$$POSTGRES_DB" \
+          -f /migrations/set_auditor_password.sql
 
   api:
     build:
@@ -116,6 +120,47 @@ services:
       migrate:
         condition: service_completed_successfully
     command: ["python", "seed.py"]
+
+  # Audit chain anchors (plan 17 §8): reads the journal as clinic_auditor and
+  # appends HMAC-signed anchor lines outside the database. The HMAC key is
+  # mounted here only (never db, migrate, api, seed, proxy, mailpit).
+  audit_anchor:
+    build:
+      context: .
+      dockerfile: docker/audit_anchor/Dockerfile
+    environment:
+      TZ: Asia/Yerevan
+      PGHOST: db
+      PGUSER: clinic_auditor
+      PGDATABASE: ${POSTGRES_DB:-clinic}
+      CLINIC_AUDIT_ANCHOR_INTERVAL: ${CLINIC_AUDIT_ANCHOR_INTERVAL:-60}
+    secrets:
+      - audit_db_password
+      - audit_anchor_key
+    # Bind mount, not a named volume: "make reset" (down -v) keeps the anchors
+    # and the chain registry. The directory is 700 with an ACL for uid 10002
+    # (scripts/init_secrets.sh).
+    volumes:
+      - ${CLINIC_AUDIT_ANCHOR_DIR:-./audit_anchors}:/anchors
+    networks:
+      - backend
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    read_only: true
+    tmpfs:
+      - /tmp
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "anchor.py", "--health"]
+      interval: 15s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
 
   mailpit:
     image: axllent/mailpit:v1.27.1
@@ -182,6 +227,10 @@ secrets:
     file: ./secrets/field_encryption_key
   field_encryption_previous_keys:
     file: ./secrets/field_encryption_previous_keys
+  audit_db_password:
+    file: ./secrets/audit_db_password
+  audit_anchor_key:
+    file: ./secrets/audit_anchor_key
   tls_cert:
     file: ./secrets/tls/server.crt
   tls_key:

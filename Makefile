@@ -17,9 +17,14 @@ TEST_FILES ?= tests/test_stage4.py tests/test_rls_boundary.py tests/test_secrets
 	tests/test_polish.py tests/test_tls.py tests/test_ngrok_demo.py tests/test_audit_chain.py
 PYTEST_ARGS ?= -q
 CONFIRM ?=
+# yes (with CONFIRM=yes): reset/fclean close the audit chain even when it is
+# broken; the registry records it as forced (plan 17 §8.6).
+RETIRE_FORCE ?=
+# Extra arguments of make audit-verify, e.g. VERIFY_ARGS=--strict
+VERIFY_ARGS ?=
 
 .DEFAULT_GOAL := help
-.PHONY: help start stop restart clean reset fclean logs ps test tls-check ngrok ngrok-off
+.PHONY: help start stop restart clean reset fclean logs ps test tls-check ngrok ngrok-off audit-verify
 
 # Anonymous volumes mounted by this project's containers (the postgres image
 # declares one on the one-shot migrate container). "down -v" misses them once
@@ -30,9 +35,43 @@ $$(for c in $$($(COMPOSE) ps -aq); do \
 done | tr ' ' '\n' | grep -E '^[0-9a-f]{64}$$' | sort -u)
 endef
 
-# down -v, then remove the anonymous volumes listed above (only this project's).
+# RETIRE_FORCE=yes is only valid together with CONFIRM=yes; checked before
+# anything else runs.
+define check_retire_force
+@if [ "$(RETIRE_FORCE)" = "yes" ] && [ "$(CONFIRM)" != "yes" ]; then \
+	echo "RETIRE_FORCE=yes needs CONFIRM=yes: nothing was changed." >&2; exit 1; \
+fi
+endef
+
+# Before down -v, in the same shell line (plan 17 §8.6, Б3): stop proxy and api
+# so nothing more is written, then close the open audit chain in the registry
+# (anchor.py --retire). A failed retire stops make before down -v. Three cases:
+# audit_anchor running -> exec; not running but the database volume exists ->
+# a one-off run (starts db and migrate); no volume -> --offline.
+# Then down -v and the anonymous volumes listed above (only this project's).
 define wipe_stack
 @anon="$(project_anon_volumes)"; \
+force="$(if $(filter yes,$(RETIRE_FORCE)),--force)"; \
+echo "$(COMPOSE) stop proxy api"; $(COMPOSE) stop proxy api || exit 1; \
+project="$$($(COMPOSE) config --format json | $(PYTHON) -c 'import json, sys; print(json.load(sys.stdin)["name"])')" || exit 1; \
+if [ -n "$$($(COMPOSE) ps --status running -q audit_anchor 2>/dev/null)" ]; then \
+	echo "$(COMPOSE) exec -T audit_anchor python anchor.py --retire $$force"; \
+	$(COMPOSE) exec -T audit_anchor python anchor.py --retire $$force || exit 1; \
+elif $(COMPOSE) volumes -q 2>/dev/null | grep -qx "$${project}_db_data"; then \
+	echo "$(COMPOSE) run --rm --no-build audit_anchor python anchor.py --retire $$force"; \
+	if ! $(COMPOSE) run --rm --no-build audit_anchor python anchor.py --retire $$force; then \
+		if [ -z "$$force" ]; then \
+			echo "retire failed: the audit chain was not closed, nothing was deleted." >&2; \
+			echo "  RETIRE_FORCE=yes CONFIRM=yes closes it anyway (offline, forced) if the database cannot start." >&2; \
+			exit 1; \
+		fi; \
+		echo "RETIRE_FORCE=yes -> offline forced: $(COMPOSE) run --rm --no-deps --no-build audit_anchor python anchor.py --retire --offline"; \
+		$(COMPOSE) run --rm --no-deps --no-build audit_anchor python anchor.py --retire --offline || exit 1; \
+	fi; \
+else \
+	echo "$(COMPOSE) run --rm --no-deps --no-build audit_anchor python anchor.py --retire --offline"; \
+	$(COMPOSE) run --rm --no-deps --no-build audit_anchor python anchor.py --retire --offline || exit 1; \
+fi; \
 echo "$(strip $(COMPOSE) down -v $(1))"; $(COMPOSE) down -v $(1) || exit 1; \
 for v in $$anon; do \
 	if docker volume inspect "$$v" >/dev/null 2>&1; then \
@@ -87,8 +126,10 @@ help:
 	@echo "  ngrok    public demo: start with PUBLIC_BASE_URL=https://\$$NGROK_DOMAIN (tunnel mode), then run ngrok to the HTTPS port"
 	@echo "  ngrok-off start again with the .env address (tunnel off)"
 	@echo "  test     run the test suite (TEST_BASE, TEST_CA, TEST_MAILPIT, TEST_PROJECT, PYTHON, PYTEST_ARGS)"
+	@echo "  audit-verify check the audit hash chain, anchors and registry (VERIFY_ARGS=--strict: forced retires fail)"
 	@echo "  reset    WIPES THE DATABASE: down -v, then start (asks first; CONFIRM=yes skips)"
 	@echo "  fclean   WIPES THE DATABASE: down -v --rmi local --remove-orphans for this project only (asks first; CONFIRM=yes skips)"
+	@echo "  RETIRE_FORCE=yes  with CONFIRM=yes: reset/fclean even if the audit chain is broken (logged as forced)"
 
 start:
 	$(start_stack)
@@ -103,16 +144,22 @@ clean:
 	$(COMPOSE) down
 
 reset:
+	$(check_retire_force)
 	$(confirm_wipe)
 	$(call wipe_stack)
 	$(start_stack)
 
 fclean:
+	$(check_retire_force)
 	$(confirm_wipe)
 	$(call wipe_stack,--rmi local --remove-orphans)
 
 logs:
 	$(COMPOSE) logs -f
+
+# Independent check of the audit chain inside audit_anchor (key and anchors are there).
+audit-verify:
+	$(COMPOSE) exec -T audit_anchor python verify_audit.py $(VERIFY_ARGS)
 
 ps:
 	$(COMPOSE) ps

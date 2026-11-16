@@ -4,3 +4,4 @@ COPY db/init.sql /docker-entrypoint-initdb.d/init.sql
 COPY db/roles.sql /docker-entrypoint-initdb.d/roles.sql
 COPY db/set_api_password.sql /migrations/set_api_password.sql
 COPY db/rls.sql /migrations/rls.sql
+COPY db/set_auditor_password.sql /migrations/set_auditor_password.sql

@@ -91,3 +91,21 @@ ALTER DEFAULT PRIVILEGES IN SCHEMA public
   REVOKE ALL ON TABLES FROM clinic_api;
 ALTER DEFAULT PRIVILEGES IN SCHEMA public
   REVOKE ALL ON SEQUENCES FROM clinic_api;
+
+-- Audit chain reader for the audit_anchor service and verify_audit (plan 17
+-- §8.1): reads the journal and its head, nothing else, writes nothing. The
+-- password comes from the audit_db_password secret (set_auditor_password.sql).
+DO $$
+BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'clinic_auditor') THEN
+    CREATE ROLE clinic_auditor LOGIN NOSUPERUSER NOBYPASSRLS NOCREATEDB NOCREATEROLE NOINHERIT;
+  END IF;
+  EXECUTE format('GRANT CONNECT ON DATABASE %I TO clinic_auditor', current_database());
+END
+$$;
+
+ALTER ROLE clinic_auditor LOGIN NOSUPERUSER NOBYPASSRLS NOCREATEDB NOCREATEROLE NOINHERIT;
+ALTER ROLE clinic_auditor SET timezone TO 'Asia/Yerevan';
+GRANT USAGE ON SCHEMA public TO clinic_auditor;
+REVOKE ALL PRIVILEGES ON ALL TABLES IN SCHEMA public FROM clinic_auditor;
+REVOKE ALL PRIVILEGES ON ALL SEQUENCES IN SCHEMA public FROM clinic_auditor;

@@ -42,6 +42,17 @@ else
   echo "created secrets/field_encryption_previous_keys (empty until the first key rotation)"
 fi
 
+# Audit chain (plan 17 §8): the clinic_auditor database password and the HMAC
+# key of the anchors. The key is never overwritten: a new key would leave the
+# existing anchors and the chain registry unverifiable.
+generate audit_db_password
+if [ -e secrets/audit_anchor_key ]; then
+  echo "keep    secrets/audit_anchor_key"
+else
+  printf '%s' "$(openssl rand -hex 32)" > secrets/audit_anchor_key
+  echo "created secrets/audit_anchor_key"
+fi
+
 if [ -e secrets/smtp_password ]; then
   echo "keep    secrets/smtp_password"
 else
@@ -208,6 +219,7 @@ TLS_TMP_FILES=
 chmod 700 secrets
 for entry in postgres_password:999 clinic_api_password:10001 \
   session_secret:10001 smtp_password:10001 demo_password:10001 \
+  audit_db_password:10002 \
   tls/server.key:101 tls/server.crt:101; do
   secret_file="secrets/${entry%%:*}"
   reader_uid="${entry##*:}"
@@ -250,6 +262,57 @@ for key_file in secrets/field_encryption_key secrets/field_encryption_previous_k
   echo "warning $key_file: cannot grant read access to the api user (uid $API_UID)." >&2
   echo "        Install the acl package and rerun, or: sudo chown $API_UID:$API_UID $key_file" >&2
 done
+
+# The HMAC key of the anchors, like the field keys: 600 for the host user plus
+# a read ACL for the audit_anchor user (uid 10002); root hands the file to that
+# uid instead. Never 644 (Securo Б-B2): without either the key stays 600, the
+# service cannot read it and stays unhealthy (fail closed), with a warning.
+AUDIT_UID=10002
+key_file=secrets/audit_anchor_key
+if [ ! -O "$key_file" ]; then
+  echo "note    $key_file is not owned by you; permissions left as they are"
+else
+  chmod 600 "$key_file"
+  if command -v setfacl >/dev/null 2>&1 && setfacl -m "u:$AUDIT_UID:r" "$key_file" 2>/dev/null; then
+    :
+  elif [ "$(id -u)" = 0 ]; then
+    chown "$AUDIT_UID:$AUDIT_UID" "$key_file"
+    chmod 400 "$key_file"
+  else
+    echo "warning $key_file stays 600: cannot grant read access to audit_anchor (uid $AUDIT_UID)." >&2
+    echo "        audit_anchor will not start until it can read the key. Install the acl package and rerun," >&2
+    echo "        or: sudo chown $AUDIT_UID:$AUDIT_UID $key_file && sudo chmod 400 $key_file" >&2
+  fi
+fi
+
+# Anchor directory (bind mount of audit_anchor, outside the database volume):
+# CLINIC_AUDIT_ANCHOR_DIR from the environment, else from .env, else
+# ./audit_anchors. 700 for the host user plus rwx for uid 10002 through an
+# ACL; never 777. The anchor files inside are 0644, so the host user can read
+# them while the directory keeps everyone else out.
+anchor_dir="${CLINIC_AUDIT_ANCHOR_DIR:-}"
+if [ -z "$anchor_dir" ] && [ -f .env ]; then
+  anchor_dir="$(grep -E '^CLINIC_AUDIT_ANCHOR_DIR=' .env | tail -n 1 | cut -d= -f2- || true)"
+fi
+anchor_dir="${anchor_dir:-./audit_anchors}"
+if [ ! -d "$anchor_dir" ]; then
+  mkdir -p "$anchor_dir"
+  echo "created $anchor_dir (audit anchors and chain registry; keep it, do not git clean it)"
+fi
+if [ -O "$anchor_dir" ]; then
+  chmod 700 "$anchor_dir"
+  if command -v setfacl >/dev/null 2>&1 && setfacl -m "u:$AUDIT_UID:rwx" "$anchor_dir" 2>/dev/null; then
+    :
+  elif [ "$(id -u)" = 0 ]; then
+    chown "$AUDIT_UID:$AUDIT_UID" "$anchor_dir"
+  else
+    echo "warning $anchor_dir: cannot grant write access to audit_anchor (uid $AUDIT_UID)." >&2
+    echo "        No anchors will be written and audit_anchor stays unhealthy. Install the acl package and rerun," >&2
+    echo "        or: sudo setfacl -m u:$AUDIT_UID:rwx $anchor_dir" >&2
+  fi
+else
+  echo "note    $anchor_dir is not owned by you; permissions left as they are"
+fi
 
 # Older clones may still have unused secret variables in .env.
 # The app no longer reads them; strip the lines without printing values.

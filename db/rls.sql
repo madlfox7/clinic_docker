@@ -1927,6 +1927,9 @@ REVOKE INSERT, UPDATE, DELETE, TRUNCATE, TRIGGER, REFERENCES ON public.audit_eve
 REVOKE ALL ON TABLE public.audit_chain_head
   FROM PUBLIC, clinic_api, app_guest, app_patient, app_doctor, app_registrar, app_admin;
 REVOKE ALL ON FUNCTION public.audit_chain_before_insert() FROM PUBLIC;
+-- clinic_auditor (audit_anchor, verify_audit): SELECT on the journal and the
+-- head only; roles.sql has already revoked every other table and sequence.
+GRANT SELECT ON public.audit_events, public.audit_chain_head TO clinic_auditor;
 GRANT SELECT ON public.time_off_requests TO app_admin;
 GRANT UPDATE (status, decided_by, decided_at)
   ON public.time_off_requests TO app_admin;

@@ -1,6 +1,7 @@
 """Audit journal hash chain (plan 17 §6-§9): schema, trigger, genesis,
 append-only rules and the independent Python canon (audit/canon.py)."""
 import datetime as dt
+import hashlib
 import json
 import os
 import re
@@ -543,3 +544,586 @@ def test_migrate_block_puts_mode_a_back_after_disable_and_enable():
     )
     assert done.returncode == 0, done.stderr
     assert _one(probe) == "mode=A"
+
+
+# --- §8: audit_anchor, unit tests on a temporary directory and a fake journal ---
+
+import multiprocessing  # noqa: E402
+
+from tests.audit_fake import KEY, FakeSource  # noqa: E402
+import anchor  # noqa: E402  (audit/anchor.py)
+import chainlib as cl  # noqa: E402
+import verify_audit  # noqa: E402
+
+
+def _dir(tmp_path):
+    d = tmp_path / "anchors"
+    d.mkdir(mode=0o700)
+    return d
+
+
+def _registry(d):
+    return [e.kind + ":" + (e.mode or e.switch_kind or "") for e in cl.parse_registry(d / cl.REGISTRY, KEY)[0]]
+
+
+def _anchors(d, chain_id):
+    return cl.read_anchors(d / f"{chain_id}.log", KEY, chain_id)[0]
+
+
+def _snapshot(d):
+    return {p.name: p.read_bytes() for p in d.iterdir()}
+
+
+def test_unit_first_start_opens_and_anchors(tmp_path):
+    d, src = _dir(tmp_path), FakeSource(rows=3, genesis_rows=3)
+    result = anchor.cycle(d, KEY, src)
+    assert result.ok and _registry(d) == ["open:"]
+    assert [a.seq for a in _anchors(d, src.chain_id)] == [3]
+    assert oct((d / f"{src.chain_id}.log").stat().st_mode & 0o777) == "0o644"
+    src.add(2)
+    assert anchor.cycle(d, KEY, src).ok
+    assert [a.seq for a in _anchors(d, src.chain_id)] == [3, 5]
+    assert anchor.cycle(d, KEY, src).ok   # no new rows: still a line, same seq
+    assert [a.seq for a in _anchors(d, src.chain_id)] == [3, 5, 5]
+
+
+def test_unit_registry_missing_with_anchor_files_is_an_error(tmp_path):
+    d, src = _dir(tmp_path), FakeSource(rows=2)
+    assert anchor.cycle(d, KEY, src).ok
+    (d / cl.REGISTRY).unlink()
+    before = _snapshot(d)
+    result = anchor.cycle(d, KEY, src)
+    assert not result.ok and result.error == "registry_missing"
+    assert _snapshot(d) == before
+
+
+def test_unit_new_chain_without_retire_is_a_switch_and_stays_red(tmp_path):
+    d, old = _dir(tmp_path), FakeSource(rows=2)
+    assert anchor.cycle(d, KEY, old).ok
+    new = FakeSource(rows=1)
+    result = anchor.cycle(d, KEY, new)
+    assert not result.ok and result.error == "chain_replaced"
+    assert _registry(d) == ["open:", "switch:new"]
+    again = anchor.cycle(d, KEY, new)        # a restart does not heal a switch
+    assert not again.ok and _registry(d) == ["open:", "switch:new"]
+    assert [a.seq for a in _anchors(d, new.chain_id)] == [1, 1]   # anchors continue
+
+
+def test_unit_after_retire_a_new_chain_is_opened(tmp_path):
+    d, old = _dir(tmp_path), FakeSource(rows=2)
+    assert anchor.cycle(d, KEY, old).ok
+    assert anchor.retire(KEY, False, False, d, lambda: (old, lambda: None)) == 0
+    new = FakeSource(rows=0)
+    assert anchor.cycle(d, KEY, new).ok
+    assert _registry(d) == ["open:", "retire:normal", "open:"]
+
+
+def test_unit_known_chain_id_is_reused_never_opened_again(tmp_path):
+    d, first = _dir(tmp_path), FakeSource(rows=2)
+    assert anchor.cycle(d, KEY, first).ok
+    anchor.retire(KEY, False, False, d, lambda: (first, lambda: None))
+    second = FakeSource(rows=0)
+    assert anchor.cycle(d, KEY, second).ok
+    result = anchor.cycle(d, KEY, first)    # the old chain comes back (old dump)
+    assert not result.ok and _registry(d) == ["open:", "retire:normal", "open:", "switch:reused"]
+    assert [e.kind for e in cl.parse_registry(d / cl.REGISTRY, KEY)[0]].count("open") == 2
+
+
+def _retired(tmp_path, rows=3):
+    d, src = _dir(tmp_path), FakeSource(rows=rows)
+    assert anchor.cycle(d, KEY, src).ok
+    assert anchor.retire(KEY, False, False, d, lambda: (src, lambda: None)) == 0
+    return d, src
+
+
+def test_unit_retired_chain_with_the_same_head_is_green_without_anchor(tmp_path):
+    d, src = _retired(tmp_path)
+    before = _snapshot(d)
+    result = anchor.cycle(d, KEY, src)
+    assert result.ok and result.state == "retired"
+    assert _snapshot(d) == before
+
+
+@pytest.mark.parametrize("change", ["more", "other_hash", "less", "row_below"])
+def test_unit_retired_chain_that_changed_is_retired_reused(tmp_path, change):
+    d, src = _retired(tmp_path)
+    if change == "more":
+        src.add(1)
+    elif change == "other_hash":
+        src.head_override = dict(src.head(), last_hash=bytes(32))
+    elif change == "less":
+        src.rows.pop()
+    else:
+        # same last_seq and hash, but a row below no longer matches its anchor
+        anchors_file = d / f"{src.chain_id}.log"
+        text = anchors_file.read_text().splitlines()
+        assert text
+        src.rows[0]["row_hash"] = bytes(32)
+    result = anchor.cycle(d, KEY, src)
+    assert not result.ok
+    assert _registry(d)[-1] == "switch:retired_reused"
+
+
+def test_unit_offline_retired_chain_back_is_retired_reused(tmp_path):
+    d, src = _dir(tmp_path), FakeSource(rows=2)
+    assert anchor.cycle(d, KEY, src).ok
+    assert anchor.retire(KEY, False, True, d) == 0
+    assert _registry(d) == ["open:", "retire:offline"]
+    assert not anchor.cycle(d, KEY, src).ok
+    assert _registry(d)[-1] == "switch:retired_reused"
+
+
+def _body_mac(prev, body):
+    return f"{body} {cl.line_mac(KEY, prev, body).hex()}"
+
+
+@pytest.mark.parametrize("line, kind", [
+    ("v1 open {id} 2026-11-16T10:00:00.000000Z 0 2026-11-16T10:00:00.000000Z extra", "registry_format"),
+    ("v1 open {id} 2026-11-16T10:00:00.000000Z 2026-11-16T10:00:00.000000Z", "registry_format"),
+    ("v1 close {id} 2026-11-16T10:00:00.000000Z 0 2026-11-16T10:00:00.000000Z", "registry_format"),
+    ("v1 retire {id} 1 {h} sloppy - 2026-11-16T10:00:00.000000Z", "registry_format"),
+    ("v1 switch {id} {id} borrowed 2026-11-16T10:00:00.000000Z", "registry_format"),
+    ("v1 open - 2026-11-16T10:00:00.000000Z 0 2026-11-16T10:00:00.000000Z", "registry_format"),
+    ("v1 retire {id} - - normal - 2026-11-16T10:00:00.000000Z", "registry_format"),
+    ("bad-mac", "registry_mac"),
+])
+def test_unit_strict_registry_parser(tmp_path, line, kind):
+    d, src = _dir(tmp_path), FakeSource(rows=1)
+    assert anchor.cycle(d, KEY, src).ok
+    reg = d / cl.REGISTRY
+    entries, prev = cl.parse_registry(reg, KEY)
+    if line == "bad-mac":
+        body = f"v1 retire {src.chain_id} 1 {'a' * 64} normal - 2026-11-16T10:00:00.000000Z"
+        text = f"{body} {'0' * 64}"
+    else:
+        text = _body_mac(prev, line.format(id=src.chain_id, h="a" * 64))
+    with reg.open("a") as f:
+        f.write(text + "\n")
+    before = _snapshot(d)
+    result = anchor.cycle(d, KEY, src)
+    assert not result.ok and result.error == kind
+    assert _snapshot(d) == before
+    out = []
+    assert verify_audit.verify(src, d, KEY, False, None, 60, out.append) == 1
+    assert f"type={kind}" in out[-1]
+
+
+def test_unit_new_chain_over_a_full_journal_with_a_registry_is_an_error(tmp_path):
+    d, old = _retired(tmp_path)
+    full = FakeSource(rows=5, genesis_rows=5)
+    result = anchor.cycle(d, KEY, full)
+    assert not result.ok and result.error == "genesis_rows"
+    assert _registry(d) == ["open:", "retire:normal"]
+
+
+def test_unit_retire_of_a_broken_chain_refuses_unless_forced(tmp_path, capsys):
+    d, src = _dir(tmp_path), FakeSource(rows=4)
+    assert anchor.cycle(d, KEY, src).ok
+    src.rows[1]["action"] = "forged"
+    before = _snapshot(d)
+    assert anchor.retire(KEY, False, False, d, lambda: (src, lambda: None)) != 0
+    assert "BROKEN seq=2" in capsys.readouterr().out and _snapshot(d) == before
+    assert anchor.retire(KEY, True, False, d, lambda: (src, lambda: None)) == 0
+    out = capsys.readouterr().out
+    assert out.index("BROKEN seq=2") < out.index("forced row_hash@2")
+    last = cl.parse_registry(d / cl.REGISTRY, KEY)[0][-1]
+    assert (last.kind, last.mode, last.brk) == ("retire", "forced", "row_hash@2")
+    assert anchor.retire(KEY, True, False, d, lambda: (src, lambda: None)) == 0   # no-op
+    assert _registry(d) == ["open:", "retire:forced"]
+    # a forced retire does not turn the next chain red
+    assert anchor.cycle(d, KEY, FakeSource(rows=0)).ok
+
+
+def test_unit_retire_offline_and_again_is_a_no_op(tmp_path):
+    d, src = _dir(tmp_path), FakeSource(rows=1)
+    assert anchor.cycle(d, KEY, src).ok
+    assert anchor.retire(KEY, False, True, d) == 0
+    line = (d / cl.REGISTRY).read_text().splitlines()[-1].split(" ")
+    assert line[1:7] == ["retire", src.chain_id, "-", "-", "offline", "-"]
+    assert anchor.retire(KEY, False, True, d) == 0
+    assert _registry(d) == ["open:", "retire:offline"]
+
+
+def test_unit_trigger_not_in_mode_a_stops_the_cycle(tmp_path):
+    d, src = _dir(tmp_path), FakeSource(rows=2)
+    assert anchor.cycle(d, KEY, src).ok
+    src.modes[("audit_events", "zz_audit_chain")] = "O"
+    before = _snapshot(d)
+    result = anchor.cycle(d, KEY, src)
+    assert not result.ok and result.error == "trigger_mode"
+    assert _snapshot(d) == before
+
+
+def test_unit_broken_chain_is_never_anchored(tmp_path):
+    d, src = _dir(tmp_path), FakeSource(rows=3)
+    assert anchor.cycle(d, KEY, src).ok
+    src.add(2)
+    src.rows[4]["target_id"] = 99
+    before = _snapshot(d)
+    result = anchor.cycle(d, KEY, src)
+    assert not result.ok and result.error == "row_hash"
+    assert _snapshot(d) == before
+
+
+def test_unit_no_retired_directory_in_the_code():
+    for name in ("anchor.py", "chainlib.py", "verify_audit.py"):
+        assert "retired/" not in (ROOT / "audit" / name).read_text()
+
+
+def _parallel_once(directory, chain_id, rows):
+    src = FakeSource(chain_id=chain_id, rows=rows)
+    return anchor.cycle(Path(directory), KEY, src).ok
+
+
+def test_unit_twenty_parallel_once_keep_both_mac_chains(tmp_path):
+    """Б-B1: twenty --once next to each other (and a cycle already running) never
+    fork the MAC chain of the anchor file or of the registry."""
+    d, src = _dir(tmp_path), FakeSource(rows=5)
+    ctx = multiprocessing.get_context("fork")
+    with ctx.Pool(20) as pool:
+        results = pool.starmap(_parallel_once, [(str(d), src.chain_id, 5)] * 21)
+    assert all(results)
+    assert _registry(d) == ["open:"]
+    assert len(_anchors(d, src.chain_id)) == 21
+
+
+def test_unit_verify_audit_reports(tmp_path):
+    d, src = _dir(tmp_path), FakeSource(rows=3)
+    assert anchor.cycle(d, KEY, src).ok
+    out = []
+    assert verify_audit.verify(src, d, KEY, False, None, 60, out.append) == 0
+    assert out[-1].startswith(f"OK chain={src.chain_id} rows=3 anchors=1 ")
+    src.modes[("audit_chain_head", "audit_chain_head_guard")] = "O"
+    out = []
+    assert verify_audit.verify(src, d, KEY, False, None, 60, out.append) == 1
+    assert out[-1] == "BROKEN type=trigger_mode name=audit_chain_head_guard mode=O"
+
+
+@pytest.mark.parametrize("kind", ["new", "reused", "retired_reused"])
+def test_unit_verify_audit_sees_every_switch(tmp_path, kind):
+    d, src = _dir(tmp_path), FakeSource(rows=2)
+    assert anchor.cycle(d, KEY, src).ok
+    entries, prev = cl.parse_registry(d / cl.REGISTRY, KEY)
+    cl.append_line(d / cl.REGISTRY, KEY, prev, f"v1 switch {src.chain_id} {src.chain_id} {kind} {cl.utc()}")
+    out = []
+    assert verify_audit.verify(src, d, KEY, False, None, 60, out.append) == 1
+    assert f"type=chain_replaced kind={kind}" in out[-1]
+
+
+def test_unit_verify_audit_warns_on_forced_and_offline_retires(tmp_path):
+    d = _dir(tmp_path)
+    first = FakeSource(rows=2)
+    assert anchor.cycle(d, KEY, first).ok
+    first.rows[0]["action"] = "forged"
+    assert anchor.retire(KEY, True, False, d, lambda: (first, lambda: None)) == 0
+    second = FakeSource(rows=0)
+    assert anchor.cycle(d, KEY, second).ok
+    assert anchor.retire(KEY, False, True, d) == 0
+    third = FakeSource(rows=1)
+    assert anchor.cycle(d, KEY, third).ok
+    out = []
+    assert verify_audit.verify(third, d, KEY, False, None, 60, out.append) == 0
+    assert f"WARN retire forced chain={first.chain_id} break=row_hash@1" in out
+    assert f"WARN retire offline chain={second.chain_id}" in out
+    assert out[-1].endswith("retired_forced=1 retired_offline=1")
+    out = []
+    assert verify_audit.verify(third, d, KEY, True, None, 60, out.append) == 3
+
+
+def test_unit_verify_audit_compares_an_outside_copy(tmp_path):
+    d, src = _dir(tmp_path), FakeSource(rows=2)
+    assert anchor.cycle(d, KEY, src).ok
+    copy = tmp_path / "copy"
+    copy.mkdir()
+    for p in d.iterdir():
+        if p.name != cl.LOCK:
+            (copy / p.name).write_bytes(p.read_bytes())
+    assert anchor.cycle(d, KEY, src.add(1)).ok      # the copy lags: still a prefix
+    assert verify_audit.verify(src, d, KEY, False, copy, 60, [].append) == 0
+    (copy / f"{src.chain_id}.log").write_text("v1 tampered\n")
+    out = []
+    assert verify_audit.verify(src, d, KEY, False, copy, 60, out.append) == 1
+    assert "type=anchor_copy_mismatch" in out[-1]
+
+
+# --- §8: the audit_anchor service on the stand -----------------------------------
+
+import shutil  # noqa: E402
+import stat  # noqa: E402
+
+ANCHOR_DIR = ROOT / os.environ.get("CLINIC_AUDIT_ANCHOR_DIR", "audit_anchors")
+SERVICES_WITHOUT_KEY = ("db", "migrate", "api", "seed", "proxy", "mailpit")
+
+
+def _compose_config() -> dict:
+    done = subprocess.run(["docker", "compose", "config", "--format", "json"], cwd=ROOT,
+                          capture_output=True, text=True, timeout=60)
+    assert done.returncode == 0, done.stderr
+    return json.loads(done.stdout)
+
+
+def _host_key() -> bytes:
+    # read only here, never printed
+    return cl.load_key(ROOT / "secrets" / "audit_anchor_key")
+
+
+def _head_chain() -> str:
+    return _head()["chain_id"]
+
+
+def test_compose_mounts_the_key_only_on_audit_anchor_and_hardens_it():
+    services = _compose_config()["services"]
+    for name, service in services.items():
+        mounted = {item["source"] for item in service.get("secrets") or []}
+        if name == "audit_anchor":
+            assert mounted == {"audit_db_password", "audit_anchor_key"}
+        else:
+            assert "audit_anchor_key" not in mounted, name
+            assert ("audit_db_password" in mounted) == (name == "migrate"), name
+    anchor_service = services["audit_anchor"]
+    assert set(anchor_service["networks"]) == {"backend"}
+    assert anchor_service.get("read_only") is True
+    assert anchor_service.get("cap_drop") == ["ALL"]
+    assert "no-new-privileges:true" in anchor_service.get("security_opt", [])
+    assert not anchor_service.get("ports")
+
+
+@pytest.mark.parametrize("sql", [
+    "INSERT INTO audit_events (actor_user_id, actor_role, action, target_type) VALUES (1, 'admin', 'x', 'y')",
+    "UPDATE audit_events SET action = 'x' WHERE seq = 1",  # expects refusal
+    "DELETE FROM audit_events WHERE seq = 1",  # expects refusal
+    "UPDATE audit_chain_head SET last_seq = 0",
+    "SELECT count(*) FROM users",
+    "SELECT count(*) FROM visit_notes",
+    "SELECT count(*) FROM prescriptions",
+    "SELECT public.record_audit_event('service.create', 'service', 1)",
+])
+def test_auditor_role_reads_the_journal_only(sql):
+    ok = _psql_try("BEGIN; SET LOCAL ROLE clinic_auditor; "
+                   "SELECT count(*) FROM audit_events; SELECT count(*) FROM audit_chain_head; ROLLBACK;")
+    assert ok.returncode == 0, ok.stderr
+    denied = _psql_try(f"BEGIN; SET LOCAL ROLE clinic_auditor; {sql}; ROLLBACK;")
+    assert denied.returncode != 0 and "permission denied" in denied.stderr, (sql, denied.stderr)
+
+
+def test_auditor_role_attributes():
+    assert _one("SELECT rolcanlogin::text || rolsuper::text || rolbypassrls::text || rolinherit::text "
+                "|| rolcreatedb::text || rolcreaterole::text FROM pg_roles WHERE rolname = 'clinic_auditor'") \
+        == "truefalsefalsefalsefalsefalse"
+
+
+def test_no_other_container_gets_the_anchor_key():
+    for service in ("api", "db", "proxy"):
+        listed = subprocess.run(["docker", "compose", "exec", "-T", service, "ls", "/run/secrets"],
+                                cwd=ROOT, capture_output=True, text=True, timeout=60)
+        assert listed.returncode == 0, (service, listed.stderr)
+        assert "audit_anchor_key" not in listed.stdout, service
+    # Securo fix 2: migrate's entrypoint is "sh -ec", so ls goes in as the entrypoint
+    migrate = subprocess.run(["docker", "compose", "run", "--rm", "--no-deps", "-T", "--entrypoint", "ls",
+                              "migrate", "/run/secrets"], cwd=ROOT, capture_output=True, text=True, timeout=120)
+    assert migrate.returncode == 0, migrate.stderr
+    names = migrate.stdout.split()
+    assert "postgres_password" in names and "audit_db_password" in names
+    assert "audit_anchor_key" not in names
+    mine = subprocess.run(["docker", "compose", "exec", "-T", "audit_anchor", "ls", "/run/secrets"],
+                          cwd=ROOT, capture_output=True, text=True, timeout=60)
+    assert sorted(mine.stdout.split()) == ["audit_anchor_key", "audit_db_password"]
+
+
+def test_key_file_is_never_world_readable():
+    mode = (ROOT / "secrets" / "audit_anchor_key").stat().st_mode
+    assert not mode & (stat.S_IROTH | stat.S_IWOTH | stat.S_IRGRP | stat.S_IWGRP) or shutil.which("getfacl")
+    assert not mode & (stat.S_IROTH | stat.S_IWOTH)
+
+
+def _wait_for_anchor(chain_id: str, at_least_seq: int, timeout: float) -> cl.Anchor:
+    deadline = time.time() + timeout
+    while True:
+        path = ANCHOR_DIR / f"{chain_id}.log"
+        if path.exists():
+            anchors, _ = cl.read_anchors(path, _host_key(), chain_id)
+            if anchors and anchors[-1].seq >= at_least_seq:
+                return anchors[-1]
+        if time.time() > deadline:
+            raise AssertionError(f"no anchor for seq >= {at_least_seq} within {timeout} s")
+        time.sleep(2)
+
+
+def test_service_anchors_the_head_within_two_intervals_and_the_macs_hold():
+    every = int(os.environ.get("CLINIC_AUDIT_ANCHOR_INTERVAL", "60"))
+    chain = _head_chain()
+    last = _wait_for_anchor(chain, 1, 2 * every + 15)
+    assert time.time() - cl.parse_utc(last.at).timestamp() <= 2 * every + 15
+    entries, _ = cl.parse_registry(ANCHOR_DIR / cl.REGISTRY, _host_key())
+    assert any(e.kind == "open" and e.chain_id == chain for e in entries)
+    assert not any(e.kind == "switch" for e in entries)
+
+
+def test_once_anchors_the_new_max_seq():
+    _insert_admin_event()
+    seq = _head()["last_seq"]
+    done = subprocess.run(["docker", "compose", "exec", "-T", "audit_anchor", "python", "anchor.py", "--once"],
+                          cwd=ROOT, capture_output=True, text=True, timeout=120)
+    assert done.returncode == 0, done.stdout + done.stderr
+    assert _wait_for_anchor(_head_chain(), seq, 5).seq == seq
+    assert "mac" not in done.stdout.lower() and "key" not in done.stdout.lower()
+
+
+def test_audit_anchor_is_healthy():
+    state = subprocess.run(["docker", "compose", "ps", "--format", "{{.Health}}", "audit_anchor"],
+                           cwd=ROOT, capture_output=True, text=True, timeout=60)
+    assert state.stdout.strip() == "healthy", state.stdout
+
+
+def test_make_audit_verify_is_ok_on_an_intact_journal():
+    compose = "docker compose" + (f" -p {PROJECT}" if PROJECT else "")
+    done = subprocess.run(["make", "-s", "audit-verify", f"COMPOSE={compose}"], cwd=ROOT,
+                          capture_output=True, text=True, timeout=300)
+    assert done.returncode == 0, done.stdout + done.stderr
+    assert done.stdout.strip().splitlines()[-1].startswith(f"OK chain={_head_chain()} ")
+
+
+def test_registry_starts_with_an_open_line_and_anchors_are_git_ignored():
+    entries, _ = cl.parse_registry(ANCHOR_DIR / cl.REGISTRY, _host_key())
+    assert entries and entries[0].kind == "open"
+    assert any(e.kind == "open" and e.chain_id == _head_chain() for e in entries)
+    ignored = subprocess.run(["git", "check-ignore", "audit_anchors/chains.log", "audit_anchors_e6/x", ".env.e6"],
+                             cwd=ROOT, capture_output=True, text=True)
+    assert ignored.stdout.split() == ["audit_anchors/chains.log", "audit_anchors_e6/x", ".env.e6"]
+    docker_ignore = (ROOT / ".dockerignore").read_text().split()
+    assert "audit_anchors*/" in docker_ignore and ".env.e6" in docker_ignore
+
+
+@pytest.mark.skipif(PROJECT != "e6", reason="only on the disposable stand -p e6 (loop and --once together)")
+def test_live_twenty_parallel_once_next_to_the_loop():
+    procs = [subprocess.Popen(["docker", "compose", "exec", "-T", "audit_anchor", "python", "anchor.py", "--once"],
+                              cwd=ROOT, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+             for _ in range(20)]
+    for proc in procs:
+        assert proc.wait(timeout=300) == 0
+    cl.read_anchors(ANCHOR_DIR / f"{_head_chain()}.log", _host_key(), _head_chain())
+    cl.parse_registry(ANCHOR_DIR / cl.REGISTRY, _host_key())
+
+
+# --- init_secrets.sh for the audit secrets (Б-B2, П12, test 6), on a copy ----------
+
+def _copy_scripts(tmp_path) -> Path:
+    work = tmp_path / "repo"
+    (work / "scripts").mkdir(parents=True)
+    for name in ("init_secrets.sh", "tls_lib.sh"):
+        shutil.copy(ROOT / "scripts" / name, work / "scripts" / name)
+    return work
+
+
+def _path_without(tmp_path, *missing) -> str:
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    for folder in ("/usr/local/bin", "/usr/bin", "/bin"):
+        if not os.path.isdir(folder):
+            continue
+        for entry in os.listdir(folder):
+            if entry in missing or (bin_dir / entry).exists():
+                continue
+            (bin_dir / entry).symlink_to(os.path.join(folder, entry))
+    return str(bin_dir)
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="the fallback without ACL is for a non-root user")
+def test_init_secrets_without_setfacl_keeps_the_key_600_and_warns(tmp_path):
+    work = _copy_scripts(tmp_path)
+    env = dict(os.environ, PATH=_path_without(tmp_path, "setfacl"))
+    env.pop("CLINIC_AUDIT_ANCHOR_DIR", None)
+    first = subprocess.run(["sh", "scripts/init_secrets.sh"], cwd=work, env=env, capture_output=True, text=True)
+    assert first.returncode == 0, first.stderr
+    key = work / "secrets" / "audit_anchor_key"
+    assert stat.S_IMODE(key.stat().st_mode) == 0o600
+    assert "audit_anchor_key stays 600" in first.stderr
+    assert "audit_anchors: cannot grant write access" in first.stderr
+    assert stat.S_IMODE((work / "audit_anchors").stat().st_mode) == 0o700
+    sums = {n: hashlib.sha256((work / "secrets" / n).read_bytes()).hexdigest()
+            for n in ("audit_anchor_key", "audit_db_password")}
+    second = subprocess.run(["sh", "scripts/init_secrets.sh"], cwd=work, env=env, capture_output=True, text=True)
+    assert second.returncode == 0
+    assert {n: hashlib.sha256((work / "secrets" / n).read_bytes()).hexdigest() for n in sums} == sums
+    assert "keep    secrets/audit_anchor_key" in second.stdout
+
+
+def test_no_world_writable_anchor_directory_anywhere():
+    for path in [ROOT / "Makefile", ROOT / "README.md", *(ROOT / "scripts").iterdir()]:
+        if path.is_file():
+            assert not re.search(r"chmod.*777", path.read_text(errors="ignore")), path
+
+
+# --- Makefile wipe_stack with a stub COMPOSE (7a) ------------------------------------
+
+STUB = r"""#!/bin/sh
+echo "$*" >> "$STUB_LOG"
+case "$*" in
+  "config --format json") echo '{"name": "stubproj"}' ;;
+  "ps --status running -q audit_anchor") [ "$STUB_MODE" = running ] && echo abc123 ;;
+  "volumes -q") [ "$STUB_MODE" = volume ] && echo stubproj_db_data ;;
+  *--retire*) exit "${STUB_RETIRE_RC:-0}" ;;
+esac
+exit 0
+"""
+
+
+def _make_with_stub(tmp_path, mode: str, *args, rc: int = 0):
+    stub = tmp_path / "compose.sh"
+    stub.write_text(STUB)
+    stub.chmod(0o755)
+    log = tmp_path / "calls.log"
+    log.write_text("")
+    env = dict(os.environ, STUB_LOG=str(log), STUB_MODE=mode, STUB_RETIRE_RC=str(rc))
+    done = subprocess.run(["make", *args, f"COMPOSE={stub}"], cwd=ROOT, env=env,
+                          capture_output=True, text=True, timeout=60)
+    return done, log.read_text().splitlines()
+
+
+def test_makefile_wipe_stack_order_and_retire_force_text():
+    text = (ROOT / "Makefile").read_text()
+    body = text[text.index("define wipe_stack"):text.index("endef", text.index("define wipe_stack"))]
+    assert body.index("stop proxy api") < body.index("--retire") < body.index("down -v $(1)")
+    assert "RETIRE_FORCE ?=" in text and "RETIRE_FORCE=yes  with CONFIRM=yes" in text
+    assert "audit-verify" in text.split(".PHONY:", 1)[1].splitlines()[0]
+    assert "up -d --no-build --wait audit_anchor" not in text
+
+
+def test_retire_force_without_confirm_changes_nothing(tmp_path):
+    done, calls = _make_with_stub(tmp_path, "running", "reset", "RETIRE_FORCE=yes")
+    assert done.returncode != 0 and "needs CONFIRM=yes" in done.stderr
+    assert calls == []
+
+
+@pytest.mark.parametrize("mode, expected", [
+    ("running", ["exec -T audit_anchor python anchor.py --retire"]),
+    ("volume", ["run --rm --no-build audit_anchor python anchor.py --retire"]),
+    ("none", ["run --rm --no-deps --no-build audit_anchor python anchor.py --retire --offline"]),
+])
+def test_wipe_stack_retires_the_chain_before_down(tmp_path, mode, expected):
+    done, calls = _make_with_stub(tmp_path, mode, "fclean", "CONFIRM=yes")
+    assert done.returncode == 0, done.stdout + done.stderr
+    retire = [c.strip() for c in calls if "--retire" in c]
+    assert retire == expected
+    assert calls.index("stop proxy api") < calls.index(next(c for c in calls if "--retire" in c)) \
+        < calls.index(next(c for c in calls if c.startswith("down -v")))
+
+
+def test_failed_retire_stops_before_down(tmp_path):
+    for mode in ("running", "volume", "none"):
+        done, calls = _make_with_stub(tmp_path, mode, "fclean", "CONFIRM=yes", rc=2)
+        assert done.returncode != 0, mode
+        assert not any(c.startswith("down") for c in calls), (mode, calls)
+
+
+def test_forced_retire_passes_force_and_falls_back_offline(tmp_path):
+    done, calls = _make_with_stub(tmp_path, "running", "fclean", "CONFIRM=yes", "RETIRE_FORCE=yes")
+    assert done.returncode == 0
+    assert [c.strip() for c in calls if "--retire" in c] == ["exec -T audit_anchor python anchor.py --retire --force"]
+    done, calls = _make_with_stub(tmp_path, "volume", "fclean", "CONFIRM=yes", "RETIRE_FORCE=yes", rc=3)
+    assert done.returncode != 0      # the stub also fails the offline retire
+    assert "RETIRE_FORCE=yes -> offline forced" in done.stdout
+    assert [c.strip() for c in calls if "--retire" in c] == [
+        "run --rm --no-build audit_anchor python anchor.py --retire --force",
+        "run --rm --no-deps --no-build audit_anchor python anchor.py --retire --offline"]
+    assert not any(c.startswith("down") for c in calls)

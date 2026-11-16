@@ -3,3 +3,5 @@ secrets/
 acme-webroot/
 .env
 .venv*/
+audit_anchors*/
+.env.e6
