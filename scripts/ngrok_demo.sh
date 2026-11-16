@@ -12,6 +12,9 @@
 # The settings go to `make start` through the environment, which beats .env
 # for init_secrets.sh (env_or_dotenv) and for Compose interpolation; .env is
 # not edited. COMPOSE, MAKE and PYTHON come from the Makefile.
+# Exit codes: 0 done (or ngrok closed with Ctrl+C), 1 a configuration error
+# (tls_fail: domain, ngrok, ports, the address in the containers), 2 usage;
+# otherwise ngrok's own code. make ngrok itself reports 2 for any failure.
 set -eu
 umask 077
 cd "$(dirname "$0")/.."

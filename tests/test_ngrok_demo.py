@@ -116,6 +116,15 @@ class Demo:
         assert FAKE_TOKEN not in done.stdout + done.stderr
         return done
 
+    def script(self, mode: str, **env: str) -> subprocess.CompletedProcess:
+        """scripts/ngrok_demo.sh itself, as the Makefile calls it: its own exit code."""
+        done = subprocess.run(["./scripts/ngrok_demo.sh", mode], cwd=self.root,
+                              env={**self.env, "COMPOSE": str(self.compose), "MAKE": MAKE,
+                                   "PYTHON": "python3", **env},
+                              capture_output=True, text=True, timeout=120)
+        assert FAKE_TOKEN not in done.stdout + done.stderr
+        return done
+
     def compose_calls(self) -> list[dict]:
         if not self.calls.exists():
             return []
@@ -291,20 +300,30 @@ def test_sudo_dropping_the_environment_stops_before_ngrok(tmp_path):
     demo = Demo(tmp_path)
     demo.dotenv(NGROK_DOMAIN=DOMAIN, **STAND)
     done = demo.make("ngrok", FAKE_SUDO="1")
-    assert done.returncode != 0
+    assert done.returncode == 2      # make's own code for a failed recipe
     err = done.stderr
     assert "the api container uses PUBLIC_BASE_URL=https://localhost:8452, not https://" + DOMAIN in err
     assert "ngrok not started" in err and "sudo -E" in err and "without sudo" in err
     assert not _ngrok_started(demo)
     assert "Site:" not in done.stdout
+    # the script: 1, like every other configuration error (tls_fail); 2 is only usage
+    script = demo.script("on", FAKE_SUDO="1")
+    assert script.returncode == 1, script.stderr
+    assert "ngrok not started" in script.stderr
+    assert not _ngrok_started(demo)
+
+
+def test_ngrok_demo_usage_error_is_exit_2(tmp_path):
+    done = Demo(tmp_path).script("bogus")
+    assert done.returncode == 2 and "usage:" in done.stderr
 
 
 @pytest.mark.parametrize("stale", ["proxy", "api"])
 def test_one_container_on_the_old_address_stops_before_ngrok(tmp_path, stale):
     demo = Demo(tmp_path)
     demo.dotenv(NGROK_DOMAIN=DOMAIN, **STAND)
-    done = demo.make("ngrok", FAKE_STALE_SERVICES=stale)
-    assert done.returncode != 0 and f"the {stale} container uses PUBLIC_BASE_URL" in done.stderr
+    done = demo.script("on", FAKE_STALE_SERVICES=stale)
+    assert done.returncode == 1 and f"the {stale} container uses PUBLIC_BASE_URL" in done.stderr
     assert not _ngrok_started(demo)
 
 
@@ -312,8 +331,8 @@ def test_tunnel_flag_missing_in_the_proxy_stops_before_ngrok(tmp_path):
     demo = Demo(tmp_path)
     # the address reaches Compose through .env, the flag does not (stale proxy)
     demo.dotenv(NGROK_DOMAIN=DOMAIN, **{**STAND, "PUBLIC_BASE_URL": f"https://{DOMAIN}"})
-    done = demo.make("ngrok", FAKE_SUDO="1")
-    assert done.returncode != 0 and "CLINIC_PUBLIC_TUNNEL=0, not 1" in done.stderr
+    done = demo.script("on", FAKE_SUDO="1")
+    assert done.returncode == 1 and "CLINIC_PUBLIC_TUNNEL=0, not 1" in done.stderr
     assert not _ngrok_started(demo)
 
 
