@@ -14,12 +14,12 @@ TEST_FILES ?= tests/test_stage4.py tests/test_rls_boundary.py tests/test_secrets
 	tests/test_field_encryption.py tests/test_ui_security.py tests/test_ui_fixes.py \
 	tests/test_audit_fixes.py tests/test_session.py tests/test_network.py \
 	tests/test_r2_fixes.py tests/test_ux_filters.py tests/test_hardening.py \
-	tests/test_polish.py tests/test_tls.py
+	tests/test_polish.py tests/test_tls.py tests/test_ngrok_demo.py
 PYTEST_ARGS ?= -q
 CONFIRM ?=
 
 .DEFAULT_GOAL := help
-.PHONY: help start stop restart clean reset fclean logs ps test tls-check
+.PHONY: help start stop restart clean reset fclean logs ps test tls-check ngrok ngrok-off
 
 # Anonymous volumes mounted by this project's containers (the postgres image
 # declares one on the one-shot migrate container). "down -v" misses them once
@@ -84,6 +84,8 @@ help:
 	@echo "  logs     follow the logs of all services"
 	@echo "  ps       list the containers"
 	@echo "  tls-check check the proxy certificate, SAN, chain and ports as Compose will use them (read-only)"
+	@echo "  ngrok    public demo: start with PUBLIC_BASE_URL=https://\$$NGROK_DOMAIN (tunnel mode), then run ngrok to the HTTPS port"
+	@echo "  ngrok-off start again with the .env address (tunnel off)"
 	@echo "  test     run the test suite (TEST_BASE, TEST_CA, TEST_MAILPIT, TEST_PROJECT, PYTHON, PYTEST_ARGS)"
 	@echo "  reset    WIPES THE DATABASE: down -v, then start (asks first; CONFIRM=yes skips)"
 	@echo "  fclean   WIPES THE DATABASE: down -v --rmi local --remove-orphans for this project only (asks first; CONFIRM=yes skips)"
@@ -123,3 +125,11 @@ test:
 # variables included), not from a grep of .env.
 tls-check:
 	$(COMPOSE) config --format json | $(PYTHON) scripts/tls_compose_env.py
+
+# Public demo through ngrok (README, Demo via ngrok). The tunnel settings go to
+# "make start" through the environment; .env is not edited.
+ngrok:
+	COMPOSE="$(COMPOSE)" MAKE="$(MAKE)" PYTHON="$(PYTHON)" ./scripts/ngrok_demo.sh on
+
+ngrok-off:
+	COMPOSE="$(COMPOSE)" MAKE="$(MAKE)" PYTHON="$(PYTHON)" ./scripts/ngrok_demo.sh off

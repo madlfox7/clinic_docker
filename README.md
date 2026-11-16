@@ -102,6 +102,19 @@ docker compose logs --tail=100 api
 
 Тестовые зависимости (`tests/requirements.txt`): pytest 9.0.3, httpx, cryptography; для тестов нужен Python ≥ 3.10 (`run_tests.sh` берёт системный `python3`, на Ubuntu 20.04 это 3.8 — установка pytest 9 не пройдёт).
 
+## Demo via ngrok
+
+Публичное демо локального стенда через туннель ngrok (только `CLINIC_TLS_MODE=local`).
+
+1. Установите ngrok и один раз сохраните свой authtoken: `ngrok config add-authtoken <token>`. Токен хранится в конфиге ngrok (или в `NGROK_AUTHTOKEN`), в репозитории и `.env` его нет, и скрипт его не печатает.
+2. В `.env` укажите зарезервированный домен: `NGROK_DOMAIN=outspoken-wiry-fabric.ngrok-free.dev` (он уже есть в `.env.example`).
+3. `make ngrok` проверяет ngrok, authtoken и домен, запускает `make start` с `PUBLIC_BASE_URL=https://$NGROK_DOMAIN` и `CLINIC_PUBLIC_TUNNEL=1` через окружение (`.env` не меняется) и открывает туннель на HTTPS-порт стенда (`CLINIC_PROXY_TLS_PORT`) с проверкой сертификата по `secrets/tls/ca.crt`. Ссылки в письмах и 308 с HTTP ведут на адрес туннеля.
+4. Ctrl+C закрывает туннель, стенд продолжает работать со ссылками на туннель. `make ngrok-off` перезапускает стенд с адресом из `.env` (localhost).
+
+При первом заходе ngrok показывает свою страницу-предупреждение, нажмите «Visit Site». За ngrok все посетители приходят с одного адреса, поэтому лимиты входа и регистрации по источнику общие для всех. Mailpit через туннель не открывается: открывайте его по `http://127.0.0.1:<порт Mailpit>`, не через `localhost` (на `localhost` браузер после HTTPS-стенда включает HSTS).
+
+**Внимание:** пока туннель открыт, сайт доступен всем, у кого есть ссылка. Дополнительную защиту туннеля (пароль ngrok, OAuth, список IP) решено не ставить. Закрывайте туннель и выполняйте `make ngrok-off` сразу после демо.
+
 current tree:
 
 ├── README.md
