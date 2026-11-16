@@ -1,0 +1,41 @@
+[2026-11-16 19:10:37 +04] E6 start seed=1794841837 anchors=./audit_anchors_e6/20261116-1910 ports={'http': 8086, 'https': 8456, 'mail_ui': 8030, 'smtp': 1030}
+[2026-11-16 19:10:50 +04] stand up, head chain=e2a68d58-5b14-4b6c-924c-406aa8bcd8d9 rows=0
+[2026-11-16 19:10:51 +04] first --once: OK anchored chain=e2a68d58-5b14-4b6c-924c-406aa8bcd8d9 seq=0
+[2026-11-16 19:10:52 +04] control: retire rc=0 retired chain=e2a68d58-5b14-4b6c-924c-406aa8bcd8d9 seq=0
+[2026-11-16 19:10:56 +04] control: once OK anchored chain=2a752c29-e169-46f4-a96a-808243e70042 seq=0
+[2026-11-16 19:10:56 +04] control: registry=['open', 'retire', 'open'] health=healthy verify rc=0 ['OK chain=2a752c29-e169-46f4-a96a-808243e70042 rows=0 anchors=1 last_anchor_age=0 retired_forced=0 retired_offline=0'] ok=True
+[2026-11-16 19:11:13 +04] generated {'http_login': 40, 'http_failed': 15, 'sql': 425, 'rows': 520}
+[2026-11-16 19:11:13 +04] anchor after generation: OK anchored chain=2a752c29-e169-46f4-a96a-808243e70042 seq=520
+[2026-11-16 19:11:15 +04] pytest e6-only (fresh volume, 20 parallel --once next to the loop): ['2 passed, 90 deselected in 1.31s']
+[2026-11-16 19:11:15 +04] control run without tampering: rc=0 ['OK chain=2a752c29-e169-46f4-a96a-808243e70042 rows=520 anchors=22 last_anchor_age=0 retired_forced=0 retired_offline=0']
+[2026-11-16 19:11:16 +04] tamper  1 update    created_at               seq=124 -> rc=1 BROKEN seq=124 id=124 type=row_hash | expected type=row_hash seq=124 found=True | restore verify rc=0 modes=A [OK anchored chain=2a752c29-e169-46f4-a96a-808243e70042 seq=520]
+[2026-11-16 19:11:18 +04] tamper  2 update    action                   seq=501 -> rc=1 BROKEN seq=501 id=501 type=row_hash | expected type=row_hash seq=501 found=True | restore verify rc=0 modes=A [OK anchored chain=2a752c29-e169-46f4-a96a-808243e70042 seq=520]
+[2026-11-16 19:11:19 +04] tamper  3 update    actor_user_id            seq=135 -> rc=1 BROKEN seq=135 id=135 type=row_hash | expected type=row_hash seq=135 found=True | restore verify rc=0 modes=A [OK anchored chain=2a752c29-e169-46f4-a96a-808243e70042 seq=520]
+[2026-11-16 19:11:20 +04] tamper  4 update    reason NULL->value       seq=502 -> rc=1 BROKEN seq=502 id=502 type=row_hash | expected type=row_hash seq=502 found=True | restore verify rc=0 modes=A [OK anchored chain=2a752c29-e169-46f4-a96a-808243e70042 seq=520]
+[2026-11-16 19:11:22 +04] tamper  5 update    reason value->NULL       seq=444 -> rc=1 BROKEN seq=444 id=444 type=row_hash | expected type=row_hash seq=444 found=True | restore verify rc=0 modes=A [OK anchored chain=2a752c29-e169-46f4-a96a-808243e70042 seq=520]
+[2026-11-16 19:11:23 +04] tamper  6 update    source NULL->value       seq=135 -> rc=1 BROKEN seq=135 id=135 type=row_hash | expected type=row_hash seq=135 found=True | restore verify rc=0 modes=A [OK anchored chain=2a752c29-e169-46f4-a96a-808243e70042 seq=520]
+[2026-11-16 19:11:24 +04] tamper  7 update    target_id value->NULL    seq=55 -> rc=1 BROKEN seq=55 id=55 type=row_hash | expected type=row_hash seq=55 found=True | restore verify rc=0 modes=A [OK anchored chain=2a752c29-e169-46f4-a96a-808243e70042 seq=520]
+[2026-11-16 19:11:26 +04] tamper  8 update    target_id NULL->value    seq=161 -> rc=1 BROKEN seq=161 id=161 type=row_hash | expected type=row_hash seq=161 found=True | restore verify rc=0 modes=A [OK anchored chain=2a752c29-e169-46f4-a96a-808243e70042 seq=520]
+[2026-11-16 19:11:27 +04] tamper  9 delete    middle row               seq=353 -> rc=1 BROKEN seq=353 type=gap next=354 | expected type=gap seq=353 found=True | restore verify rc=0 modes=A [OK anchored chain=2a752c29-e169-46f4-a96a-808243e70042 seq=520]
+[2026-11-16 19:11:29 +04] tamper 10 delete    middle row               seq=170 -> rc=1 BROKEN seq=170 type=gap next=171 | expected type=gap seq=170 found=True | restore verify rc=0 modes=A [OK anchored chain=2a752c29-e169-46f4-a96a-808243e70042 seq=520]
+[2026-11-16 19:11:30 +04] tamper 11 delete    middle row               seq=250 -> rc=1 BROKEN seq=250 type=gap next=251 | expected type=gap seq=250 found=True | restore verify rc=0 modes=A [OK anchored chain=2a752c29-e169-46f4-a96a-808243e70042 seq=520]
+[2026-11-16 19:11:31 +04] tamper 12 delete    middle row               seq=193 -> rc=1 BROKEN seq=193 type=gap next=194 | expected type=gap seq=193 found=True | restore verify rc=0 modes=A [OK anchored chain=2a752c29-e169-46f4-a96a-808243e70042 seq=520]
+[2026-11-16 19:11:33 +04] tamper 13 delete    tail 1 rows              seq=520 -> rc=1 BROKEN seq=520 type=truncated anchored=520 | expected type=truncated seq=520 found=True | restore verify rc=0 modes=A [OK anchored chain=2a752c29-e169-46f4-a96a-808243e70042 seq=520]
+[2026-11-16 19:11:34 +04] tamper 14 delete    tail 17 rows             seq=504 -> rc=1 BROKEN seq=504 type=truncated anchored=520 | expected type=truncated seq=504 found=True | restore verify rc=0 modes=A [OK anchored chain=2a752c29-e169-46f4-a96a-808243e70042 seq=520]
+[2026-11-16 19:11:35 +04] tamper 15 delete    tail 1 rows + head       seq=520 -> rc=1 BROKEN seq=520 type=truncated anchored=520 | expected type=truncated seq=520 found=True | restore verify rc=0 modes=A [OK anchored chain=2a752c29-e169-46f4-a96a-808243e70042 seq=520]
+[2026-11-16 19:11:37 +04] tamper 16 delete    tail 15 rows + head      seq=506 -> rc=1 BROKEN seq=506 type=truncated anchored=520 | expected type=truncated seq=506 found=True | restore verify rc=0 modes=A [OK anchored chain=2a752c29-e169-46f4-a96a-808243e70042 seq=520]
+[2026-11-16 19:11:38 +04] tamper 17 recompute SHA suffix + head        seq=228 -> rc=1 BROKEN seq=520 id=520 type=anchor_mismatch | expected type=anchor_mismatch seq=520 found=True | restore verify rc=0 modes=A [OK anchored chain=2a752c29-e169-46f4-a96a-808243e70042 seq=520]
+[2026-11-16 19:11:40 +04] tamper 18 recompute SHA suffix + head        seq=485 -> rc=1 BROKEN seq=520 id=520 type=anchor_mismatch | expected type=anchor_mismatch seq=520 found=True | restore verify rc=0 modes=A [OK anchored chain=2a752c29-e169-46f4-a96a-808243e70042 seq=520]
+[2026-11-16 19:11:41 +04] tamper 19 truncate  TRUNCATE (triggers off)  seq=1 -> rc=1 BROKEN seq=1 type=truncated anchored=520 | expected type=truncated seq=1 found=True | restore verify rc=0 modes=A [OK anchored chain=2a752c29-e169-46f4-a96a-808243e70042 seq=520]
+[2026-11-16 19:11:43 +04] tamper 20 swap      seq 493<->509            seq=493 -> rc=1 BROKEN seq=493 id=509 type=prev_hash | expected type=prev_hash seq=493 found=True | restore verify rc=0 modes=A [OK anchored chain=2a752c29-e169-46f4-a96a-808243e70042 seq=520]
+[2026-11-16 19:11:43 +04] tamperings found 20/20, restored 20/20
+[2026-11-16 19:14:56 +04] perf {'rows': 100000, 'insert_s': 190.3, 'insert_rows': 99480, 'verify': 'PERF rc=0 seconds=1.04 maxrss_mb=29.1'}
+[2026-11-16 19:14:58 +04] Б6: rc=1 BROKEN type=trigger_mode name=zz_audit_chain mode=O -> migrate -> rc=0 ['OK chain=2a752c29-e169-46f4-a96a-808243e70042 rows=100000 anchors=47 last_anchor_age=3 retired_forced=0 retired_offline=0']
+[2026-11-16 19:15:02 +04] replaced: once anchored chain=0fe09a23-eb61-4da0-8645-f06d1169d4dc seq=0 (chain_replaced kind=new: needs a human)
+[2026-11-16 19:16:23 +04] replaced(new): registry=switch new health=unhealthy rc=1 BROKEN type=chain_replaced kind=new old=2a752c29-e169-46f4-a96a-808243e70042 new=0fe09a23-eb61-4da0-8645-f06d1169d4dc
+[2026-11-16 19:16:24 +04] reused: once anchored chain=2a752c29-e169-46f4-a96a-808243e70042 seq=100000 (chain_replaced kind=reused: needs a human)
+[2026-11-16 19:16:25 +04] replaced(reused): registry=switch reused rc=1 BROKEN type=chain_replaced kind=new old=2a752c29-e169-46f4-a96a-808243e70042 new=0fe09a23-eb61-4da0-8645-f06d1169d4dc
+[2026-11-16 19:16:25 +04] final verify --strict: rc=1 ['BROKEN type=chain_replaced kind=new old=2a752c29-e169-46f4-a96a-808243e70042 new=0fe09a23-eb61-4da0-8645-f06d1169d4dc']
+[2026-11-16 19:16:26 +04] pytest e6-only (missing head stops migrate): ['1 passed, 91 deselected in 1.06s']
+[2026-11-16 19:16:37 +04] stand e6 removed (down -v); anchor directory kept
+[2026-11-16 19:16:37 +04] E6 done ok=True

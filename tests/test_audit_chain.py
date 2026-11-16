@@ -1139,3 +1139,30 @@ def test_forced_retire_passes_force_and_falls_back_offline(tmp_path):
         "run --rm --no-build audit_anchor python anchor.py --retire --force",
         "run --rm --no-deps --no-build audit_anchor python anchor.py --retire --offline"]
     assert not any(c.startswith("down") for c in calls)
+
+
+# --- E6 guard (§10.1 П-3c.2): never the main anchor directory or another stand -------
+
+def _e6_module():
+    sys.path.insert(0, str(ROOT / "experiments"))
+    import e6_tamper
+    return e6_tamper
+
+
+@pytest.mark.parametrize("anchor, port, ok", [
+    ("./audit_anchors_e6/20261116-1910", 8456, True),
+    ("./audit_anchors", 8456, False),
+    ("./audit_anchors/inner", 8456, False),
+    ("", 8456, False),
+    ("./audit_anchors_e6/x", 8452, False),
+    ("./audit_anchors_e6/x", 8453, False),
+])
+def test_unit_e6_guard_refuses_the_main_anchor_dir_and_other_stands(tmp_path, anchor, port, ok):
+    e6 = _e6_module()
+    env = tmp_path / ".env.e6"
+    env.write_text(f"CLINIC_AUDIT_ANCHOR_DIR={anchor}\nCLINIC_PROXY_PORT=8086\nCLINIC_PROXY_TLS_PORT={port}\n")
+    if ok:
+        e6.guard(env)
+    else:
+        with pytest.raises(SystemExit):
+            e6.guard(env)

@@ -1,0 +1,354 @@
+{
+  "seed": 1794841837,
+  "stamp": "20261116-1910",
+  "anchor_dir": "./audit_anchors_e6/20261116-1910",
+  "ports": {
+    "http": 8086,
+    "https": 8456,
+    "mail_ui": 8030,
+    "smtp": 1030
+  },
+  "control": {
+    "old": "e2a68d58-5b14-4b6c-924c-406aa8bcd8d9",
+    "new": "2a752c29-e169-46f4-a96a-808243e70042",
+    "registry": [
+      "open",
+      "retire",
+      "open"
+    ],
+    "health": "healthy",
+    "verify_rc": 0,
+    "verify": [
+      "OK chain=2a752c29-e169-46f4-a96a-808243e70042 rows=0 anchors=1 last_anchor_age=0 retired_forced=0 retired_offline=0"
+    ],
+    "ok": true
+  },
+  "events": {
+    "http_login": 40,
+    "http_failed": 15,
+    "sql": 425,
+    "rows": 520
+  },
+  "pytest_e6": [
+    "2 passed, 90 deselected in 1.31s"
+  ],
+  "clean_verify": [
+    "OK chain=2a752c29-e169-46f4-a96a-808243e70042 rows=520 anchors=22 last_anchor_age=0 retired_forced=0 retired_offline=0"
+  ],
+  "tamperings": [
+    {
+      "kind": "update",
+      "field": "created_at",
+      "seq": 124,
+      "expect_type": "row_hash",
+      "expect_seq": 124,
+      "number": 1,
+      "rc": 1,
+      "got_type": "row_hash",
+      "got_seq": 124,
+      "got_id": "124",
+      "found": true,
+      "restored": true
+    },
+    {
+      "kind": "update",
+      "field": "action",
+      "seq": 501,
+      "expect_type": "row_hash",
+      "expect_seq": 501,
+      "number": 2,
+      "rc": 1,
+      "got_type": "row_hash",
+      "got_seq": 501,
+      "got_id": "501",
+      "found": true,
+      "restored": true
+    },
+    {
+      "kind": "update",
+      "field": "actor_user_id",
+      "seq": 135,
+      "expect_type": "row_hash",
+      "expect_seq": 135,
+      "number": 3,
+      "rc": 1,
+      "got_type": "row_hash",
+      "got_seq": 135,
+      "got_id": "135",
+      "found": true,
+      "restored": true
+    },
+    {
+      "kind": "update",
+      "field": "reason NULL->value",
+      "seq": 502,
+      "expect_type": "row_hash",
+      "expect_seq": 502,
+      "number": 4,
+      "rc": 1,
+      "got_type": "row_hash",
+      "got_seq": 502,
+      "got_id": "502",
+      "found": true,
+      "restored": true
+    },
+    {
+      "kind": "update",
+      "field": "reason value->NULL",
+      "seq": 444,
+      "expect_type": "row_hash",
+      "expect_seq": 444,
+      "number": 5,
+      "rc": 1,
+      "got_type": "row_hash",
+      "got_seq": 444,
+      "got_id": "444",
+      "found": true,
+      "restored": true
+    },
+    {
+      "kind": "update",
+      "field": "source NULL->value",
+      "seq": 135,
+      "expect_type": "row_hash",
+      "expect_seq": 135,
+      "number": 6,
+      "rc": 1,
+      "got_type": "row_hash",
+      "got_seq": 135,
+      "got_id": "135",
+      "found": true,
+      "restored": true
+    },
+    {
+      "kind": "update",
+      "field": "target_id value->NULL",
+      "seq": 55,
+      "expect_type": "row_hash",
+      "expect_seq": 55,
+      "number": 7,
+      "rc": 1,
+      "got_type": "row_hash",
+      "got_seq": 55,
+      "got_id": "55",
+      "found": true,
+      "restored": true
+    },
+    {
+      "kind": "update",
+      "field": "target_id NULL->value",
+      "seq": 161,
+      "expect_type": "row_hash",
+      "expect_seq": 161,
+      "number": 8,
+      "rc": 1,
+      "got_type": "row_hash",
+      "got_seq": 161,
+      "got_id": "161",
+      "found": true,
+      "restored": true
+    },
+    {
+      "kind": "delete",
+      "field": "middle row",
+      "seq": 353,
+      "expect_type": "gap",
+      "expect_seq": 353,
+      "number": 9,
+      "rc": 1,
+      "got_type": "gap",
+      "got_seq": 353,
+      "got_id": null,
+      "found": true,
+      "restored": true
+    },
+    {
+      "kind": "delete",
+      "field": "middle row",
+      "seq": 170,
+      "expect_type": "gap",
+      "expect_seq": 170,
+      "number": 10,
+      "rc": 1,
+      "got_type": "gap",
+      "got_seq": 170,
+      "got_id": null,
+      "found": true,
+      "restored": true
+    },
+    {
+      "kind": "delete",
+      "field": "middle row",
+      "seq": 250,
+      "expect_type": "gap",
+      "expect_seq": 250,
+      "number": 11,
+      "rc": 1,
+      "got_type": "gap",
+      "got_seq": 250,
+      "got_id": null,
+      "found": true,
+      "restored": true
+    },
+    {
+      "kind": "delete",
+      "field": "middle row",
+      "seq": 193,
+      "expect_type": "gap",
+      "expect_seq": 193,
+      "number": 12,
+      "rc": 1,
+      "got_type": "gap",
+      "got_seq": 193,
+      "got_id": null,
+      "found": true,
+      "restored": true
+    },
+    {
+      "kind": "delete",
+      "field": "tail 1 rows",
+      "seq": 520,
+      "expect_type": "truncated",
+      "expect_seq": 520,
+      "number": 13,
+      "rc": 1,
+      "got_type": "truncated",
+      "got_seq": 520,
+      "got_id": null,
+      "found": true,
+      "restored": true
+    },
+    {
+      "kind": "delete",
+      "field": "tail 17 rows",
+      "seq": 504,
+      "expect_type": "truncated",
+      "expect_seq": 504,
+      "number": 14,
+      "rc": 1,
+      "got_type": "truncated",
+      "got_seq": 504,
+      "got_id": null,
+      "found": true,
+      "restored": true
+    },
+    {
+      "kind": "delete",
+      "field": "tail 1 rows + head",
+      "seq": 520,
+      "expect_type": "truncated",
+      "expect_seq": 520,
+      "number": 15,
+      "rc": 1,
+      "got_type": "truncated",
+      "got_seq": 520,
+      "got_id": null,
+      "found": true,
+      "restored": true
+    },
+    {
+      "kind": "delete",
+      "field": "tail 15 rows + head",
+      "seq": 506,
+      "expect_type": "truncated",
+      "expect_seq": 506,
+      "number": 16,
+      "rc": 1,
+      "got_type": "truncated",
+      "got_seq": 506,
+      "got_id": null,
+      "found": true,
+      "restored": true
+    },
+    {
+      "kind": "recompute",
+      "field": "SHA suffix + head",
+      "seq": 228,
+      "expect_type": "anchor_mismatch",
+      "expect_seq": 520,
+      "number": 17,
+      "rc": 1,
+      "got_type": "anchor_mismatch",
+      "got_seq": 520,
+      "got_id": "520",
+      "found": true,
+      "restored": true
+    },
+    {
+      "kind": "recompute",
+      "field": "SHA suffix + head",
+      "seq": 485,
+      "expect_type": "anchor_mismatch",
+      "expect_seq": 520,
+      "number": 18,
+      "rc": 1,
+      "got_type": "anchor_mismatch",
+      "got_seq": 520,
+      "got_id": "520",
+      "found": true,
+      "restored": true
+    },
+    {
+      "kind": "truncate",
+      "field": "TRUNCATE (triggers off)",
+      "seq": 1,
+      "expect_type": "truncated",
+      "expect_seq": 1,
+      "number": 19,
+      "rc": 1,
+      "got_type": "truncated",
+      "got_seq": 1,
+      "got_id": null,
+      "found": true,
+      "restored": true
+    },
+    {
+      "kind": "swap",
+      "field": "seq 493<->509",
+      "seq": 493,
+      "expect_type": "prev_hash",
+      "expect_seq": 493,
+      "number": 20,
+      "rc": 1,
+      "got_type": "prev_hash",
+      "got_seq": 493,
+      "got_id": "509",
+      "found": true,
+      "restored": true
+    }
+  ],
+  "perf": {
+    "rows": 100000,
+    "insert_s": 190.3,
+    "insert_rows": 99480,
+    "verify": "PERF rc=0 seconds=1.04 maxrss_mb=29.1"
+  },
+  "b6": {
+    "rc": 1,
+    "line": "BROKEN type=trigger_mode name=zz_audit_chain mode=O",
+    "after_migrate_rc": 0,
+    "after": [
+      "OK chain=2a752c29-e169-46f4-a96a-808243e70042 rows=100000 anchors=47 last_anchor_age=3 retired_forced=0 retired_offline=0"
+    ]
+  },
+  "replaced_new": {
+    "registry": "switch new",
+    "health": "unhealthy",
+    "rc": 1,
+    "line": "BROKEN type=chain_replaced kind=new old=2a752c29-e169-46f4-a96a-808243e70042 new=0fe09a23-eb61-4da0-8645-f06d1169d4dc"
+  },
+  "replaced_reused": {
+    "registry": "switch reused",
+    "rc": 1,
+    "line": "BROKEN type=chain_replaced kind=new old=2a752c29-e169-46f4-a96a-808243e70042 new=0fe09a23-eb61-4da0-8645-f06d1169d4dc"
+  },
+  "strict": {
+    "rc": 1,
+    "line": [
+      "BROKEN type=chain_replaced kind=new old=2a752c29-e169-46f4-a96a-808243e70042 new=0fe09a23-eb61-4da0-8645-f06d1169d4dc"
+    ]
+  },
+  "pytest_missing_head": [
+    "1 passed, 91 deselected in 1.06s"
+  ]
+}

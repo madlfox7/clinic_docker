@@ -1,0 +1,9 @@
+# Disposable stand for experiment E6 only (plan 17 §10.1):
+#   docker compose --env-file .env.e6 -p e6 -f docker-compose.yml -f docker-compose.e6.yml ...
+# experiments/e6_tamper.py builds every command itself. The explicit -f list
+# keeps a local docker-compose.override.yml out of this stand.
+services:
+  mailpit:
+    ports: !override
+      - "127.0.0.1:8030:8025"
+      - "127.0.0.1:1030:1025"
