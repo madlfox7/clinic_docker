@@ -1130,6 +1130,74 @@ BEGIN
 END
 $$;
 
+-- Append-only journal (plan 17 §7.1, A3). Application roles already lack
+-- UPDATE, DELETE and TRUNCATE (rls.sql, 42501 at the privilege check); these
+-- triggers stop the superuser and table owner too. Only an explicit DISABLE
+-- TRIGGER (a logged DDL statement) gets past them, and verify_audit reports
+-- any of the six journal triggers that is missing or not in mode 'A'.
+CREATE OR REPLACE FUNCTION public.audit_append_only()
+RETURNS trigger
+LANGUAGE plpgsql
+SET search_path = pg_catalog, public, pg_temp
+AS $function$
+BEGIN
+  RAISE EXCEPTION '% is append-only', TG_TABLE_NAME USING ERRCODE = '42501';
+END;
+$function$;
+REVOKE ALL ON FUNCTION public.audit_append_only() FROM PUBLIC;
+
+-- The head moves only from inside zz_audit_chain: a trigger on the head
+-- itself already runs at depth 1 for a direct UPDATE, and at depth 2 when the
+-- UPDATE comes from the chain trigger. Even then it may only step one row
+-- forward on the same chain (P2).
+CREATE OR REPLACE FUNCTION public.audit_chain_head_guard()
+RETURNS trigger
+LANGUAGE plpgsql
+SET search_path = pg_catalog, public, pg_temp
+AS $function$
+BEGIN
+  IF pg_trigger_depth() <= 1
+     OR NEW.id IS DISTINCT FROM OLD.id
+     OR NEW.last_seq IS DISTINCT FROM OLD.last_seq + 1
+     OR NEW.chain_id IS DISTINCT FROM OLD.chain_id
+     OR NEW.genesis_at IS DISTINCT FROM OLD.genesis_at
+     OR NEW.genesis_rows IS DISTINCT FROM OLD.genesis_rows THEN
+    RAISE EXCEPTION 'audit_chain_head is updated only by the chain trigger'
+      USING ERRCODE = '42501';
+  END IF;
+  RETURN NEW;
+END;
+$function$;
+REVOKE ALL ON FUNCTION public.audit_chain_head_guard() FROM PUBLIC;
+
+DO $$
+DECLARE
+  spec record;
+BEGIN
+  FOR spec IN
+    SELECT * FROM (VALUES
+      ('public.audit_events', 'audit_events_no_update_delete',
+       'BEFORE UPDATE OR DELETE ON public.audit_events FOR EACH ROW EXECUTE FUNCTION public.audit_append_only()'),
+      ('public.audit_events', 'audit_events_no_truncate',
+       'BEFORE TRUNCATE ON public.audit_events FOR EACH STATEMENT EXECUTE FUNCTION public.audit_append_only()'),
+      ('public.audit_chain_head', 'audit_chain_head_guard',
+       'BEFORE UPDATE ON public.audit_chain_head FOR EACH ROW EXECUTE FUNCTION public.audit_chain_head_guard()'),
+      ('public.audit_chain_head', 'audit_chain_head_no_delete',
+       'BEFORE DELETE ON public.audit_chain_head FOR EACH ROW EXECUTE FUNCTION public.audit_append_only()'),
+      ('public.audit_chain_head', 'audit_chain_head_no_truncate',
+       'BEFORE TRUNCATE ON public.audit_chain_head FOR EACH STATEMENT EXECUTE FUNCTION public.audit_append_only()')
+    ) AS v(rel, name, body)
+  LOOP
+    IF NOT EXISTS (
+      SELECT 1 FROM pg_trigger
+      WHERE tgrelid = spec.rel::regclass AND tgname = spec.name AND NOT tgisinternal
+    ) THEN
+      EXECUTE format('CREATE TRIGGER %I %s', spec.name, spec.body);
+    END IF;
+  END LOOP;
+END
+$$;
+
 -- BEGIN audit_trigger_mode
 -- The journal triggers fire ALWAYS, also with session_replication_role =
 -- replica. DISABLE + ENABLE TRIGGER leaves mode 'O', so every migrate puts

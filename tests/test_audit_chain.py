@@ -435,3 +435,111 @@ def test_a_login_gets_the_next_seq_and_a_valid_row_hash():
     assert logins and logins[-1]["seq"] == _head()["last_seq"]
     _check_links(rows)
 
+
+# --- §7.1: append-only journal and head ---------------------------------------
+
+JOURNAL_TRIGGERS = {
+    "audit_events": (
+        "zz_audit_chain",
+        "audit_events_no_update_delete",
+        "audit_events_no_truncate",
+    ),
+    "audit_chain_head": ("audit_chain_head_guard", "audit_chain_head_no_delete", "audit_chain_head_no_truncate"),
+}
+APP_ROLES = ("clinic_api", "app_admin", "app_patient", "app_registrar")
+
+
+def _trigger_modes() -> dict:
+    return dict(line.split("|") for line in _psql(
+        "SELECT tgname, tgenabled::text FROM pg_trigger WHERE tgrelid IN "
+        "('public.audit_events'::regclass, 'public.audit_chain_head'::regclass) AND NOT tgisinternal"))
+
+
+def _row_one() -> str:
+    return _one(f"SELECT {_ROW_JSON}::text FROM audit_events WHERE seq = 1")
+
+
+@pytest.mark.parametrize("role", APP_ROLES)
+def test_application_roles_cannot_change_or_insert_journal_rows(role):
+    user = _user_id(ADMIN)
+    for sql in ("UPDATE audit_events SET action = 'x' WHERE seq = 1",  # expects refusal
+                "DELETE FROM audit_events WHERE seq = 1",  # expects refusal
+                "TRUNCATE audit_events",  # expects refusal
+                "INSERT INTO audit_events (actor_user_id, actor_role, action, target_type) "
+                "VALUES (1, 'admin', 'x', 'y')",
+                "UPDATE audit_chain_head SET last_seq = 0",
+                "DELETE FROM audit_chain_head"):
+        done = _psql_try(f"BEGIN; SET LOCAL ROLE {role}; "
+                         f"SELECT set_config('app.user_id', '{user}', true); {sql}; ROLLBACK;")
+        assert done.returncode != 0 and "permission denied" in done.stderr, (role, sql, done.stderr)
+
+
+def test_superuser_cannot_update_delete_or_truncate_the_journal():
+    before = _row_one()
+    for sql in ("UPDATE audit_events SET action = 'x' WHERE seq = 1",  # expects refusal
+                "DELETE FROM audit_events WHERE seq = 1",  # expects refusal
+                "TRUNCATE audit_events"):  # expects refusal
+        done = _psql_try(sql)
+        assert done.returncode != 0 and "audit_events is append-only" in done.stderr, (sql, done.stderr)
+    assert _row_one() == before
+
+
+def test_head_moves_only_from_the_chain_trigger():
+    head = _head()
+    for sql in ("UPDATE audit_chain_head SET last_seq = 0",
+                f"UPDATE audit_chain_head SET last_seq = {head['last_seq'] + 1}",
+                "DELETE FROM audit_chain_head", "TRUNCATE audit_chain_head"):
+        done = _psql_try(sql)
+        assert done.returncode != 0, sql
+        assert "only by the chain trigger" in done.stderr or "audit_chain_head is append-only" in done.stderr, done.stderr
+    assert _head() == head
+    mark = _mark()
+    _insert_admin_event()
+    assert _head()["last_seq"] == mark + 1
+    _check_links(_rows(f"seq >= {mark}"))
+
+
+@pytest.mark.parametrize("change", ["last_seq = last_seq + 2", "chain_id = gen_random_uuid()",
+                                    "genesis_rows = genesis_rows + 1", "genesis_at = now() - interval '1 day'"])
+def test_head_guard_checks_the_step_even_at_depth_two(change):
+    """P2: a wrapper trigger (depth 2) that moves the head wrongly is refused (rolled back)."""
+    done = _psql_try(
+        "BEGIN; CREATE TABLE pg_temp.p2 (x int); "
+        "CREATE FUNCTION pg_temp.p2_wrap() RETURNS trigger LANGUAGE plpgsql AS "
+        f"$f$ BEGIN UPDATE public.audit_chain_head SET {change}; RETURN NEW; END $f$; "
+        "CREATE TRIGGER p2_wrap BEFORE INSERT ON pg_temp.p2 FOR EACH ROW EXECUTE FUNCTION pg_temp.p2_wrap(); "
+        "INSERT INTO pg_temp.p2 VALUES (1); ROLLBACK;"
+    )
+    assert done.returncode != 0 and "only by the chain trigger" in done.stderr, done.stderr
+
+
+def test_all_six_journal_triggers_fire_always():
+    modes = _trigger_modes()
+    for names in JOURNAL_TRIGGERS.values():
+        for name in names:
+            assert modes.get(name) == "A", (name, modes)
+
+
+def test_replica_role_does_not_switch_the_triggers_off():
+    done = _psql_try("BEGIN; SET LOCAL session_replication_role = replica; "
+                     "UPDATE audit_events SET action = 'x' WHERE seq = 1; ROLLBACK;")  # expects refusal
+    assert done.returncode != 0 and "append-only" in done.stderr, done.stderr
+
+
+def test_migrate_block_puts_mode_a_back_after_disable_and_enable():
+    text = (ROOT / "db" / "init.sql").read_text()
+    start = text.index("-- BEGIN audit_trigger_mode")
+    block = text[start:text.index("-- END audit_trigger_mode", start)]
+    probe = ("SELECT 'mode=' || tgenabled::text FROM pg_trigger "
+             "WHERE tgrelid = 'public.audit_events'::regclass AND tgname = 'zz_audit_chain'")
+    done = _psql_try(
+        "BEGIN; ALTER TABLE audit_events DISABLE TRIGGER zz_audit_chain; "
+        "ALTER TABLE audit_events ENABLE TRIGGER zz_audit_chain; "
+        "DO $chk$ BEGIN IF (SELECT tgenabled FROM pg_trigger WHERE tgname = 'zz_audit_chain') <> 'O' "
+        "THEN RAISE EXCEPTION 'expected mode O'; END IF; END $chk$; "
+        f"{block}\n"
+        "DO $chk$ BEGIN IF (SELECT tgenabled FROM pg_trigger WHERE tgname = 'zz_audit_chain') <> 'A' "
+        "THEN RAISE EXCEPTION 'expected mode A'; END IF; END $chk$; ROLLBACK;"
+    )
+    assert done.returncode == 0, done.stderr
+    assert _one(probe) == "mode=A"
