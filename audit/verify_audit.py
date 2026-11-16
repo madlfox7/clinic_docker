@@ -36,16 +36,28 @@ def check_registry(directory: Path, key: bytes, head: dict, source):
     entries, _ = cl.parse_registry(registry, key)
     warnings, forced, offline = [], 0, 0
     opened, seen_before = {}, set()
+    # A switch stays BROKEN for good; the registry is still read to the end so
+    # that a later forced retire of the replaced chain is shown as a WARN too.
+    switched: cl.Broken | None = None
+
+    def broken(kind: str, detail: str) -> cl.Broken:
+        if switched is not None:
+            switched.warnings = warnings
+            return switched
+        return cl.Broken(kind, detail=detail)
+
     for e in entries:
         if e.kind == "open":
             opened[e.chain_id] = opened.get(e.chain_id, 0) + 1
             if opened[e.chain_id] > 1 or e.chain_id in seen_before:
-                raise cl.Broken("chain_replaced", detail=f"kind=reused old=- new={e.chain_id}")
+                raise broken("chain_replaced", f"kind=reused old=- new={e.chain_id}")
             if seen_before and e.genesis_rows > 0:
-                raise cl.Broken("chain_replaced", detail=f"kind=new old=- new={e.chain_id} genesis_rows={e.genesis_rows}")
+                raise broken("chain_replaced", f"kind=new old=- new={e.chain_id} genesis_rows={e.genesis_rows}")
             seen_before.add(e.chain_id)
         elif e.kind == "switch":
-            raise cl.Broken("chain_replaced", detail=f"kind={e.switch_kind} old={e.old or '-'} new={e.new}")
+            if switched is None:
+                switched = cl.Broken("chain_replaced", detail=f"kind={e.switch_kind} old={e.old or '-'} new={e.new}")
+            seen_before.add(e.new)
         elif e.kind == "retire":
             seen_before.add(e.chain_id)
             if e.mode == "forced":
@@ -54,6 +66,8 @@ def check_registry(directory: Path, key: bytes, head: dict, source):
             elif e.mode == "offline":
                 offline += 1
                 warnings.append(f"WARN retire offline chain={e.chain_id}")
+    if switched is not None:
+        raise broken("chain_replaced", "")
     state = cl.registry_state(entries)
     for chain_id in opened:
         if not (directory / f"{chain_id}.log").exists():
@@ -95,6 +109,8 @@ def verify(source, directory: Path, key: bytes, strict: bool, copy: Path | None,
         if copy is not None:
             check_copy(directory, copy)
     except cl.Broken as broken:
+        for line in getattr(broken, "warnings", None) or []:
+            out(line)
         out(broken.line())
         return 1
     age = "-"

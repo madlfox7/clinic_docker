@@ -748,6 +748,54 @@ def test_unit_retire_of_a_broken_chain_refuses_unless_forced(tmp_path, capsys):
     assert anchor.cycle(d, KEY, FakeSource(rows=0)).ok
 
 
+def test_unit_retire_after_chain_replaced_needs_force(tmp_path, capsys):
+    """Securo 90f093f §2: a replaced chain is an incident; a plain retire (make
+    reset/fclean CONFIRM=yes) refuses with 2 and changes nothing; --force writes
+    forced chain_replaced@-, the switch line stays (verify: WARN + BROKEN)."""
+    d, old = _dir(tmp_path), FakeSource(rows=2)
+    assert anchor.cycle(d, KEY, old).ok
+    new = FakeSource(rows=1)
+    assert not anchor.cycle(d, KEY, new).ok
+    before = _snapshot(d)
+    assert anchor.retire(KEY, False, False, d, lambda: (new, lambda: None)) == 2
+    out = capsys.readouterr().out
+    assert f"BROKEN type=chain_replaced kind=new old={old.chain_id} new={new.chain_id}" in out
+    assert "RETIRE_FORCE=yes CONFIRM=yes" in out
+    assert _snapshot(d) == before
+    assert anchor.retire(KEY, True, False, d, lambda: (new, lambda: None)) == 0
+    assert "forced chain_replaced@-" in capsys.readouterr().out
+    assert _registry(d) == ["open:", "switch:new", "retire:forced"]
+    last = cl.parse_registry(d / cl.REGISTRY, KEY)[0][-1]
+    assert (last.chain_id, last.brk, last.last_seq) == (new.chain_id, "chain_replaced@-", new.head()["last_seq"])
+    # verify: the forced retire is a WARN, the switch stays BROKEN (1, also with --strict)
+    for strict in (False, True):
+        lines = []
+        assert verify_audit.verify(new, d, KEY, strict, None, 60, lines.append) == 1
+        assert lines[0] == f"WARN retire forced chain={new.chain_id} break=chain_replaced@-"
+        assert lines[-1].startswith("BROKEN type=chain_replaced kind=new")
+    # the next chain opens normally; verify stays red because of the switch
+    nxt = FakeSource(rows=0)
+    assert anchor.cycle(d, KEY, nxt).ok
+    assert verify_audit.verify(nxt, d, KEY, False, None, 60, [].append) == 1
+
+
+def test_unit_retire_after_chain_replaced_offline_and_retired_reused(tmp_path):
+    # --offline (no database volume left) is not blocked: nothing left to protect, logged as offline
+    d, old = _dir(tmp_path), FakeSource(rows=2)
+    assert anchor.cycle(d, KEY, old).ok
+    assert not anchor.cycle(d, KEY, FakeSource(rows=1)).ok
+    assert anchor.retire(KEY, False, True, d) == 0
+    assert _registry(d)[-1] == "retire:offline"
+    # retired_reused is a switch as well
+    d2, src = tmp_path / "b", FakeSource(rows=2)
+    d2.mkdir()
+    d2.chmod(0o700)
+    assert anchor.cycle(d2, KEY, src).ok
+    assert anchor.retire(KEY, False, True, d2) == 0
+    assert not anchor.cycle(d2, KEY, src).ok
+    assert anchor.retire(KEY, False, False, d2, lambda: (src, lambda: None)) == 2
+
+
 def test_unit_retire_offline_and_again_is_a_no_op(tmp_path):
     d, src = _dir(tmp_path), FakeSource(rows=1)
     assert anchor.cycle(d, KEY, src).ok
@@ -972,7 +1020,7 @@ def test_key_file_is_never_world_readable():
     assert not mode & (stat.S_IROTH | stat.S_IWOTH | stat.S_IXOTH)
     acl = None
     if shutil.which("getfacl"):
-        done = subprocess.run(["getfacl", "-cp", str(key)], capture_output=True, text=True)
+        done = subprocess.run(["getfacl", "-cpn", str(key)], capture_output=True, text=True)
         assert done.returncode == 0, done.stderr
         acl = [line for line in done.stdout.split() if line and not line.startswith("#")]
     if acl is None or acl == ["user::rw-", "group::---", "other::---"]:
@@ -1099,12 +1147,86 @@ def test_live_twenty_parallel_once_next_to_the_loop():
     cl.parse_registry(ANCHOR_DIR / cl.REGISTRY, _host_key())
 
 
+@pytest.mark.skipif(PROJECT != "e6", reason="only on a disposable stand -p e6 (replaces the chain, then resets)")
+def test_live_reset_after_chain_replaced_needs_retire_force():
+    """Securo 90f093f §2 on a live stand: the chain is replaced without a retire
+    (the database volume dropped behind make's back, so no SQL on the journal,
+    §9.2); make reset CONFIRM=yes refuses and keeps the volume; with
+    RETIRE_FORCE=yes it passes and the registry says forced chain_replaced@-."""
+    compose = "docker compose"
+    old = _head_chain()
+    # no --wait: audit_anchor turns red on purpose
+    for args in (["down", "-v"], ["up", "-d"]):
+        done = subprocess.run(["docker", "compose", *args], cwd=ROOT, capture_output=True, text=True, timeout=1200)
+        assert done.returncode == 0, done.stderr[-2000:]
+    deadline, replaced = time.time() + 300, None
+    while time.time() < deadline:
+        head = _psql_try("SELECT chain_id FROM audit_chain_head")
+        if head.returncode == 0 and head.stdout.strip():
+            replaced = head.stdout.strip()
+            break
+        time.sleep(3)
+    assert replaced and replaced != old
+    once = subprocess.run(["docker", "compose", "exec", "-T", "audit_anchor", "python", "anchor.py", "--once"],
+                          cwd=ROOT, capture_output=True, text=True, timeout=120)
+    assert once.returncode == 1 and "chain_replaced" in once.stdout, once.stdout
+    registry = ANCHOR_DIR / cl.REGISTRY
+    before = registry.read_bytes()
+    assert cl.parse_registry(registry, _host_key())[0][-1].kind == "switch"
+    volume = _compose_config()["volumes"]["db_data"]["name"]
+
+    refused = subprocess.run(["make", "reset", "CONFIRM=yes", f"COMPOSE={compose}"], cwd=ROOT,
+                             capture_output=True, text=True, timeout=600)
+    assert refused.returncode != 0, refused.stdout[-2000:]
+    assert "RETIRE_FORCE=yes CONFIRM=yes" in refused.stdout + refused.stderr
+    assert "nothing was deleted" in refused.stderr and "brings the stand back" in refused.stderr
+    assert "down -v" not in refused.stdout
+    assert subprocess.run(["docker", "volume", "inspect", volume], capture_output=True).returncode == 0
+    assert registry.read_bytes() == before
+    assert _head_chain() == replaced            # the evidence is still in the database
+
+    forced = subprocess.run(["make", "reset", "CONFIRM=yes", "RETIRE_FORCE=yes", f"COMPOSE={compose}"], cwd=ROOT,
+                            capture_output=True, text=True, timeout=1800)
+    assert forced.returncode == 0, forced.stdout[-3000:] + forced.stderr[-3000:]
+    entries, _ = cl.parse_registry(registry, _host_key())
+    assert any(e.kind == "switch" and e.new == replaced for e in entries)
+    last_retire = [e for e in entries if e.kind == "retire"][-1]
+    assert (last_retire.chain_id, last_retire.mode, last_retire.brk) == (replaced, "forced", "chain_replaced@-")
+
+
+@pytest.mark.skipif(PROJECT != "e6", reason="only on a disposable stand -p e6 (archives its anchor directory)")
+def test_live_reset_without_anchor_directory_creates_it_as_the_user():
+    """З-9 and the README restart: stop, archive the anchor directory (rename,
+    never delete), make reset CONFIRM=yes RETIRE_FORCE=yes; the new directory
+    belongs to the user (not root) with the ACL, and audit_anchor anchors again."""
+    compose = "docker compose"
+    stopped = subprocess.run(["make", "-s", "stop", f"COMPOSE={compose}"], cwd=ROOT,
+                             capture_output=True, text=True, timeout=300)
+    assert stopped.returncode == 0, stopped.stderr[-2000:]
+    archive = ANCHOR_DIR.with_name(f"{ANCHOR_DIR.name}-archived-{int(time.time())}")
+    ANCHOR_DIR.rename(archive)
+    done = subprocess.run(["make", "reset", "CONFIRM=yes", "RETIRE_FORCE=yes", f"COMPOSE={compose}"], cwd=ROOT,
+                          capture_output=True, text=True, timeout=1800)
+    assert done.returncode == 0, done.stdout[-3000:] + done.stderr[-3000:]
+    assert "anchor_dir.sh --strict" in done.stdout
+    info = ANCHOR_DIR.stat()
+    assert info.st_uid == os.getuid() != 0
+    acl = subprocess.run(["getfacl", "-cpn", str(ANCHOR_DIR)], capture_output=True, text=True).stdout.split()
+    assert "user:10002:rwx" in acl and "other::---" in acl, acl
+    assert (archive / cl.REGISTRY).exists()          # the old registry is kept, untouched
+    deadline = time.time() + 180
+    while not (ANCHOR_DIR / cl.REGISTRY).exists() and time.time() < deadline:
+        time.sleep(3)
+    entries, _ = cl.parse_registry(ANCHOR_DIR / cl.REGISTRY, _host_key())
+    assert [e.kind for e in entries] == ["open"] and entries[0].chain_id == _head_chain()
+
+
 # --- init_secrets.sh for the audit secrets (Б-B2, П12, test 6), on a copy ----------
 
 def _copy_scripts(tmp_path) -> Path:
     work = tmp_path / "repo"
     (work / "scripts").mkdir(parents=True)
-    for name in ("init_secrets.sh", "tls_lib.sh"):
+    for name in ("init_secrets.sh", "tls_lib.sh", "anchor_dir.sh"):
         shutil.copy(ROOT / "scripts" / name, work / "scripts" / name)
     return work
 
@@ -1153,9 +1275,9 @@ def test_no_world_writable_anchor_directory_anywhere():
 STUB = r"""#!/bin/sh
 echo "$*" >> "$STUB_LOG"
 case "$*" in
-  "config --format json") echo '{"name": "stubproj", "volumes": {"db_data": {"name": "stubproj_db_data"}}}' ;;
+  "config --format json") printf '%s\n' '{"name": "stubproj", "volumes": {"db_data": {"name": "stubproj_db_data"}}, "services": {"audit_anchor": {"volumes": [{"type": "bind", "source": "'"$STUB_ANCHORS"'", "target": "/anchors"}]}}}' ;;
   "ps --status running -q audit_anchor") [ "$STUB_MODE" = running ] && echo abc123 ;;
-  *--retire*) exit "${STUB_RETIRE_RC:-0}" ;;
+  *--retire*) [ -d "$STUB_ANCHORS" ] && echo "anchors-present" >> "$STUB_LOG"; exit "${STUB_RETIRE_RC:-0}" ;;
 esac
 exit 0
 """
@@ -1205,8 +1327,12 @@ def _exe(path, text):
     return path
 
 
-def _make_with_stub(tmp_path, mode: str, *args, rc: int = 0, inspect: str | None = None, sudo: bool = False):
+def _make_with_stub(tmp_path, mode: str, *args, rc: int = 0, inspect: str | None = None, sudo: bool = False,
+                    anchors: Path | None = None):
     stub = _exe(tmp_path / "compose.sh", STUB)
+    if anchors is None:
+        anchors = tmp_path / "anchors"
+        anchors.mkdir(mode=0o700, exist_ok=True)
     fake_docker = _exe(tmp_path / "fake-docker", DOCKER_STUB)
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir(exist_ok=True)
@@ -1217,7 +1343,7 @@ def _make_with_stub(tmp_path, mode: str, *args, rc: int = 0, inspect: str | None
     if inspect is None:
         inspect = "ok" if mode == "volume" else "missing"
     env = dict(os.environ, STUB_LOG=str(log), STUB_MODE=mode, STUB_RETIRE_RC=str(rc), STUB_INSPECT=inspect,
-               STUB_COMPOSE=str(stub), STUB_DOCKER=str(fake_docker),
+               STUB_COMPOSE=str(stub), STUB_DOCKER=str(fake_docker), STUB_ANCHORS=str(anchors),
                PATH=f"{bin_dir}{os.pathsep}{os.environ.get('PATH', '')}")
     env.pop("DOCKER", None)
     if sudo:
@@ -1315,6 +1441,14 @@ def test_docker_prefix_is_derived_from_compose():
         done = subprocess.run(["make", "-s", "help", f"COMPOSE={compose}"], cwd=ROOT, env=env,
                               capture_output=True, text=True, timeout=60)
         assert done.stdout.rstrip().endswith(f"now: {docker})"), (compose, done.stdout)
+        # an exported DOCKER is ignored ...
+        env_docker = subprocess.run(["make", "-s", "help", f"COMPOSE={compose}"], cwd=ROOT,
+                                    env=dict(env, DOCKER="/other/docker"), capture_output=True, text=True, timeout=60)
+        assert env_docker.stdout.rstrip().endswith(f"now: {docker})"), (compose, env_docker.stdout)
+        # ... the command line wins
+        line = subprocess.run(["make", "-s", "help", f"COMPOSE={compose}", "DOCKER=/cli/docker"], cwd=ROOT,
+                              env=env, capture_output=True, text=True, timeout=60)
+        assert line.stdout.rstrip().endswith("now: /cli/docker)"), (compose, line.stdout)
 
 
 def test_compose_without_a_compose_word_needs_docker(tmp_path):
@@ -1326,6 +1460,52 @@ def test_compose_without_a_compose_word_needs_docker(tmp_path):
                           capture_output=True, text=True, timeout=60)
     assert done.returncode != 0 and "set DOCKER=" in done.stderr
     assert not log.exists() or log.read_text() == ""
+    # DOCKER from the environment does not count either
+    done = subprocess.run(["make", "fclean", "CONFIRM=yes", f"COMPOSE={stub}"], cwd=ROOT,
+                          env=dict(env, DOCKER=str(_exe(tmp_path / "fake-docker", DOCKER_STUB))),
+                          capture_output=True, text=True, timeout=60)
+    assert done.returncode != 0 and "set DOCKER=" in done.stderr
+    assert not log.exists() or log.read_text() == ""
+
+
+@pytest.mark.parametrize("mode", ["running", "volume", "none"])
+def test_missing_anchor_directory_is_created_before_the_retire(tmp_path, mode):
+    """З-9: without the directory Docker would create it as root for the bind
+    mount; reset/fclean create it first (scripts/anchor_dir.sh: 700 + ACL)."""
+    anchors = tmp_path / "gone" / "audit_anchors"
+    done, calls = _make_with_stub(tmp_path, mode, "fclean", "CONFIRM=yes", anchors=anchors)
+    assert done.returncode == 0, done.stdout + done.stderr
+    assert anchors.is_dir() and anchors.stat().st_uid == os.getuid()
+    assert stat.S_IMODE(anchors.stat().st_mode) & 0o077 in (0, 0o070)   # 700, or 770 shown as the ACL mask
+    if shutil.which("getfacl") and shutil.which("setfacl"):
+        acl = subprocess.run(["getfacl", "-cpn", str(anchors)], capture_output=True, text=True).stdout.split()
+        assert "user:10002:rwx" in acl and "other::---" in acl and "group::---" in acl, acl
+    assert "created " in done.stdout and "anchor_dir.sh --strict" in done.stdout
+    retire = next(i for i, c in enumerate(calls) if "--retire" in c)
+    assert calls[retire + 1] == "anchors-present"          # the directory was there before the retire
+
+
+def test_anchor_directory_that_cannot_be_made_fails_closed(tmp_path):
+    blocker = tmp_path / "file"
+    blocker.write_text("x")
+    done, calls = _make_with_stub(tmp_path, "volume", "fclean", "CONFIRM=yes", anchors=blocker / "audit_anchors")
+    assert done.returncode != 0
+    assert "cannot prepare the anchor directory" in done.stderr and "nothing was deleted" in done.stderr
+    assert "proxy and api are stopped" in done.stderr
+    assert not any("--retire" in c or c.startswith("down") for c in calls), calls
+
+
+def test_anchor_directory_without_acl_access_fails_closed_in_strict_mode(tmp_path):
+    if os.geteuid() == 0:
+        pytest.skip("root can chown instead")
+    work = tmp_path / "w"
+    env = dict(os.environ, PATH=_path_without(tmp_path, "setfacl"))
+    done = subprocess.run(["sh", str(ROOT / "scripts" / "anchor_dir.sh"), "--strict", str(work)],
+                          env=env, capture_output=True, text=True)
+    assert done.returncode == 1 and "cannot grant write access" in done.stderr
+    loose = subprocess.run(["sh", str(ROOT / "scripts" / "anchor_dir.sh"), str(tmp_path / "w2")],
+                           env=env, capture_output=True, text=True)
+    assert loose.returncode == 0 and "cannot grant write access" in loose.stderr   # init_secrets: a warning
 
 
 def test_makefile_run_has_no_no_build_flag():

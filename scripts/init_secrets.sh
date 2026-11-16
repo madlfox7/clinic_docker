@@ -285,34 +285,15 @@ else
   fi
 fi
 
-# Anchor directory (bind mount of audit_anchor, outside the database volume):
-# CLINIC_AUDIT_ANCHOR_DIR from the environment, else from .env, else
-# ./audit_anchors. 700 for the host user plus rwx for uid 10002 through an
-# ACL; never 777. The anchor files inside are 0644, so the host user can read
-# them while the directory keeps everyone else out.
+# Anchor directory: CLINIC_AUDIT_ANCHOR_DIR from the environment, else from
+# .env, else ./audit_anchors; prepared by scripts/anchor_dir.sh (700 + ACL
+# u:10002:rwx, never 777), the same code make reset/fclean use.
 anchor_dir="${CLINIC_AUDIT_ANCHOR_DIR:-}"
 if [ -z "$anchor_dir" ] && [ -f .env ]; then
   anchor_dir="$(grep -E '^CLINIC_AUDIT_ANCHOR_DIR=' .env | tail -n 1 | cut -d= -f2- || true)"
 fi
 anchor_dir="${anchor_dir:-./audit_anchors}"
-if [ ! -d "$anchor_dir" ]; then
-  mkdir -p "$anchor_dir"
-  echo "created $anchor_dir (audit anchors and chain registry; keep it, do not git clean it)"
-fi
-if [ -O "$anchor_dir" ]; then
-  chmod 700 "$anchor_dir"
-  if command -v setfacl >/dev/null 2>&1 && setfacl -m "u:$AUDIT_UID:rwx" "$anchor_dir" 2>/dev/null; then
-    :
-  elif [ "$(id -u)" = 0 ]; then
-    chown "$AUDIT_UID:$AUDIT_UID" "$anchor_dir"
-  else
-    echo "warning $anchor_dir: cannot grant write access to audit_anchor (uid $AUDIT_UID)." >&2
-    echo "        No anchors will be written and audit_anchor stays unhealthy. Install the acl package and rerun," >&2
-    echo "        or: sudo setfacl -m u:$AUDIT_UID:rwx $anchor_dir" >&2
-  fi
-else
-  echo "note    $anchor_dir is not owned by you; permissions left as they are"
-fi
+sh scripts/anchor_dir.sh "$anchor_dir"
 
 # Older clones may still have unused secret variables in .env.
 # The app no longer reads them; strip the lines without printing values.

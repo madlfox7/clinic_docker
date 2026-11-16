@@ -25,9 +25,11 @@ VERIFY_ARGS ?=
 # The docker command for "volume inspect" and "volume rm" in reset/fclean: the
 # words of $(COMPOSE) before "compose", so the same prefix (sudo -n docker,
 # env ... docker) and the same daemon. Empty if COMPOSE has no "compose" word
-# (then reset/fclean stop and ask for DOCKER=...).
+# (then reset/fclean stop and ask for DOCKER=...). ":=": a DOCKER exported in
+# the environment is ignored (another daemon would look like "no such volume");
+# only "make ... DOCKER=..." on the command line overrides it.
 words_before_compose = $(if $(1),$(if $(filter compose,$(firstword $(1))),,$(firstword $(1)) $(call words_before_compose,$(wordlist 2,$(words $(1)),$(1)))))
-DOCKER ?= $(if $(filter compose,$(COMPOSE)),$(strip $(call words_before_compose,$(COMPOSE))))
+DOCKER := $(if $(filter compose,$(COMPOSE)),$(strip $(call words_before_compose,$(COMPOSE))))
 
 .DEFAULT_GOAL := help
 .PHONY: help start stop restart clean reset fclean logs ps test tls-check ngrok ngrok-off audit-verify
@@ -60,6 +62,9 @@ endef
 # 2.33). Only "no such volume" counts as missing: any other error (permission
 # denied, no daemon, sudo asking for a password) stops make, nothing deleted,
 # so the offline retire never skips the chain check by mistake.
+# A missing anchor directory is created first (scripts/anchor_dir.sh, 700 +
+# ACL, as init_secrets.sh does); otherwise Docker would create it as root for
+# the bind mount and audit_anchor could not write to it (З-9).
 # Then down -v and the anonymous volumes listed above (only this project's).
 define wipe_stack
 @stopped() { echo "  proxy and api are stopped; $(MAKE) start COMPOSE='$(COMPOSE)' brings the stand back." >&2; }; \
@@ -71,6 +76,17 @@ anon="$(project_anon_volumes)"; \
 force="$(if $(filter yes,$(RETIRE_FORCE)),--force)"; \
 echo "$(COMPOSE) stop proxy api"; $(COMPOSE) stop proxy api || exit 1; \
 db_volume="$$($(COMPOSE) config --format json | $(PYTHON) -c 'import json, sys; c = json.load(sys.stdin); print(c.get("volumes", {}).get("db_data", {}).get("name") or c["name"] + "_db_data")')" || { stopped; exit 1; }; \
+anchor_dir="$$($(COMPOSE) config --format json | $(PYTHON) -c 'import json, sys; c = json.load(sys.stdin); print(next((v["source"] for v in c["services"]["audit_anchor"].get("volumes", []) if v.get("target") == "/anchors"), ""))')" || { stopped; exit 1; }; \
+if [ -z "$$anchor_dir" ]; then \
+	echo "cannot find the anchor directory (bind mount /anchors of audit_anchor); nothing was deleted." >&2; stopped; exit 1; \
+fi; \
+if [ ! -d "$$anchor_dir" ]; then \
+	echo "sh scripts/anchor_dir.sh --strict $$anchor_dir   (missing: created by you, not by Docker as root)"; \
+	if ! sh scripts/anchor_dir.sh --strict "$$anchor_dir"; then \
+		echo "cannot prepare the anchor directory $$anchor_dir; the audit chain was not closed, nothing was deleted." >&2; \
+		stopped; exit 1; \
+	fi; \
+fi; \
 if [ -n "$$($(COMPOSE) ps --status running -q audit_anchor 2>/dev/null)" ]; then \
 	db_state=running; \
 else \
@@ -168,7 +184,7 @@ help:
 	@echo "  reset    WIPES THE DATABASE: down -v, then start (asks first; CONFIRM=yes skips)"
 	@echo "  fclean   WIPES THE DATABASE: down -v --rmi local --remove-orphans for this project only (asks first; CONFIRM=yes skips)"
 	@echo "  RETIRE_FORCE=yes  with CONFIRM=yes: reset/fclean even if the audit chain is broken (logged as forced)"
-	@echo "  DOCKER   docker command of reset/fclean (default: COMPOSE before 'compose', now: $(DOCKER))"
+	@echo "  DOCKER   docker command of reset/fclean (COMPOSE before 'compose', or make ... DOCKER=...; not from the environment; now: $(DOCKER))"
 
 start:
 	$(start_stack)

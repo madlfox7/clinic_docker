@@ -8,6 +8,10 @@ append a HMAC-signed anchor line for the chain head.
     python anchor.py --retire --offline   close it without a database
     python anchor.py --health             healthcheck of the running loop
 
+--retire refuses with 2 when the chain is broken or was replaced
+(chain_replaced); --force closes it anyway as forced (<break>@<seq> or
+chain_replaced@-), 3 when the database is unavailable.
+
 The key (/run/secrets/audit_anchor_key) is mounted only into this service.
 Output carries seq, break type and chain id only: never the key, a MAC input
 or the content of an event.
@@ -181,10 +185,20 @@ def retire(key: bytes, force: bool, offline: bool, directory: Path | None = None
         except cl.Broken as broken:
             say(broken.line())
             return 2
-        current = cl.registry_state(entries).current
+        state = cl.registry_state(entries)
+        current = state.current
         if current is None:
             say("retire: no open chain (already retired), nothing to do")
             return 0
+        switches = state.switched_to.get(current, [])
+        if switches and not force and not offline:
+            # chain_replaced not acknowledged by anyone: a plain reset would wipe
+            # the evidence and turn the daemon green again (Securo, 90f093f §2)
+            last = switches[-1]
+            say(f"BROKEN type=chain_replaced kind={last.switch_kind} old={last.old or '-'} new={current}")
+            say("retire refused: the chain was replaced (chain_replaced); "
+                "RETIRE_FORCE=yes CONFIRM=yes closes it as forced")
+            return 2
         if offline:
             cl.append_line(registry, key, reg_mac, f"{cl.VERSION} retire {current} - - offline - {cl.utc()}")
             say(f"retired chain={current} offline")
@@ -196,6 +210,16 @@ def retire(key: bytes, force: bool, offline: bool, directory: Path | None = None
             return 3
         try:
             head = source.head()
+            if switches:   # only with --force here
+                if head is not None and head["chain_id"] == current:
+                    last_seq, last_hash = head["last_seq"], bytes(head["last_hash"]).hex()
+                else:
+                    last_seq, last_hash = 0, "0" * 64
+                cl.append_line(registry, key, reg_mac,
+                               f"{cl.VERSION} retire {current} {last_seq} {last_hash} forced "
+                               f"chain_replaced@- {cl.utc()}")
+                say(f"retired chain={current} forced chain_replaced@-")
+                return 0
             try:
                 anchors, _ = cl.read_anchors(directory / f"{current}.log", key, current)
                 _, last_seq, last_hash = cl.check_full(source, current, anchors)
