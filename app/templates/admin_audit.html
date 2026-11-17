@@ -4,6 +4,20 @@
 <h1>Audit log</h1>
 <p class="text-body-secondary">Access and change events, newest first, {{ events|length }} on this page{% if filters %} for the filters below{% endif %}. Medical note and prescription text is never included.</p>
 {% if errors %}<div class="alert alert-warning">Some filters were not valid and were ignored or matched nothing.</div>{% endif %}
+{% if integrity %}
+<div class="alert {% if integrity.state == 'ok' %}alert-success{% elif integrity.state == 'broken' %}alert-danger{% else %}alert-secondary{% endif %}" role="status" data-integrity="{{ integrity.state }}">
+  <strong>Log integrity: {{ integrity.label }}</strong>
+  {% if integrity.state == 'broken' %}<div>{{ integrity.text }}{% if integrity.seq is not none %} at seq {{ integrity.seq }}{% endif %}{% if integrity.kind %} ({{ integrity.kind }}){% endif %}</div>
+  {% elif integrity.state == 'unchecked' %}<div>{{ integrity.text }}</div>{% endif %}
+  <ul class="mb-1 small">
+    <li>Last check: {{ integrity.checked_at or "—" }}</li>
+    <li>Last full check: {{ integrity.full_checked_at or "—" }}</li>
+    <li>Last anchor: {% if integrity.last_anchor_seq is not none %}seq {{ integrity.last_anchor_seq }}, {{ integrity.anchored_at or "—" }}{% else %}—{% endif %}</li>
+  </ul>
+  {% if integrity.retired_forced or integrity.retired_offline %}<div class="small">Registry has {{ integrity.retired_forced }} forced / {{ integrity.retired_offline }} offline retirements.</div>{% endif %}
+  <div class="small text-body-secondary">Times in Asia/Yerevan. Indicator updated by audit_anchor; indicator only, the source of truth is <code>make audit-verify</code> and anchor copies outside this server.</div>
+</div>
+{% endif %}
 <div class="card mb-3"><div class="card-body">
 <form class="row g-2 align-items-end" method="get" action="/admin/audit">
   <div class="col-md-3"><label class="form-label w-100 mb-0">Action

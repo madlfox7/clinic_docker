@@ -141,11 +141,21 @@ def enable_always() -> str:
     return "".join(f"ALTER TABLE public.{t} ENABLE ALWAYS TRIGGER {n}; " for t, n in TRIGGERS)
 
 
-def as_superuser(sql: str) -> list[str]:
+def superuser_sql(sql: str) -> str:
     """Tampering as the database superuser: triggers off, change, triggers back in mode A."""
-    return psql("BEGIN; ALTER TABLE public.audit_events DISABLE TRIGGER USER; "
-                "ALTER TABLE public.audit_chain_head DISABLE TRIGGER USER; "
-                f"{sql}; {enable_always()} COMMIT;")
+    return ("BEGIN; ALTER TABLE public.audit_events DISABLE TRIGGER USER; "
+            "ALTER TABLE public.audit_chain_head DISABLE TRIGGER USER; "
+            f"{sql}; {enable_always()} COMMIT;")
+
+
+def as_superuser(sql: str) -> list[str]:
+    return psql(superuser_sql(sql))
+
+
+def change_row_sql(seq: int) -> str:
+    """One row changed in place, hashes left alone: BROKEN type=row_hash at seq
+    (used by tests/test_audit_status_ui.py on -p e6 for the banner)."""
+    return f"UPDATE public.audit_events SET action = action || '.x' WHERE seq = {int(seq)}"
 
 
 def dump() -> None:

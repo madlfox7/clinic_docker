@@ -82,6 +82,14 @@ services:
       SESSION_ABSOLUTE_HOURS: ${SESSION_ABSOLUTE_HOURS:-12}
       SESSION_SAME_SITE: ${SESSION_SAME_SITE:-lax}
       SESSION_HTTPS_ONLY: ${SESSION_HTTPS_ONLY:-true}
+      # banner on /admin/audit (plan 18.2): the freshness limits come from the
+      # api's own environment, the same values audit_anchor gets
+      CLINIC_AUDIT_ANCHOR_INTERVAL: ${CLINIC_AUDIT_ANCHOR_INTERVAL:-60}
+      CLINIC_AUDIT_FULL_CHECK_EVERY: ${CLINIC_AUDIT_FULL_CHECK_EVERY:-600}
+    # status.json of audit_anchor, read-only; no anchor key, no anchors and no
+    # auditor password in the api
+    volumes:
+      - audit_status:/audit_status:ro
     secrets:
       - clinic_api_password
       - session_secret

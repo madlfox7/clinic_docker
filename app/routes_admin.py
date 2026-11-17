@@ -1,6 +1,7 @@
 from datetime import date, datetime, timedelta
 from datetime import time as datetime_time
 from typing import List
+import time
 
 import psycopg2
 from fastapi import APIRouter, Form, HTTPException, Request
@@ -35,6 +36,15 @@ from db import (
     record_audit_event,
     templates,
     within_length,
+)
+from audit_status import (
+    FULL_EVERY_DEFAULT,
+    FULL_EVERY_RANGE,
+    INTERVAL_DEFAULT,
+    INTERVAL_RANGE,
+    STATUS_PATH,
+    env_seconds,
+    read_banner,
 )
 from date_filters import date_range, range_bounds, url_with
 from mailer import deliver_appointment_emails, smtp_ready
@@ -97,6 +107,10 @@ AUDIT_TARGET_TYPES = (
     "registrar", "service", "time_off_request", "user",
 )
 AUDIT_ID_MAX = 9_223_372_036_854_775_807
+# Banner "Log integrity" (plan 18.2): the api takes the intervals from its own
+# environment (same names and ranges as audit_anchor), never from the file.
+AUDIT_ANCHOR_INTERVAL = env_seconds("CLINIC_AUDIT_ANCHOR_INTERVAL", INTERVAL_DEFAULT, INTERVAL_RANGE)
+AUDIT_FULL_CHECK_EVERY = env_seconds("CLINIC_AUDIT_FULL_CHECK_EVERY", FULL_EVERY_DEFAULT, FULL_EVERY_RANGE)
 
 
 @router.get("/admin/audit")
@@ -240,12 +254,15 @@ def admin_audit(request: Request):
         ]
     cur.close()
     conn.close()
+    # only for an admin (require_user above); the file is read-only for the api
+    integrity = read_banner(STATUS_PATH, time.time(), AUDIT_ANCHOR_INTERVAL, AUDIT_FULL_CHECK_EVERY)
     return templates.TemplateResponse(
         request,
         "admin_audit.html",
         {
             "request": request,
             "role": admin_user["role"],
+            "integrity": integrity,
             "events": events,
             "errors": errors,
             "filters": filters,
@@ -261,6 +278,7 @@ def admin_audit(request: Request):
                 else None
             ),
         },
+        headers={"Cache-Control": "no-store"},
     )
 
 
