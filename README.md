@@ -12,7 +12,7 @@ make start
 Цели `make` (`make` или `make help` выводит список):
 
 - `make start` — создаёт `.env` и `secrets/`, если их нет, собирает и запускает стек; данные БД сохраняются, повторный запуск ничего не удаляет.
-- `make stop`, `make restart` — остановка и перезапуск контейнеров.
+- `make stop`, `make restart` — остановка и перезапуск контейнеров. `make restart` = `stop`, затем те же контейнеры поднимаются по цепочке зависимостей (`up -d --no-recreate --wait`: db → migrate → audit_prepare → seed → api → proxy) с проверками `make start`, но без пересборки; режим туннеля `make ngrok` сохраняется. Если сервис не стал running/healthy (например, `audit_anchor` красный), restart завершается с ошибкой.
 - `make clean` — удаляет контейнеры и сети Compose (`down`), данные БД сохраняются.
 - `make logs`, `make ps` — логи всех сервисов (`logs -f`) и список контейнеров.
 - `make test` — тесты против запущенного стека; адреса и проект меняются переменными `TEST_BASE` (по умолчанию `https://localhost:8450`), `TEST_MAILPIT` (`http://127.0.0.1:8025`), `TEST_PROJECT`, а также `PYTHON` и `PYTEST_ARGS`.

@@ -1412,12 +1412,13 @@ def test_live_start_without_anchor_directory_is_registry_missing_until_it_is_bac
     took = _wait_health("unhealthy", 200)
     for target in ("start", "restart"):
         if target == "restart":
-            # the loop restarted (a container or host restart); not "make restart",
-            # see the round 23 notes on the proxy after a whole-stack restart
-            again = subprocess.run(["docker", "compose", "restart", "audit_anchor"], cwd=ROOT,
-                                   capture_output=True, text=True, timeout=600)
-            assert again.returncode == 0, again.stderr[-2000:]
+            # make restart waits for healthy services: with the alarm it fails, loudly
+            again = subprocess.run(["make", "restart", f"COMPOSE={compose}"], cwd=ROOT,
+                                   capture_output=True, text=True, timeout=900)
+            assert again.returncode != 0, again.stdout[-2000:]
+            assert "restart: a service did not come up running/healthy" in again.stderr
             _wait_health("unhealthy", 200)     # red again after the restart, not a first open
+            _wait_login(120)                   # the rest of the stand is up
         assert [p.name for p in ANCHOR_DIR.iterdir()] in ([], [".lock"]), list(ANCHOR_DIR.iterdir())
         logs = subprocess.run(["docker", "compose", "logs", "--since", since, "audit_anchor", "audit_prepare"],
                               cwd=ROOT, capture_output=True, text=True, timeout=60).stdout

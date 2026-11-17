@@ -32,7 +32,7 @@ words_before_compose = $(if $(1),$(if $(filter compose,$(firstword $(1))),,$(fir
 DOCKER := $(if $(filter compose,$(COMPOSE)),$(strip $(call words_before_compose,$(COMPOSE))))
 
 .DEFAULT_GOAL := help
-.PHONY: help start stop restart clean reset fclean logs ps test tls-check ngrok ngrok-off audit-verify
+.PHONY: help start stop restart restart_up clean reset fclean logs ps test tls-check ngrok ngrok-off audit-verify
 
 # Anonymous volumes mounted by this project's containers (the postgres image
 # declares one on the one-shot migrate container). "down -v" misses them once
@@ -147,10 +147,17 @@ endef
 # A server certificate reissued by init_secrets.sh is written into the same
 # files the running proxy has mounted; nginx only reads them on (re)load, so
 # a proxy that "up" did not recreate is reloaded here (graceful, plan 5.6).
+#
+# $(1): the "up" arguments. start: --build -d. restart: -d --no-recreate --wait
+# after stop, so the services come up in dependency order (db healthy, then
+# migrate, audit_prepare, seed, api, proxy), the same containers keep their
+# environment (tunnel mode of make ngrok: PUBLIC_BASE_URL, CLINIC_PUBLIC_TUNNEL)
+# and make waits until they are running/healthy. "compose restart" restarted
+# everything at once: migrate before db, proxy before api.
 define start_stack
 cp -n .env.example .env
 ./scripts/init_secrets.sh
-$(COMPOSE) up --build -d
+$(COMPOSE) up $(1)
 @if [ -e secrets/tls/.leaf_reissued ]; then \
 	echo "$(COMPOSE) exec -T proxy nginx -s reload   (new server certificate)"; \
 	reloaded=no; \
@@ -172,7 +179,7 @@ help:
 	@echo "  help     show this list (default)"
 	@echo "  start    create .env and secrets if missing, build and start; data is kept"
 	@echo "  stop     stop the containers"
-	@echo "  restart  restart the containers"
+	@echo "  restart  stop, then start the same containers in dependency order and wait until healthy (no rebuild, tunnel mode kept)"
 	@echo "  clean    remove containers and networks; data is kept"
 	@echo "  logs     follow the logs of all services"
 	@echo "  ps       list the containers"
@@ -187,13 +194,20 @@ help:
 	@echo "  DOCKER   docker command of reset/fclean (COMPOSE before 'compose', or make ... DOCKER=...; not from the environment; now: $(DOCKER))"
 
 start:
-	$(start_stack)
+	$(call start_stack,--build -d)
 
 stop:
 	$(COMPOSE) stop
 
 restart:
-	$(COMPOSE) restart
+	$(COMPOSE) stop
+	@$(MAKE) --no-print-directory restart_up || { \
+		echo "restart: a service did not come up running/healthy (see: make ps; make logs; make audit-verify)." >&2; \
+		exit 1; }
+
+# not for direct use: the "up" half of restart
+restart_up:
+	$(call start_stack,-d --no-recreate --wait)
 
 clean:
 	$(COMPOSE) down
@@ -202,7 +216,7 @@ reset:
 	$(check_retire_force)
 	$(confirm_wipe)
 	$(call wipe_stack)
-	$(start_stack)
+	$(call start_stack,--build -d)
 
 fclean:
 	$(check_retire_force)
