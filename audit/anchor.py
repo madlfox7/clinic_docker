@@ -31,11 +31,13 @@ or the content of an event.
 from __future__ import annotations
 
 import argparse
+import errno
 import json
 import os
 import re
 import sys
 import time
+import traceback
 from pathlib import Path
 
 import chainlib as cl
@@ -242,6 +244,31 @@ def health() -> int:
     return 0 if anchored and now - anchored <= 2 * every else 1
 
 
+def describe_error(exc: BaseException) -> str:
+    """The error of a failed cycle for the log: the type and, for
+    an OSError, errno, the failing call and the path, e.g.
+    "PermissionError errno=EPERM(1) op=os.fchmod path=/anchors/chains.log".
+    Never the message of a database error (it can carry connection details)
+    and never file contents: paths and errno only."""
+    text = type(exc).__name__
+    if isinstance(exc, OSError):
+        if exc.errno is not None:
+            text += f" errno={errno.errorcode.get(exc.errno, '?')}({exc.errno})"
+        # the last call in our own code (anchor, chainlib, verify_audit),
+        # not inside pathlib or contextlib
+        here = os.path.dirname(os.path.abspath(__file__))
+        frames = [f for f in traceback.extract_tb(exc.__traceback__)
+                  if os.path.dirname(os.path.abspath(f.filename)) == here and f.name != "_named"]
+        if frames:
+            call = re.search(r"([A-Za-z_][\w.]*)\(", frames[-1].line or "")
+            text += f" op={call.group(1) if call else frames[-1].name}"
+        if exc.filename is not None:
+            text += f" path={os.fsdecode(exc.filename)}"
+        if exc.filename2 is not None:
+            text += f" path2={os.fsdecode(exc.filename2)}"
+    return text
+
+
 def run_cycle(key: bytes, conn_holder: dict, full: bool = False, every: int = 60) -> Result:
     try:
         if conn_holder.get("conn") is None or conn_holder["conn"].closed:
@@ -258,7 +285,7 @@ def run_cycle(key: bytes, conn_holder: dict, full: bool = False, every: int = 60
             except Exception:
                 pass
             conn_holder["conn"] = None
-        return Result(False, "error", "database", line=f"ERROR audit cycle failed: {type(exc).__name__}")
+        return Result(False, "error", "database", line=f"ERROR audit cycle failed: {describe_error(exc)}")
 
 
 class PublicStatus:

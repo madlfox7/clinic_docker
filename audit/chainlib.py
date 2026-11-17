@@ -208,6 +208,18 @@ def parse_registry(path: Path, key: bytes) -> tuple[list[Entry], bytes]:
     return entries, prev
 
 
+@contextmanager
+def _named(path: Path):
+    """fd-based calls (fchmod, fsync, flock) raise OSError without a file
+    name; add the path so the log says which file failed."""
+    try:
+        yield
+    except OSError as exc:
+        if exc.filename is None:
+            exc.filename = str(path)
+        raise
+
+
 def append_line(path: Path, key: bytes, prev_mac: bytes, body: str) -> bytes:
     """Append one MAC-chained line and fsync it. Files are 0644 inside the
     700 anchor directory, so the host user can read them (Securo fix 3)."""
@@ -215,9 +227,10 @@ def append_line(path: Path, key: bytes, prev_mac: bytes, body: str) -> bytes:
     created = not path.exists()
     fd = os.open(path, os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o644)
     try:
-        os.fchmod(fd, 0o644)
-        os.write(fd, f"{body} {mac.hex()}\n".encode("ascii"))
-        os.fsync(fd)
+        with _named(path):
+            os.fchmod(fd, 0o644)
+            os.write(fd, f"{body} {mac.hex()}\n".encode("ascii"))
+            os.fsync(fd)
     finally:
         os.close(fd)
     if created:
@@ -228,8 +241,9 @@ def append_line(path: Path, key: bytes, prev_mac: bytes, body: str) -> bytes:
 def touch(path: Path) -> None:
     fd = os.open(path, os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o644)
     try:
-        os.fchmod(fd, 0o644)
-        os.fsync(fd)
+        with _named(path):
+            os.fchmod(fd, 0o644)
+            os.fsync(fd)
     finally:
         os.close(fd)
     _fsync_dir(path.parent)
@@ -238,7 +252,8 @@ def touch(path: Path) -> None:
 def _fsync_dir(directory: Path) -> None:
     fd = os.open(directory, os.O_RDONLY)
     try:
-        os.fsync(fd)
+        with _named(directory):
+            os.fsync(fd)
     finally:
         os.close(fd)
 
@@ -250,7 +265,8 @@ def locked(directory: Path):
     always read from the file under this lock, never kept in memory."""
     fd = os.open(directory / LOCK, os.O_RDWR | os.O_CREAT, 0o644)
     try:
-        fcntl.flock(fd, fcntl.LOCK_EX)
+        with _named(directory / LOCK):
+            fcntl.flock(fd, fcntl.LOCK_EX)
         yield
     finally:
         fcntl.flock(fd, fcntl.LOCK_UN)
