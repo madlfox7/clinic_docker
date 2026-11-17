@@ -265,6 +265,27 @@ def _wait_state(want: str, seconds: float, text: str | None = None) -> httpx.Res
             time.sleep(5)
 
 
+def _wait_login_page(seconds: float = 180) -> None:
+    """After `up -d` or `make reset` the api and the proxy start a few seconds
+    after the database: wait for /login 200 before the first sign-in."""
+    deadline = time.time() + seconds
+    last = None
+    while True:
+        try:
+            with _client() as c:
+                last = c.get("/login").status_code
+            if last == 200:
+                return
+        except httpx.HTTPError as exc:
+            last = type(exc).__name__
+        assert time.time() < deadline, ("/login not ready", last)
+        time.sleep(2)
+
+
+def _anchored_seq(page) -> int:
+    return int(re.search(r"Last anchor: seq (\d+)", _banner_text(page)).group(1))
+
+
 def _banner_text(page) -> str:
     start = page.text.find("data-integrity=")
     return re.sub(r"\s+", " ", re.sub(r"<[^>]+>", " ", page.text[start:start + 2500]))[:600]
@@ -372,9 +393,18 @@ def test_e6_changed_row_before_the_last_anchor_turns_the_banner_red():
 
     every = _anchor_env("CLINIC_AUDIT_ANCHOR_INTERVAL", 60)
     full = _anchor_env("CLINIC_AUDIT_FULL_CHECK_EVERY", 600)
-    page = _wait_state("ok", 2 * every + 120)
-    anchored = int(re.search(r"Last anchor: seq (\d+)", _banner_text(page)).group(1))
-    assert anchored >= 2, anchored
+    _wait_state("ok", 2 * every + 120)
+    for _ in range(3):           # events of its own: a fresh stand has an empty journal
+        with _client() as c:
+            _login(c, ADMIN)     # auth.login.success
+    deadline = time.time() + 2 * every + 120
+    while True:
+        page = _wait_state("ok", 2 * every + 120)
+        anchored = _anchored_seq(page)
+        if anchored >= 2:
+            break
+        assert time.time() < deadline, anchored
+        time.sleep(5)
     seq = anchored // 2
     _psql(e6_tamper.superuser_sql(e6_tamper.change_row_sql(seq)))
     page = _wait_state("broken", full + every + 60, f"{st.INTEGRITY_PROBLEMS['row_hash']} at seq {seq}")
@@ -398,10 +428,12 @@ def test_e6_banner_stays_red_after_chain_replaced_and_a_forced_reset():
         assert time.time() < deadline
         time.sleep(3)
     assert head.stdout.strip() != old
+    _wait_login_page()
     _wait_state("broken", 2 * every + 120, st.INTEGRITY_PROBLEMS["chain_replaced"])
     forced = subprocess.run(["make", "reset", "CONFIRM=yes", "RETIRE_FORCE=yes", "COMPOSE=docker compose"],
                             cwd=ROOT, capture_output=True, text=True, timeout=1800)
     assert forced.returncode == 0, forced.stdout[-3000:] + forced.stderr[-3000:]
+    _wait_login_page()
     page = _wait_state("broken", 2 * every + 180, st.INTEGRITY_PROBLEMS["chain_replaced"])
     time.sleep(full + every)          # a later full check does not turn it green
     page = _wait_state("broken", 60, st.INTEGRITY_PROBLEMS["chain_replaced"])
