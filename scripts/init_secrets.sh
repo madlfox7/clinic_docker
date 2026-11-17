@@ -285,16 +285,6 @@ else
   fi
 fi
 
-# Anchor directory: CLINIC_AUDIT_ANCHOR_DIR from the environment, else from
-# .env, else ./audit_anchors; prepared by scripts/anchor_dir.sh (700 + ACL
-# u:10002:rwx, never 777), the same code make reset/fclean use.
-anchor_dir="${CLINIC_AUDIT_ANCHOR_DIR:-}"
-if [ -z "$anchor_dir" ] && [ -f .env ]; then
-  anchor_dir="$(grep -E '^CLINIC_AUDIT_ANCHOR_DIR=' .env | tail -n 1 | cut -d= -f2- || true)"
-fi
-anchor_dir="${anchor_dir:-./audit_anchors}"
-sh scripts/anchor_dir.sh "$anchor_dir"
-
 # Older clones may still have unused secret variables in .env.
 # The app no longer reads them; strip the lines without printing values.
 if [ -f .env ] && grep -E '^(POSTGRES_PASSWORD|CLINIC_API_PASSWORD|SESSION_SECRET|SMTP_PASSWORD)=' .env >/dev/null 2>&1; then

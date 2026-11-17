@@ -39,7 +39,7 @@ def test_make_restart_is_stop_then_up_in_dependency_order():
     # the same steps as start around "up" (secrets, .env, reload after a new certificate)
     strip = lambda text: [l for l in text.splitlines() if " up " not in l]
     assert [l for l in strip(start)] == [l for l in strip(recipe)
-                                         if l.startswith(("cp -n", "./scripts", "if [ -e secrets/tls"))]
+                                         if l.startswith(("cp -n", "./scripts", "fail() {", "if [ -e secrets/tls"))]
 
 
 def test_nginx_has_no_dynamic_resolver_and_a_static_api_upstream():

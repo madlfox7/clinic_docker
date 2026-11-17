@@ -52,6 +52,39 @@ define check_retire_force
 fi
 endef
 
+# The audit anchor volume (docker-compose.yml, audit_anchors): external, so
+# "down -v" never removes it. Its name comes from "$(COMPOSE) config"; when the
+# daemon says "no such volume" it is created (label clinic.audit=keep, empty:
+# the audit_anchor image gives it owner 10002 and mode 700 on the first
+# mount). Any other error of "volume inspect" calls fail (defined by the
+# caller) and nothing is created. A new volume next to an old ./audit_anchors
+# directory gets a warning: the anchors there are not copied (README).
+define ensure_anchor_volume
+if [ -z "$(DOCKER)" ]; then \
+	echo "cannot derive the docker command from COMPOSE='$(COMPOSE)' (no 'compose' word); set DOCKER=... Nothing was changed." >&2; \
+	fail; \
+fi; \
+anchor_volume="$$($(COMPOSE) config | awk '/^volumes:/ {v = 1; next} /^[^ ]/ {v = 0} v && /^  audit_anchors:/ {a = 1; next} v && /^  [^ ]/ {a = 0} a && /^    name:/ {gsub(/["\047]/, "", $$2); print $$2; exit}')"; \
+if [ -z "$$anchor_volume" ]; then \
+	echo "cannot find the name of the audit anchor volume (audit_anchors) in '$(COMPOSE) config'." >&2; fail; \
+fi; \
+inspect_err="$$($(DOCKER) volume inspect "$$anchor_volume" 2>&1 >/dev/null)"; inspect_rc=$$?; \
+if [ "$$inspect_rc" != 0 ]; then \
+	if ! printf '%s\n' "$$inspect_err" | grep -qi 'no such volume'; then \
+		echo "cannot tell whether the volume $$anchor_volume exists: $(DOCKER) volume inspect failed (rc=$$inspect_rc):" >&2; \
+		printf '%s\n' "$$inspect_err" | head -n 3 | sed 's/^/    /' >&2; \
+		fail; \
+	fi; \
+	echo "$(DOCKER) volume create --label clinic.audit=keep $$anchor_volume   (audit anchors and chain registry)"; \
+	$(DOCKER) volume create --label clinic.audit=keep "$$anchor_volume" >/dev/null || fail; \
+	if [ -f ./audit_anchors/chains.log ]; then \
+		echo "warning ./audit_anchors holds anchors of an older version (bind mount); the new volume $$anchor_volume is empty." >&2; \
+		echo "        Copy them into the volume (README, \"Audit anchors in a Docker volume\") before the stand writes there," >&2; \
+		echo "        or audit_anchor reports registry_missing. ./audit_anchors is left as it is." >&2; \
+	fi; \
+fi
+endef
+
 # Before down -v, in the same shell line (plan 17 §8.6, Б3): stop proxy and api
 # so nothing more is written, then close the open audit chain in the registry
 # (anchor.py --retire). A failed retire stops make before down -v. Three cases:
@@ -63,10 +96,11 @@ endef
 # 2.33). Only "no such volume" counts as missing: any other error (permission
 # denied, no daemon, sudo asking for a password) stops make, nothing deleted,
 # so the offline retire never skips the chain check by mistake.
-# The anchor directory is checked first (scripts/anchor_dir.sh --strict, 700 +
-# ACL, as init_secrets.sh does): a missing one is created by you, otherwise
-# Docker would create it as root for the bind mount (З-9); one owned by
-# someone else or without the ACL stops make (З-10).
+# The anchor volume is checked first: a missing one is created empty
+# (ensure_anchor_volume; the retire then needs RETIRE_FORCE like before with a
+# missing directory), then anchor.py --check-dir in a one-off audit_anchor
+# container: /anchors must be 700, owner uid 10002, no ACL, or make stops
+# (З-10). down -v keeps the volume (external).
 # Then down -v and the anonymous volumes listed above (only this project's).
 define wipe_stack
 @stopped() { echo "  proxy and api are stopped; $(MAKE) start COMPOSE='$(COMPOSE)' brings the stand back." >&2; }; \
@@ -78,14 +112,11 @@ anon="$(project_anon_volumes)"; \
 force="$(if $(filter yes,$(RETIRE_FORCE)),--force)"; \
 echo "$(COMPOSE) stop proxy api"; $(COMPOSE) stop proxy api || exit 1; \
 db_volume="$$($(COMPOSE) config --format json | $(PYTHON) -c 'import json, sys; c = json.load(sys.stdin); print(c.get("volumes", {}).get("db_data", {}).get("name") or c["name"] + "_db_data")')" || { stopped; exit 1; }; \
-anchor_dir="$$($(COMPOSE) config --format json | $(PYTHON) -c 'import json, sys; c = json.load(sys.stdin); print(next((v["source"] for v in c["services"]["audit_anchor"].get("volumes", []) if v.get("target") == "/anchors"), ""))')" || { stopped; exit 1; }; \
-if [ -z "$$anchor_dir" ]; then \
-	echo "cannot find the anchor directory (bind mount /anchors of audit_anchor); nothing was deleted." >&2; stopped; exit 1; \
-fi; \
-[ -d "$$anchor_dir" ] || echo "(missing: created by you, not by Docker as root)"; \
-echo "sh scripts/anchor_dir.sh --strict $$anchor_dir"; \
-if ! sh scripts/anchor_dir.sh --strict "$$anchor_dir"; then \
-	echo "cannot prepare the anchor directory $$anchor_dir; the audit chain was not closed, nothing was deleted." >&2; \
+fail() { echo "  The audit chain was not closed, nothing was deleted." >&2; stopped; exit 1; }; \
+$(ensure_anchor_volume); \
+echo "$(COMPOSE) run --rm --no-deps -T audit_anchor python anchor.py --check-dir"; \
+if ! $(COMPOSE) run --rm --no-deps -T audit_anchor python anchor.py --check-dir; then \
+	echo "the anchor volume $$anchor_volume is not 700 / uid 10002; the audit chain was not closed, nothing was deleted." >&2; \
 	stopped; exit 1; \
 fi; \
 if [ -n "$$($(COMPOSE) ps --status running -q audit_anchor 2>/dev/null)" ]; then \
@@ -158,6 +189,7 @@ endef
 define start_stack
 cp -n .env.example .env
 ./scripts/init_secrets.sh
+@fail() { exit 1; }; $(ensure_anchor_volume)
 $(COMPOSE) up $(1)
 @if [ -e secrets/tls/.leaf_reissued ]; then \
 	echo "$(COMPOSE) exec -T proxy nginx -s reload   (new server certificate)"; \

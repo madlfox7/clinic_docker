@@ -150,13 +150,15 @@ services:
     secrets:
       - audit_db_password
       - audit_anchor_key
-    # Bind mount, not a named volume: "make reset" (down -v) keeps the anchors
-    # and the chain registry. The directory is 700 with an ACL for uid 10002
-    # (scripts/init_secrets.sh).
+    # audit_anchors: an external named volume of this project (see volumes:),
+    # so "down -v", "make reset" and "make fclean" keep the anchors and the
+    # chain registry. Inside it /anchors is 700 and owned by uid 10002
+    # (audit_prepare); no host directory, so no host uid, ACL or file system
+    # (WSL /mnt/c, rootless Docker) is involved.
     # audit_status: the public status.json of the loop (plan 18.1), written
     # only here; the api mounts it read-only for the banner on /admin/audit.
     volumes:
-      - ${CLINIC_AUDIT_ANCHOR_DIR:-./audit_anchors}:/anchors
+      - audit_anchors:/anchors
       - audit_status:/status
     networks:
       - backend
@@ -200,18 +202,33 @@ services:
       - audit_db_password
       - audit_anchor_key
     volumes:
-      - ${CLINIC_AUDIT_ANCHOR_DIR:-./audit_anchors}:/anchors
+      - audit_anchors:/anchors
     networks:
       - backend
     depends_on:
       migrate:
         condition: service_completed_successfully
-    command: ["python", "anchor.py", "--prepare"]
+    # Starts as root only to set the owner and mode of the volume root
+    # (not recursive), then drops to uid 10002 (setpriv, no capabilities
+    # left) for anchor.py --prepare, which checks the directory first
+    # (--check-dir: 700, uid 10002, no ACL) and stops seed/api if it is not.
+    user: "0"
+    command:
+      - sh
+      - -c
+      - >-
+        chown 10002:10002 /anchors && chmod 700 /anchors &&
+        exec setpriv --reuid=10002 --regid=10002 --clear-groups python anchor.py --prepare
     read_only: true
     tmpfs:
       - /tmp
     cap_drop:
       - ALL
+    cap_add:
+      - CHOWN
+      - FOWNER
+      - SETUID
+      - SETGID
     security_opt:
       - no-new-privileges:true
 
@@ -292,6 +309,13 @@ secrets:
 volumes:
   db_data:
   audit_status: {}
+  # Anchors and chain registry (plan 17 §8). External: "docker compose down -v"
+  # never removes it; make start creates it (label clinic.audit=keep) when it
+  # is missing. One per project (fixer_audit_anchors, e6_...), or the name in
+  # CLINIC_AUDIT_ANCHOR_VOLUME (the disposable e6 stand).
+  audit_anchors:
+    external: true
+    name: ${CLINIC_AUDIT_ANCHOR_VOLUME:-${COMPOSE_PROJECT_NAME}_audit_anchors}
 
 networks:
   frontend: {}

@@ -13,6 +13,10 @@ COPY audit/canon.py audit/chainlib.py audit/anchor.py audit/verify_audit.py ./
 # /status: the public status of the loop (plan 18.1), a named volume that
 # the api mounts read-only. A new named volume copies this owner and mode.
 RUN mkdir /status && chown 10002:10002 /status && chmod 755 /status
+# /anchors: the anchors and the chain registry, the external named volume
+# audit_anchors (docker-compose.yml). An empty new volume copies this owner
+# and mode on its first mount; audit_prepare sets them again in any case.
+RUN mkdir /anchors && chown 10002:10002 /anchors && chmod 700 /anchors
 
 ENV PYTHONDONTWRITEBYTECODE=1
 USER 10002

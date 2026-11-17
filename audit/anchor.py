@@ -8,6 +8,7 @@ append a HMAC-signed anchor line for the chain head.
     python anchor.py --retire --offline   close it without a database
     python anchor.py --health             healthcheck of the running loop
     python anchor.py --prepare            first open before seed/api (audit_prepare)
+    python anchor.py --check-dir          the anchor directory is 700, uid 10002, no ACL
 
 The loop also runs the full check of verify_audit (whole chain from seq 1,
 registry, triggers) on its first cycle and then every
@@ -35,6 +36,7 @@ import errno
 import json
 import os
 import re
+import stat
 import sys
 import time
 import traceback
@@ -376,6 +378,44 @@ def write_public_status(directory: Path, data: dict) -> None:
     cl._fsync_dir(directory)
 
 
+AUDIT_UID = 10002
+ACL_XATTRS = ("system.posix_acl_access", "system.posix_acl_default")
+
+
+def check_dir(directory: Path, uid: int | None = None) -> str | None:
+    """--check-dir: the anchor directory (the named volume audit_anchors) is a
+    real directory, not a symlink, owned by uid 10002, mode exactly 700 and
+    without a POSIX ACL, so nobody but audit_anchor can read or change the
+    anchors. None when it is, else the reason (paths and numbers only)."""
+    uid = AUDIT_UID if uid is None else uid
+    try:
+        info = os.lstat(directory)
+    except OSError as exc:
+        return f"anchor directory {directory}: {describe_error(exc)}"
+    if stat.S_ISLNK(info.st_mode) or not stat.S_ISDIR(info.st_mode):
+        return f"anchor directory {directory} is not a directory"
+    mode = stat.S_IMODE(info.st_mode)
+    if info.st_uid != uid or mode != 0o700:
+        return (f"anchor directory {directory} is owner uid {info.st_uid} mode {mode:o}, "
+                f"not owner uid {uid} mode 700")
+    try:
+        acl = [name for name in os.listxattr(directory, follow_symlinks=False) if name in ACL_XATTRS]
+    except OSError:
+        acl = []     # no xattr support: no ACL either
+    if acl:
+        return f"anchor directory {directory} has a POSIX ACL ({', '.join(acl)})"
+    return None
+
+
+def check_dir_main() -> int:
+    problem = check_dir(ANCHOR_DIR)
+    if problem:
+        say(f"ERROR {problem}")
+        return 1
+    say(f"OK anchor directory {ANCHOR_DIR}: owner uid {AUDIT_UID}, mode 700, no ACL")
+    return 0
+
+
 def prepare(key: bytes) -> int:
     """--prepare, the one-shot audit_prepare service: runs after migrate and
     before seed and api (docker-compose.yml), so a fresh stand gets its open
@@ -384,7 +424,13 @@ def prepare(key: bytes) -> int:
     With a registry or anchors there is nothing to do (the loop checks them).
     1 only when a first cycle was needed and could not run (database, anchor
     directory): seed and api then do not start on a stand without anchors.
-    Alarms (registry_missing, a broken chain) are the loop's job: 0."""
+    Alarms (registry_missing, a broken chain) are the loop's job: 0.
+    First the anchor directory itself (check_dir): 1 when it is not 700 and
+    owned by uid 10002, before anything is read or written there."""
+    problem = check_dir(ANCHOR_DIR)
+    if problem:
+        say(f"audit_prepare: ERROR {problem}")
+        return 1
     try:
         if (ANCHOR_DIR / cl.REGISTRY).exists() or cl.anchor_files(ANCHOR_DIR):
             say("audit_prepare: chain registry present, nothing to prepare")
@@ -524,9 +570,12 @@ def main(argv=None) -> int:
     parser.add_argument("--offline", action="store_true")
     parser.add_argument("--health", action="store_true")
     parser.add_argument("--prepare", action="store_true")
+    parser.add_argument("--check-dir", action="store_true")
     args = parser.parse_args(argv)
     if args.health:
         return health()
+    if args.check_dir:
+        return check_dir_main()
     if (args.force or args.offline) and not args.retire:
         parser.error("--force and --offline go with --retire")
     key = cl.load_key(KEY_FILE)

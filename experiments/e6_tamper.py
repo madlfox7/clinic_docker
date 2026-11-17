@@ -4,11 +4,11 @@ Runs ONLY on the disposable stand `docker compose -p e6`:
 
     python experiments/e6_tamper.py --disposable-stand e6 [--seed N] [--perf]
 
-The script writes .env.e6 (ports 8086/8456/8030/1030, its own anchor directory
-./audit_anchors_e6/<date-time>), builds a fresh stand, runs the Б3 control,
+The script writes .env.e6 (ports 8086/8456/8030/1030, its own anchor volume
+e6_audit_anchors_<date-time>), builds a fresh stand, runs the Б3 control,
 generates >= 500 events, applies 20 tamperings (each one restored from a dump
 afterwards), then the Б6 trigger-mode and chain-replacement scenarios, and
-removes the stand with `down -v`. The anchor directory stays as an appendix.
+removes the stand with `down -v`. The anchor volume (external) stays as an appendix.
 
 Output and the log carry only seq / id / break type: never a secret, a MAC
 input or the content of an event.
@@ -30,6 +30,9 @@ from zoneinfo import ZoneInfo
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 PROJECT = "e6"
+
+sys.path.insert(0, str(ROOT / "tests"))
+import anchor_volume  # noqa: E402  (reads the anchors through audit_anchor)
 FORBIDDEN_PORTS = {8080, 8082, 8083, 8450, 8452, 8453, 8025, 8027, 8028, 1025, 1027, 1028}
 PORTS = {"http": 8086, "https": 8456, "mail_ui": 8030, "smtp": 1030}
 TZ = ZoneInfo("Asia/Yerevan")
@@ -69,13 +72,11 @@ def env_file_value(path: Path, name: str) -> str | None:
 
 
 def guard(env_path: Path) -> None:
-    anchor = env_file_value(env_path, "CLINIC_AUDIT_ANCHOR_DIR")
+    anchor = env_file_value(env_path, "CLINIC_AUDIT_ANCHOR_VOLUME")
     if not anchor:
-        raise SystemExit("guard: CLINIC_AUDIT_ANCHOR_DIR is not set in .env.e6")
-    main = (ROOT / "audit_anchors").resolve()
-    mine = (ROOT / anchor).resolve()
-    if mine == main or main in mine.parents:
-        raise SystemExit("guard: the e6 anchor directory is the main ./audit_anchors")
+        raise SystemExit("guard: CLINIC_AUDIT_ANCHOR_VOLUME is not set in .env.e6")
+    if not anchor.startswith(f"{PROJECT}_audit_anchors_"):
+        raise SystemExit(f"guard: the e6 anchor volume {anchor} is not an {PROJECT}_audit_anchors_<stamp> volume")
     for name in ("CLINIC_PROXY_PORT", "CLINIC_PROXY_TLS_PORT"):
         port = int(env_file_value(env_path, name) or 0)
         if port in FORBIDDEN_PORTS or not port:
@@ -125,7 +126,7 @@ def verify(strict=False) -> tuple[int, list[str]]:
 
 
 def registry_kinds() -> list[str]:
-    path = ANCHORS / "chains.log"
+    path = anchor_volume.snapshot() / "chains.log"
     return [line.split()[1] + (f" {line.split()[4]}" if line.split()[1] == "switch" else "")
             for line in path.read_text().splitlines()] if path.exists() else []
 
@@ -248,7 +249,7 @@ def rows_meta() -> list[dict]:
 
 def anchors_seq() -> list[int]:
     chain, _ = head()
-    path = ANCHORS / f"{chain}.log"
+    path = anchor_volume.snapshot() / f"{chain}.log"
     return [int(line.split()[2]) for line in path.read_text().splitlines()] if path.exists() else []
 
 
@@ -388,7 +389,7 @@ def perf(rows: int) -> dict:
 # --- main --------------------------------------------------------------------------------
 
 def main() -> int:
-    global LOG_PATH, ANCHORS
+    global LOG_PATH
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--disposable-stand", required=True)
     parser.add_argument("--seed", type=int, default=None)
@@ -401,26 +402,29 @@ def main() -> int:
     seed = args.seed if args.seed is not None else int(time.time())
     rng = random.Random(seed)
     stamp = dt.datetime.now(TZ).strftime("%Y%m%d-%H%M")
-    anchor_rel = f"./audit_anchors_e6/{stamp}"
-    ANCHORS = ROOT / anchor_rel
+    anchor_volume_name = f"{PROJECT}_audit_anchors_{stamp}"
     env = [line for line in (ROOT / ".env.example").read_text().splitlines()
            if line and not line.startswith("#") and not line.startswith(("NGROK_DOMAIN=", "PUBLIC_BASE_URL="))]
     env += [f"PUBLIC_BASE_URL=https://localhost:{PORTS['https']}", "CLINIC_PROXY_BIND=127.0.0.1",
             f"CLINIC_PROXY_PORT={PORTS['http']}", f"CLINIC_PROXY_TLS_PORT={PORTS['https']}",
             f"HOST_UID={os.getuid()}", f"HOST_GID={os.getgid()}",
-            f"CLINIC_AUDIT_ANCHOR_DIR={anchor_rel}", "CLINIC_AUDIT_ANCHOR_INTERVAL=60"]
+            f"CLINIC_AUDIT_ANCHOR_VOLUME={anchor_volume_name}", "CLINIC_AUDIT_ANCHOR_INTERVAL=60"]
     (ROOT / ".env.e6").write_text("\n".join(env) + "\n")
     guard(ROOT / ".env.e6")
+    os.environ.update(COMPOSE_PROJECT_NAME=PROJECT, COMPOSE_ENV_FILES=".env.e6",
+                      COMPOSE_FILE="docker-compose.yml:docker-compose.e6.yml")
     ports_free()
-    # the same code as init_secrets.sh creates the directory: 700 + ACL u:10002:rwx (П12)
-    done = subprocess.run(["sh", "scripts/init_secrets.sh"], cwd=ROOT, capture_output=True, text=True,
-                          env=dict(os.environ, CLINIC_AUDIT_ANCHOR_DIR=anchor_rel))
-    acl = subprocess.run(["getfacl", "-cp", str(ANCHORS)], capture_output=True, text=True).stdout
-    if done.returncode != 0 or ("user:10002:rwx" not in acl and ANCHORS.stat().st_uid != 10002):
-        raise SystemExit("anchor directory for e6 has no write access for uid 10002 (no setfacl, not root)")
+    done = subprocess.run(["sh", "scripts/init_secrets.sh"], cwd=ROOT, capture_output=True, text=True)
+    if done.returncode != 0:
+        raise SystemExit("init_secrets.sh failed")
+    # a new anchor volume of its own (external, like make start creates it)
+    made = subprocess.run(["docker", "volume", "create", "--label", "clinic.audit=keep", anchor_volume_name],
+                          capture_output=True, text=True)
+    if made.returncode != 0:
+        raise SystemExit(f"cannot create the e6 anchor volume: {made.stderr.strip()}")
     LOG_PATH = ROOT / "experiments" / f"e6_{stamp}.log"
-    report: dict = {"seed": seed, "stamp": stamp, "anchor_dir": anchor_rel, "ports": PORTS}
-    log(f"E6 start seed={seed} anchors={anchor_rel} ports={PORTS}")
+    report: dict = {"seed": seed, "stamp": stamp, "anchor_volume": anchor_volume_name, "ports": PORTS}
+    log(f"E6 start seed={seed} anchors={anchor_volume_name} ports={PORTS}")
 
     compose("down", "-v", "--remove-orphans")
     compose("up", "--build", "-d", "--wait", timeout=1800)
@@ -453,7 +457,7 @@ def main() -> int:
     # e6-only checks of tests/test_audit_chain.py on this stand
     test_env = dict(os.environ, COMPOSE_PROJECT_NAME=PROJECT, COMPOSE_ENV_FILES=".env.e6",
                     COMPOSE_FILE="docker-compose.yml:docker-compose.e6.yml",
-                    CLINIC_AUDIT_ANCHOR_DIR=anchor_rel, CLINIC_TEST_BASE=f"https://localhost:{PORTS['https']}",
+                    CLINIC_AUDIT_ANCHOR_VOLUME=anchor_volume_name, CLINIC_TEST_BASE=f"https://localhost:{PORTS['https']}",
                     CLINIC_MAILPIT=f"http://127.0.0.1:{PORTS['mail_ui']}",
                     SSL_CERT_FILE=str(ROOT / "secrets" / "tls" / "ca.crt"))
     py = os.environ.get("E6_PYTHON", sys.executable)
@@ -530,8 +534,6 @@ def main() -> int:
     log(f"E6 done ok={ok}")
     return 0 if ok else 1
 
-
-ANCHORS = ROOT / "audit_anchors_e6"
 
 if __name__ == "__main__":
     sys.exit(main())

@@ -830,7 +830,7 @@ def test_unit_lost_registry_is_registry_missing_until_the_directory_is_back(tmp_
     src.add(3)
     archive = tmp_path / "archived"
     d.rename(archive)
-    d.mkdir(mode=0o700)                        # init_secrets / anchor_dir.sh makes an empty one
+    d.mkdir(mode=0o700)                        # make start creates a new empty volume
     for _ in range(2):
         result = anchor.cycle(d, KEY, src)
         assert not result.ok and result.error == "registry_missing"
@@ -863,6 +863,8 @@ def test_unit_lost_registry_then_forced_retire_and_a_new_volume(tmp_path):
 
 def test_unit_prepare_opens_a_fresh_stand_and_leaves_alarms_to_the_loop(tmp_path, monkeypatch):
     d = _dir(tmp_path)
+    d.chmod(0o700)
+    monkeypatch.setattr(anchor, "AUDIT_UID", os.getuid())     # check_dir: our tmp dirs stand for uid 10002
     monkeypatch.setattr(anchor, "ANCHOR_DIR", d)
     src = FakeSource(rows=0)
     monkeypatch.setattr(anchor, "run_cycle", lambda key, holder: anchor.cycle(d, KEY, src))
@@ -886,6 +888,61 @@ def test_unit_prepare_opens_a_fresh_stand_and_leaves_alarms_to_the_loop(tmp_path
     monkeypatch.setattr(anchor, "run_cycle", lambda key, holder: anchor.cycle(locked, KEY, FakeSource()))
     if os.geteuid() != 0:
         assert anchor.prepare(KEY) == 1
+
+
+def test_unit_prepare_stops_on_a_wrong_anchor_directory(tmp_path, monkeypatch, capsys):
+    d = tmp_path / "anchors"
+    d.mkdir()
+    d.chmod(0o755)
+    monkeypatch.setattr(anchor, "AUDIT_UID", os.getuid())
+    monkeypatch.setattr(anchor, "ANCHOR_DIR", d)
+    calls = []
+    monkeypatch.setattr(anchor, "run_cycle", lambda key, holder: calls.append(1))
+    assert anchor.prepare(KEY) == 1 and calls == []                    # checked before anything else
+    assert f"audit_prepare: ERROR anchor directory {d} is owner uid {os.getuid()} mode 755" in capsys.readouterr().out
+    assert list(d.iterdir()) == []
+
+
+def test_unit_check_dir_wants_700_uid_10002_and_no_acl(tmp_path):
+    """The anchor volume (--check-dir, make reset/fclean, audit_prepare): owner
+    uid 10002 (here: our uid), mode exactly 700, no symlink, no POSIX ACL."""
+    me = os.getuid()
+    good = tmp_path / "good"
+    good.mkdir()
+    good.chmod(0o700)
+    assert anchor.check_dir(good, me) is None
+    assert "is owner uid" in anchor.check_dir(good, me + 1) and "not owner uid" in anchor.check_dir(good, me + 1)
+    for mode in (0o750, 0o770, 0o777, 0o2700, 0o500):
+        bad = tmp_path / f"m{mode:o}"
+        bad.mkdir()
+        bad.chmod(mode)
+        assert f"mode {mode:o}" in anchor.check_dir(bad, me), oct(mode)
+        bad.chmod(0o700)
+    link = tmp_path / "link"
+    link.symlink_to(good)
+    assert "is not a directory" in anchor.check_dir(link, me)
+    plain = tmp_path / "file"
+    plain.write_text("")
+    assert "is not a directory" in anchor.check_dir(plain, me)
+    assert "errno=ENOENT" in anchor.check_dir(tmp_path / "missing", me)
+    if shutil.which("setfacl"):
+        acl = tmp_path / "acl"
+        acl.mkdir()
+        acl.chmod(0o700)
+        if subprocess.run(["setfacl", "-m", "u:12345:rwx", str(acl)], capture_output=True).returncode == 0:
+            subprocess.run(["chmod", "700", str(acl)], check=True)
+            assert "has a POSIX ACL (system.posix_acl_access)" in anchor.check_dir(acl, me)
+
+
+def test_check_dir_cli_needs_no_key_and_says_why(tmp_path):
+    """python anchor.py --check-dir: rc 0/1 and one line; no key file needed."""
+    env = dict(os.environ, CLINIC_AUDIT_ANCHOR_PATH=str(tmp_path))
+    tmp_path.chmod(0o755)
+    done = subprocess.run([sys.executable, str(ROOT / "audit" / "anchor.py"), "--check-dir"],
+                          env=env, capture_output=True, text=True, timeout=60)
+    assert done.returncode == 1
+    assert done.stdout.strip() == f"ERROR anchor directory {tmp_path} is owner uid {os.getuid()} mode 755, " \
+                                  "not owner uid 10002 mode 700"
 
 
 def test_unit_retire_without_registry_but_a_chain_in_the_database_needs_force(tmp_path, capsys):
@@ -1068,7 +1125,8 @@ def test_unit_verify_audit_compares_an_outside_copy(tmp_path):
 import shutil  # noqa: E402
 import stat  # noqa: E402
 
-ANCHOR_DIR = ROOT / os.environ.get("CLINIC_AUDIT_ANCHOR_DIR", "audit_anchors")
+sys.path.insert(0, str(ROOT / "tests"))
+import anchor_volume as av  # noqa: E402  (the anchors live in a Docker volume, read through audit_anchor)
 SERVICES_WITHOUT_KEY = ("db", "migrate", "api", "seed", "proxy", "mailpit")
 
 
@@ -1304,11 +1362,21 @@ def test_compose_mounts_the_key_only_on_audit_anchor_and_hardens_it():
         assert anchor_service.get("cap_drop") == ["ALL"], name
         assert "no-new-privileges:true" in anchor_service.get("security_opt", []), name
         assert not anchor_service.get("ports"), name
-    # the same anchor directory; /status (plan 18.1) only on the loop
+    # the loop: the image user 10002, no capability at all
+    assert "user" not in services["audit_anchor"] and not services["audit_anchor"].get("cap_add")
+    # the one-shot: root with four capabilities only to chown/chmod the volume
+    # root, then setpriv to 10002 (permitted and effective sets are cleared)
+    prepare = services["audit_prepare"]
+    assert prepare["user"] == "0"
+    assert sorted(prepare["cap_add"]) == ["CHOWN", "FOWNER", "SETGID", "SETUID"]
+    assert prepare["command"][:2] == ["sh", "-c"] and len(prepare["command"]) == 3
+    script = " ".join(prepare["command"][2].split())
+    assert script == ("chown 10002:10002 /anchors && chmod 700 /anchors && "
+                      "exec setpriv --reuid=10002 --regid=10002 --clear-groups python anchor.py --prepare")
+    # the same anchor volume; /status (plan 18.1) only on the loop
     anchors = [v for v in services["audit_anchor"]["volumes"] if v["target"] == "/anchors"]
     assert services["audit_prepare"]["volumes"] == anchors
     assert {v["target"] for v in services["audit_anchor"]["volumes"]} == {"/anchors", "/status"}
-    assert services["audit_prepare"]["command"] == ["python", "anchor.py", "--prepare"]
 
 
 def test_compose_opens_the_registry_before_anything_writes_to_the_journal():
@@ -1392,13 +1460,13 @@ def test_live_reset_after_stop_closes_the_chain_with_run():
     stopped = subprocess.run(["make", "-s", "stop", f"COMPOSE={compose}"], cwd=ROOT, env=env,
                              capture_output=True, text=True, timeout=300)
     assert stopped.returncode == 0, stopped.stderr[-2000:]
-    old_chain = cl.registry_state(cl.parse_registry(ANCHOR_DIR / cl.REGISTRY, _host_key())[0]).current
+    old_chain = cl.registry_state(cl.parse_registry(av.snapshot() / cl.REGISTRY, _host_key())[0]).current
     assert old_chain
     done = subprocess.run(["make", "reset", "CONFIRM=yes", f"COMPOSE={compose}"], cwd=ROOT, env=env,
                           capture_output=True, text=True, timeout=1800)
     assert done.returncode == 0, done.stdout[-3000:] + done.stderr[-3000:]
     assert "run --rm audit_anchor python anchor.py --retire" in done.stdout
-    entries, _ = cl.parse_registry(ANCHOR_DIR / cl.REGISTRY, _host_key())
+    entries, _ = cl.parse_registry(av.snapshot() / cl.REGISTRY, _host_key())
     assert any(e.kind == "retire" and e.chain_id == old_chain and e.mode == "normal"
                for e in entries), [(e.kind, e.chain_id, e.mode) for e in entries]
 
@@ -1406,7 +1474,7 @@ def test_live_reset_after_stop_closes_the_chain_with_run():
 def _wait_for_anchor(chain_id: str, at_least_seq: int, timeout: float) -> cl.Anchor:
     deadline = time.time() + timeout
     while True:
-        path = ANCHOR_DIR / f"{chain_id}.log"
+        path = av.snapshot() / f"{chain_id}.log"
         if path.exists():
             anchors, _ = cl.read_anchors(path, _host_key(), chain_id)
             if anchors and anchors[-1].seq >= at_least_seq:
@@ -1421,7 +1489,7 @@ def test_service_anchors_the_head_within_two_intervals_and_the_macs_hold():
     chain = _head_chain()
     last = _wait_for_anchor(chain, 1, 2 * every + 15)
     assert time.time() - cl.parse_utc(last.at).timestamp() <= 2 * every + 15
-    entries, _ = cl.parse_registry(ANCHOR_DIR / cl.REGISTRY, _host_key())
+    entries, _ = cl.parse_registry(av.snapshot() / cl.REGISTRY, _host_key())
     assert any(e.kind == "open" and e.chain_id == chain for e in entries)
     assert not any(e.kind == "switch" for e in entries)
 
@@ -1503,7 +1571,7 @@ def test_make_audit_verify_is_ok_on_an_intact_journal():
 
 
 def test_registry_starts_with_an_open_line_and_anchors_are_git_ignored():
-    entries, _ = cl.parse_registry(ANCHOR_DIR / cl.REGISTRY, _host_key())
+    entries, _ = cl.parse_registry(av.snapshot() / cl.REGISTRY, _host_key())
     # a registry starts with open, or (З-10, after a forced reset without the old
     # registry) with retire ... forced no_registry@-
     assert entries and (entries[0].kind == "open"
@@ -1523,8 +1591,8 @@ def test_live_twenty_parallel_once_next_to_the_loop():
              for _ in range(20)]
     for proc in procs:
         assert proc.wait(timeout=300) == 0
-    cl.read_anchors(ANCHOR_DIR / f"{_head_chain()}.log", _host_key(), _head_chain())
-    cl.parse_registry(ANCHOR_DIR / cl.REGISTRY, _host_key())
+    cl.read_anchors(av.snapshot() / f"{_head_chain()}.log", _host_key(), _head_chain())
+    cl.parse_registry(av.snapshot() / cl.REGISTRY, _host_key())
 
 
 @pytest.mark.skipif(PROJECT != "e6", reason="only on a disposable stand -p e6 (replaces the chain, then resets)")
@@ -1550,7 +1618,7 @@ def test_live_reset_after_chain_replaced_needs_retire_force():
     once = subprocess.run(["docker", "compose", "exec", "-T", "audit_anchor", "python", "anchor.py", "--once"],
                           cwd=ROOT, capture_output=True, text=True, timeout=120)
     assert once.returncode == 1 and "chain_replaced" in once.stdout, once.stdout
-    registry = ANCHOR_DIR / cl.REGISTRY
+    registry = av.snapshot() / cl.REGISTRY
     before = registry.read_bytes()
     assert cl.parse_registry(registry, _host_key())[0][-1].kind == "switch"
     volume = _compose_config()["volumes"]["db_data"]["name"]
@@ -1562,13 +1630,13 @@ def test_live_reset_after_chain_replaced_needs_retire_force():
     assert "nothing was deleted" in refused.stderr and "brings the stand back" in refused.stderr
     assert "down -v" not in refused.stdout
     assert subprocess.run(["docker", "volume", "inspect", volume], capture_output=True).returncode == 0
-    assert registry.read_bytes() == before
+    assert (av.snapshot() / cl.REGISTRY).read_bytes() == before
     assert _head_chain() == replaced            # the evidence is still in the database
 
     forced = subprocess.run(["make", "reset", "CONFIRM=yes", "RETIRE_FORCE=yes", f"COMPOSE={compose}"], cwd=ROOT,
                             capture_output=True, text=True, timeout=1800)
     assert forced.returncode == 0, forced.stdout[-3000:] + forced.stderr[-3000:]
-    entries, _ = cl.parse_registry(registry, _host_key())
+    entries, _ = cl.parse_registry(av.snapshot() / cl.REGISTRY, _host_key())
     assert any(e.kind == "switch" and e.new == replaced for e in entries)
     last_retire = [e for e in entries if e.kind == "retire"][-1]
     assert (last_retire.chain_id, last_retire.mode, last_retire.brk) == (replaced, "forced", "chain_replaced@-")
@@ -1598,7 +1666,7 @@ def _wait_login(seconds: int) -> None:
 
 
 def _anchors_live(chain: str):
-    return cl.read_anchors(ANCHOR_DIR / f"{chain}.log", _host_key(), chain)[0]
+    return cl.read_anchors(av.snapshot() / f"{chain}.log", _host_key(), chain)[0]
 
 
 def _anchor_health() -> str:
@@ -1614,9 +1682,9 @@ def _wait_health(want: str, seconds: int) -> float:
     return time.time() - started
 
 
-@pytest.mark.skipif(PROJECT != "e6", reason="only on a disposable stand -p e6 (archives its anchor directory)")
-def test_live_start_without_anchor_directory_is_registry_missing_until_it_is_back():
-    """З-11: rename the anchor directory and start/restart without a reset:
+@pytest.mark.skipif(PROJECT != "e6", reason="only on a disposable stand -p e6 (removes its anchor volume)")
+def test_live_start_without_anchor_volume_is_registry_missing_until_it_is_back():
+    """З-11: copy the anchors out, remove the volume and start/restart without a reset:
     no silent first open. audit_anchor writes nothing, turns unhealthy within
     the E6 window (< 200 s), make audit-verify says BROKEN registry_missing
     (rc 1); the directory put back: healthy again."""
@@ -1626,15 +1694,16 @@ def test_live_start_without_anchor_directory_is_registry_missing_until_it_is_bac
     stopped = subprocess.run(["make", "-s", "stop", f"COMPOSE={compose}"], cwd=ROOT,
                              capture_output=True, text=True, timeout=300)
     assert stopped.returncode == 0, stopped.stderr[-2000:]
-    registry_before = (ANCHOR_DIR / cl.REGISTRY).read_bytes()
-    archive = ANCHOR_DIR.with_name(f"{ANCHOR_DIR.name}-moved-{int(time.time())}")
-    ANCHOR_DIR.rename(archive)
+    archive = av.snapshot(ROOT / "audit_anchors_e6" / f"{av.volume_name()}-moved-{int(time.time())}")
+    registry_before = (archive / cl.REGISTRY).read_bytes()
+    av.remove_volume()
     since = dt.datetime.now(dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
     started = subprocess.run(["make", "start", f"COMPOSE={compose}"], cwd=ROOT,
                              capture_output=True, text=True, timeout=1800)
     assert started.returncode == 0, started.stdout[-3000:] + started.stderr[-3000:]
-    assert ANCHOR_DIR.is_dir() and ANCHOR_DIR.stat().st_uid == os.getuid()   # init_secrets made it, empty
+    assert "volume create --label clinic.audit=keep" in started.stdout      # make start made a new one
+    assert av.check_dir().returncode == 0                                    # 700, uid 10002, no ACL
     took = _wait_health("unhealthy", 200)
     for target in ("start", "restart"):
         if target == "restart":
@@ -1645,7 +1714,7 @@ def test_live_start_without_anchor_directory_is_registry_missing_until_it_is_bac
             assert "restart: a service did not come up running/healthy" in again.stderr
             _wait_health("unhealthy", 200)     # red again after the restart, not a first open
             _wait_login(120)                   # the rest of the stand is up
-        assert [p.name for p in ANCHOR_DIR.iterdir()] in ([], [".lock"]), list(ANCHOR_DIR.iterdir())
+        assert av.listing() in ([], [".lock"])
         logs = subprocess.run(["docker", "compose", "logs", "--since", since, "audit_anchor", "audit_prepare"],
                               cwd=ROOT, capture_output=True, text=True, timeout=60).stdout
         assert f"ERROR audit chain registry missing (no chains.log and no anchors, but chain={chain}" in logs
@@ -1657,18 +1726,17 @@ def test_live_start_without_anchor_directory_is_registry_missing_until_it_is_bac
             f"BROKEN type=registry_missing no registry and no anchors, but the database holds chain={chain}")
     assert _anchor_health() == "unhealthy"
 
-    # way out 1: put the directory back (the reset way is the З-10 test below)
+    # way out 1: put the anchors back (the reset way is the З-10 test below)
     stopped = subprocess.run(["docker", "compose", "stop", "audit_anchor"], cwd=ROOT,
                              capture_output=True, text=True, timeout=300)
     assert stopped.returncode == 0, stopped.stderr
-    (ANCHOR_DIR / ".lock").unlink(missing_ok=True)
-    ANCHOR_DIR.rmdir()
-    archive.rename(ANCHOR_DIR)
+    av.wipe()
+    av.restore(archive)
     up = subprocess.run(["docker", "compose", "start", "audit_anchor"], cwd=ROOT,
                         capture_output=True, text=True, timeout=300)
     assert up.returncode == 0, up.stderr
     _wait_health("healthy", 200)
-    assert (ANCHOR_DIR / cl.REGISTRY).read_bytes() == registry_before    # no switch, no new open
+    assert (av.snapshot() / cl.REGISTRY).read_bytes() == registry_before    # no switch, no new open
     assert any(a.seq == _head()["last_seq"] for a in _anchors_live(chain))
     verify = subprocess.run(["make", "-s", "audit-verify", f"COMPOSE={compose}"], cwd=ROOT,
                             capture_output=True, text=True, timeout=300)
@@ -1678,8 +1746,8 @@ def test_live_start_without_anchor_directory_is_registry_missing_until_it_is_bac
     print(f"unhealthy after {took:.0f} s")
 
 
-@pytest.mark.skipif(PROJECT != "e6", reason="only on a disposable stand -p e6 (archives its anchor directory)")
-def test_live_reset_without_anchor_directory_needs_force_and_leaves_a_record():
+@pytest.mark.skipif(PROJECT != "e6", reason="only on a disposable stand -p e6 (removes its anchor volume)")
+def test_live_reset_without_anchor_volume_needs_force_and_leaves_a_record():
     """З-9 + З-10 + the README restart: stop, archive the anchor directory
     (rename, never delete). make reset CONFIRM=yes: the new directory belongs
     to the user (not root) with the ACL, but the retire refuses (the database
@@ -1690,10 +1758,10 @@ def test_live_reset_without_anchor_directory_needs_force_and_leaves_a_record():
     stopped = subprocess.run(["make", "-s", "stop", f"COMPOSE={compose}"], cwd=ROOT,
                              capture_output=True, text=True, timeout=300)
     assert stopped.returncode == 0, stopped.stderr[-2000:]
-    archive = ANCHOR_DIR.with_name(f"{ANCHOR_DIR.name}-archived-{int(time.time())}")
-    old_chain = cl.registry_state(cl.parse_registry(ANCHOR_DIR / cl.REGISTRY, _host_key())[0]).current
+    archive = av.snapshot(ROOT / "audit_anchors_e6" / f"{av.volume_name()}-archived-{int(time.time())}")
+    old_chain = cl.registry_state(cl.parse_registry(archive / cl.REGISTRY, _host_key())[0]).current
     assert old_chain
-    ANCHOR_DIR.rename(archive)
+    av.remove_volume()
     volume = _compose_config()["volumes"]["db_data"]["name"]
 
     refused = subprocess.run(["make", "reset", "CONFIRM=yes", f"COMPOSE={compose}"], cwd=ROOT,
@@ -1703,11 +1771,9 @@ def test_live_reset_without_anchor_directory_needs_force_and_leaves_a_record():
     assert "nothing was deleted" in refused.stderr and "brings the stand back" in refused.stderr
     assert "down -v" not in refused.stdout
     assert subprocess.run(["docker", "volume", "inspect", volume], capture_output=True).returncode == 0
-    info = ANCHOR_DIR.stat()                               # З-9: made by the user, not by Docker as root
-    assert info.st_uid == os.getuid() != 0
-    acl = subprocess.run(["getfacl", "-cpn", str(ANCHOR_DIR)], capture_output=True, text=True).stdout.split()
-    assert "user:10002:rwx" in acl and "other::---" in acl, acl
-    assert not (ANCHOR_DIR / cl.REGISTRY).exists()
+    assert "volume create --label clinic.audit=keep" in refused.stdout  # a new empty volume ...
+    assert av.check_dir().returncode == 0                              # ... 700, uid 10002, no ACL
+    assert not (av.snapshot() / cl.REGISTRY).exists()
 
     forced = subprocess.run(["make", "reset", "CONFIRM=yes", "RETIRE_FORCE=yes", f"COMPOSE={compose}"], cwd=ROOT,
                             capture_output=True, text=True, timeout=1800)
@@ -1716,11 +1782,11 @@ def test_live_reset_without_anchor_directory_needs_force_and_leaves_a_record():
     assert (archive / cl.REGISTRY).exists()          # the old registry is kept, untouched
     deadline = time.time() + 180
     while time.time() < deadline:
-        kinds = [e.kind for e in cl.parse_registry(ANCHOR_DIR / cl.REGISTRY, _host_key())[0]]
+        kinds = [e.kind for e in cl.parse_registry(av.snapshot() / cl.REGISTRY, _host_key())[0]]
         if kinds == ["retire", "open"]:
             break
         time.sleep(3)
-    entries, _ = cl.parse_registry(ANCHOR_DIR / cl.REGISTRY, _host_key())
+    entries, _ = cl.parse_registry(av.snapshot() / cl.REGISTRY, _host_key())
     assert [(e.kind, e.mode, e.brk) for e in entries] == [("retire", "forced", "no_registry@-"), ("open", None, None)]
     assert entries[0].chain_id == old_chain and entries[1].chain_id == _head_chain()
     time.sleep(15)                                   # one anchor on the new chain
@@ -1736,7 +1802,7 @@ def test_live_reset_without_anchor_directory_needs_force_and_leaves_a_record():
 def _copy_scripts(tmp_path) -> Path:
     work = tmp_path / "repo"
     (work / "scripts").mkdir(parents=True)
-    for name in ("init_secrets.sh", "tls_lib.sh", "anchor_dir.sh"):
+    for name in ("init_secrets.sh", "tls_lib.sh"):
         shutil.copy(ROOT / "scripts" / name, work / "scripts" / name)
     return work
 
@@ -1764,8 +1830,7 @@ def test_init_secrets_without_setfacl_keeps_the_key_600_and_warns(tmp_path):
     key = work / "secrets" / "audit_anchor_key"
     assert stat.S_IMODE(key.stat().st_mode) == 0o600
     assert "audit_anchor_key stays 600" in first.stderr
-    assert "audit_anchors: cannot grant write access" in first.stderr
-    assert stat.S_IMODE((work / "audit_anchors").stat().st_mode) == 0o700
+    assert not (work / "audit_anchors").exists()      # the anchors live in a Docker volume now
     sums = {n: hashlib.sha256((work / "secrets" / n).read_bytes()).hexdigest()
             for n in ("audit_anchor_key", "audit_db_password")}
     second = subprocess.run(["sh", "scripts/init_secrets.sh"], cwd=work, env=env, capture_output=True, text=True)
@@ -1786,7 +1851,9 @@ STUB = r"""#!/bin/sh
 echo "$*" >> "$STUB_LOG"
 case "$*" in
   "config --format json") printf '%s\n' '{"name": "stubproj", "volumes": {"db_data": {"name": "stubproj_db_data"}}, "services": {"audit_anchor": {"volumes": [{"type": "bind", "source": "'"$STUB_ANCHORS"'", "target": "/anchors"}]}}}' ;;
+  "config") printf 'name: stubproj\nvolumes:\n  audit_anchors:\n    name: stubproj_audit_anchors\n    external: true\n  db_data:\n    name: stubproj_db_data\n' ;;
   "ps --status running -q audit_anchor") [ "$STUB_MODE" = running ] && echo abc123 ;;
+  *--check-dir*) exit "${STUB_CHECK_RC:-0}" ;;
   *--retire*) [ -d "$STUB_ANCHORS" ] && echo "anchors-present" >> "$STUB_LOG"
     # STUB_HARNESS: the real anchor.retire on a fake journal (tests/audit_fake.py)
     [ -n "${STUB_HARNESS:-}" ] && exec "$STUB_PYTHON" "$STUB_HARNESS" "$@"
@@ -1801,8 +1868,11 @@ exit 0
 # to the offline retire).
 DOCKER_STUB = r"""#!/bin/sh
 echo "docker $*" >> "$STUB_LOG"
+[ "$1 $2" = "volume create" ] && exit 0
 if [ "$1 $2" = "volume inspect" ]; then
-  case "$STUB_INSPECT" in
+  inspect="$STUB_INSPECT"
+  case "$3" in *_audit_anchors) inspect="${STUB_ANCHOR_INSPECT:-ok}" ;; esac
+  case "$inspect" in
     ok) exit 0 ;;
     missing) echo "Error response from daemon: get $3: no such volume" >&2 ;;
     denied) echo "permission denied while trying to connect to the docker API at unix:///var/run/docker.sock" >&2 ;;
@@ -1841,7 +1911,7 @@ def _exe(path, text):
 
 
 def _make_with_stub(tmp_path, mode: str, *args, rc: int = 0, inspect: str | None = None, sudo: bool = False,
-                    anchors: Path | None = None):
+                    anchors: Path | None = None, anchor_inspect: str = "ok", check_rc: int = 0):
     stub = _exe(tmp_path / "compose.sh", STUB)
     if anchors is None:
         anchors = tmp_path / "anchors"
@@ -1856,6 +1926,7 @@ def _make_with_stub(tmp_path, mode: str, *args, rc: int = 0, inspect: str | None
     if inspect is None:
         inspect = "ok" if mode == "volume" else "missing"
     env = dict(os.environ, STUB_LOG=str(log), STUB_MODE=mode, STUB_RETIRE_RC=str(rc), STUB_INSPECT=inspect,
+               STUB_ANCHOR_INSPECT=anchor_inspect, STUB_CHECK_RC=str(check_rc),
                STUB_COMPOSE=str(stub), STUB_DOCKER=str(fake_docker), STUB_ANCHORS=str(anchors),
                PATH=f"{bin_dir}{os.pathsep}{os.environ.get('PATH', '')}")
     env.pop("DOCKER", None)
@@ -1982,43 +2053,61 @@ def test_compose_without_a_compose_word_needs_docker(tmp_path):
 
 
 @pytest.mark.parametrize("mode", ["running", "volume", "none"])
-def test_missing_anchor_directory_is_created_before_the_retire(tmp_path, mode):
-    """З-9: without the directory Docker would create it as root for the bind
-    mount; reset/fclean create it first (scripts/anchor_dir.sh: 700 + ACL)."""
-    anchors = tmp_path / "gone" / "audit_anchors"
-    done, calls = _make_with_stub(tmp_path, mode, "fclean", "CONFIRM=yes", anchors=anchors)
+def test_missing_anchor_volume_is_created_and_checked_before_the_retire(tmp_path, mode):
+    """З-9 with the volume: a missing anchor volume is created (empty, label
+    clinic.audit=keep) and checked (--check-dir) before the retire, so the
+    retire sees an empty registry (and refuses without RETIRE_FORCE)."""
+    done, calls = _make_with_stub(tmp_path, mode, "fclean", "CONFIRM=yes", anchor_inspect="missing")
     assert done.returncode == 0, done.stdout + done.stderr
-    assert anchors.is_dir() and anchors.stat().st_uid == os.getuid()
-    assert stat.S_IMODE(anchors.stat().st_mode) & 0o077 in (0, 0o070)   # 700, or 770 shown as the ACL mask
-    if shutil.which("getfacl") and shutil.which("setfacl"):
-        acl = subprocess.run(["getfacl", "-cpn", str(anchors)], capture_output=True, text=True).stdout.split()
-        assert "user:10002:rwx" in acl and "other::---" in acl and "group::---" in acl, acl
-    assert "created " in done.stdout and "anchor_dir.sh --strict" in done.stdout
+    create = calls.index("docker volume create --label clinic.audit=keep stubproj_audit_anchors")
+    check = calls.index("run --rm --no-deps -T audit_anchor python anchor.py --check-dir")
     retire = next(i for i, c in enumerate(calls) if "--retire" in c)
-    assert calls[retire + 1] == "anchors-present"          # the directory was there before the retire
+    down = next(i for i, c in enumerate(calls) if c.startswith("down -v"))
+    assert create < check < retire < down
+    assert not any("volume rm stubproj_audit_anchors" in c for c in calls)
 
 
-def test_anchor_directory_that_cannot_be_made_fails_closed(tmp_path):
-    blocker = tmp_path / "file"
-    blocker.write_text("x")
-    done, calls = _make_with_stub(tmp_path, "volume", "fclean", "CONFIRM=yes", anchors=blocker / "audit_anchors")
+def test_existing_anchor_volume_is_kept_and_only_checked(tmp_path):
+    done, calls = _make_with_stub(tmp_path, "volume", "fclean", "CONFIRM=yes")
+    assert done.returncode == 0, done.stdout + done.stderr
+    assert "docker volume inspect stubproj_audit_anchors" in calls
+    assert not any("volume create" in c or "volume rm stubproj_audit_anchors" in c for c in calls), calls
+    assert "run --rm --no-deps -T audit_anchor python anchor.py --check-dir" in calls
+
+
+@pytest.mark.parametrize("target", ["reset", "fclean"])
+def test_anchor_volume_that_fails_the_check_stops_before_the_retire(tmp_path, target):
+    """З-10 with the volume: not 700 / uid 10002 / no ACL -> nothing closed, nothing deleted."""
+    done, calls = _make_with_stub(tmp_path, "volume", target, "CONFIRM=yes", check_rc=1)
     assert done.returncode != 0
-    assert "cannot prepare the anchor directory" in done.stderr and "nothing was deleted" in done.stderr
+    assert "is not 700 / uid 10002" in done.stderr and "nothing was deleted" in done.stderr
     assert "proxy and api are stopped" in done.stderr
-    assert not any("--retire" in c or c.startswith("down") for c in calls), calls
+    assert not any("--retire" in c or c.startswith(("down", "up")) for c in calls), calls
 
 
-def test_anchor_directory_without_acl_access_fails_closed_in_strict_mode(tmp_path):
-    if os.geteuid() == 0:
-        pytest.skip("root can chown instead")
-    work = tmp_path / "w"
-    env = dict(os.environ, PATH=_path_without(tmp_path, "setfacl"))
-    done = subprocess.run(["sh", str(ROOT / "scripts" / "anchor_dir.sh"), "--strict", str(work)],
-                          env=env, capture_output=True, text=True)
-    assert done.returncode == 1 and "cannot grant write access" in done.stderr
-    loose = subprocess.run(["sh", str(ROOT / "scripts" / "anchor_dir.sh"), str(tmp_path / "w2")],
-                           env=env, capture_output=True, text=True)
-    assert loose.returncode == 0 and "cannot grant write access" in loose.stderr   # init_secrets: a warning
+@pytest.mark.parametrize("inspect, hint", [
+    ("denied", "permission denied"),
+    ("nodaemon", "Cannot connect to the Docker daemon"),
+])
+def test_anchor_volume_lookup_error_fails_closed(tmp_path, inspect, hint):
+    done, calls = _make_with_stub(tmp_path, "volume", "fclean", "CONFIRM=yes", anchor_inspect=inspect)
+    assert done.returncode != 0
+    assert "cannot tell whether the volume stubproj_audit_anchors exists" in done.stderr and hint in done.stderr
+    assert "nothing was deleted" in done.stderr
+    assert not any("volume create" in c or "--retire" in c or c.startswith("down") for c in calls), calls
+
+
+def test_compose_keeps_the_anchor_volume_out_of_down_v():
+    """down -v removes the volumes of the project, never an external one."""
+    config = _compose_config()
+    volume = config["volumes"]["audit_anchors"]
+    assert volume["external"] is True
+    assert volume["name"] == os.environ.get("CLINIC_AUDIT_ANCHOR_VOLUME") or volume["name"].endswith("_audit_anchors")
+    for name in AUDIT_SERVICES:
+        mounts = [v for v in config["services"][name]["volumes"] if v["target"] == "/anchors"]
+        assert mounts == [{"type": "volume", "source": "audit_anchors", "target": "/anchors", "volume": {}}], mounts
+    text = (ROOT / "docker" / "audit_anchor" / "Dockerfile").read_text()
+    assert "RUN mkdir /anchors && chown 10002:10002 /anchors && chmod 700 /anchors" in text
 
 
 RETIRE_HARNESS = r"""
@@ -2071,29 +2160,6 @@ def test_reset_without_registry_and_an_empty_chain_passes(tmp_path, monkeypatch)
     assert any(c.startswith("down -v") for c in calls)
 
 
-@pytest.mark.skipif(os.geteuid() == 0, reason="root may own anything")
-@pytest.mark.parametrize("setup, message", [
-    ("foreign_owner", "belongs to uid"),
-    ("extra_acl", "is not 700 + ACL u:10002:rwx"),
-])
-def test_anchor_directory_with_a_wrong_owner_or_acl_stops_make(tmp_path, setup, message):
-    """З-10 (small): an existing directory owned by someone else (root 755 after
-    Docker made it) or with extra ACL entries stops reset/fclean before the retire."""
-    if not (shutil.which("getfacl") and shutil.which("setfacl")):
-        pytest.skip("needs the acl tools")
-    if setup == "foreign_owner":
-        anchors = Path("/")            # exists, owned by root, 755
-    else:
-        anchors = tmp_path / "anchors"
-        anchors.mkdir(mode=0o700)
-        subprocess.run(["setfacl", "-m", "u:10002:rwx,g:" + str(os.getgid()) + ":r-x", str(anchors)], check=True)
-    done, calls = _make_with_stub(tmp_path, "volume", "fclean", "CONFIRM=yes", anchors=anchors)
-    assert done.returncode != 0
-    assert message in done.stderr and "cannot prepare the anchor directory" in done.stderr
-    assert "nothing was deleted" in done.stderr
-    assert not any("--retire" in c or c.startswith("down") for c in calls), calls
-
-
 def test_makefile_run_has_no_no_build_flag():
     # Н-1: "docker compose run" has no --no-build (Compose 2.32 and 5.x reject it)
     text = (ROOT / "Makefile").read_text()
@@ -2125,7 +2191,7 @@ def test_forced_retire_passes_force_and_falls_back_offline(tmp_path):
     assert not any(c.startswith("down") for c in calls)
 
 
-# --- E6 guard (§10.1 П-3c.2): never the main anchor directory or another stand -------
+# --- E6 guard (§10.1 П-3c.2): never the anchor volume or ports of another stand ------
 
 def _e6_module():
     sys.path.insert(0, str(ROOT / "experiments"))
@@ -2134,17 +2200,18 @@ def _e6_module():
 
 
 @pytest.mark.parametrize("anchor, port, ok", [
-    ("./audit_anchors_e6/20261116-1910", 8456, True),
-    ("./audit_anchors", 8456, False),
-    ("./audit_anchors/inner", 8456, False),
+    ("e6_audit_anchors_20261116-1910", 8456, True),
+    ("fixer_audit_anchors", 8456, False),
+    ("planera_audit_anchors", 8456, False),
+    ("clinic_docker_audit_anchors", 8456, False),
     ("", 8456, False),
-    ("./audit_anchors_e6/x", 8452, False),
-    ("./audit_anchors_e6/x", 8453, False),
+    ("e6_audit_anchors_x", 8452, False),
+    ("e6_audit_anchors_x", 8453, False),
 ])
 def test_unit_e6_guard_refuses_the_main_anchor_dir_and_other_stands(tmp_path, anchor, port, ok):
     e6 = _e6_module()
     env = tmp_path / ".env.e6"
-    env.write_text(f"CLINIC_AUDIT_ANCHOR_DIR={anchor}\nCLINIC_PROXY_PORT=8086\nCLINIC_PROXY_TLS_PORT={port}\n")
+    env.write_text(f"CLINIC_AUDIT_ANCHOR_VOLUME={anchor}\nCLINIC_PROXY_PORT=8086\nCLINIC_PROXY_TLS_PORT={port}\n")
     if ok:
         e6.guard(env)
     else:
