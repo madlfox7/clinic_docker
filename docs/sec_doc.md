@@ -97,5 +97,8 @@ git grep -n "<значение секрета>"                                 
 | SHA-256-цепочка `seq`/`prev_hash`/`row_hash`, канон v1 | `db/init.sql`, `audit/canon.py` (независимая реализация) | `tests/test_audit_chain.py`, `make audit-verify` |
 | HMAC-якоря раз в 60 с, реестр цепочек, `flock` на запись | `audit/anchor.py`, `audit/chainlib.py`, сервис `audit_anchor` | `tests/test_audit_chain.py` (20 параллельных `--once`) |
 | Обнаружение подделки | `audit/verify_audit.py` | E6: `experiments/e6_report.md` (20/20) |
+| Полная проверка цепочки раз в `CLINIC_AUDIT_FULL_CHECK_EVERY` (600 с) и публичный `status.json` (белый список полей, атомарная запись) | `audit/anchor.py`, том `audit_status` | `tests/test_audit_chain.py` |
+| Плашка «Log integrity» на `/admin/audit` (OK только при свежих и целых проверках, после подмены цепочки — красная навсегда; индикатор, не источник истины) | `app/audit_status.py`, `app/routes_admin.py`, том `audit_status` (`ro` в `api`) | `tests/test_audit_status_ui.py` |
+| Аудит просмотров журнала: `audit.view`, маска фильтров без значений, окно 10 мин, fail closed 503 | `db/rls.sql` (`record_audit_view`, только `app_admin`), `app/routes_admin.py` | `tests/test_audit_view.py` |
 
-Ограничения: правка после последнего якоря (окно до 60 с) не видна; root хоста получает БД, ключ и якоря, поэтому якоря в проде надо копировать за пределы хоста (README, раздел про журнал).
+Ограничения: правка после последнего якоря (окно до 60 с) не видна; root хоста получает БД, ключ и якоря, поэтому якоря в проде надо копировать за пределы хоста (README, раздел про журнал). Плашка целостности живёт на том же хосте и поэтому только индикатор. Подтверждение reset и retire вторым оператором с другой машины — рекомендация для прода (README, «Прод: подтверждение reset и retire на двух машинах»), в стенде не реализовано.
