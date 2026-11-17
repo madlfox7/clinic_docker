@@ -329,6 +329,70 @@ BEGIN
 END;
 $function$;
 
+-- Plan 18.3: views of the admin journal (/admin/audit) are journaled too, as
+-- audit.view by the admin, target audit_log, target_id = the bit mask of the
+-- filters used (1 action, 2 actor_role, 4 actor, 8 target_type, 16 target_id,
+-- 32 from, 64 to). Never a filter value (no email, no id, no date, no hash).
+-- The same mask by the same admin is written again only after the window
+-- (audit_view_window) since the last written one, so F5 adds at most one row
+-- per window and a new set of filters is always written. The journal itself
+-- is the dedup state; the advisory lock serialises one admin with himself
+-- (lock order: advisory lock, then the chain head on INSERT).
+-- The window is a constant here, not a parameter: the api cannot change it.
+-- STABLE, not IMMUTABLE, so a replaced value is not kept in a cached plan.
+CREATE OR REPLACE FUNCTION public.audit_view_window()
+RETURNS interval
+LANGUAGE sql
+STABLE
+SET search_path = pg_catalog, public, pg_temp
+AS $function$
+  SELECT interval '10 minutes'
+$function$;
+
+CREATE OR REPLACE FUNCTION public.record_audit_view(filter_mask integer)
+RETURNS boolean
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = pg_catalog, public, pg_temp
+AS $function$
+DECLARE
+  actor_id integer := NULLIF(current_setting('app.user_id', true), '')::integer;
+  app_role text := current_setting('role', true);
+  actor_role text;
+BEGIN
+  SELECT u.role INTO actor_role
+  FROM public.users AS u
+  WHERE u.id = actor_id;
+
+  IF actor_role IS DISTINCT FROM 'admin'
+     OR app_role IS DISTINCT FROM 'app_admin' THEN
+    RAISE EXCEPTION 'invalid audit context'
+      USING ERRCODE = '42501';
+  END IF;
+  IF filter_mask IS NULL OR filter_mask NOT BETWEEN 0 AND 127 THEN
+    RAISE EXCEPTION 'invalid audit view filter mask'
+      USING ERRCODE = '22023';
+  END IF;
+
+  PERFORM pg_advisory_xact_lock(hashtext('audit.view'), actor_id);
+  IF EXISTS (
+    SELECT 1 FROM public.audit_events
+    WHERE action = 'audit.view'
+      AND actor_user_id = actor_id
+      AND target_id = filter_mask
+      AND created_at > CURRENT_TIMESTAMP - public.audit_view_window()
+  ) THEN
+    RETURN FALSE;
+  END IF;
+
+  INSERT INTO public.audit_events (
+    actor_user_id, actor_role, action, target_type, target_id
+  )
+  VALUES (actor_id, 'admin', 'audit.view', 'audit_log', filter_mask);
+  RETURN TRUE;
+END;
+$function$;
+
 -- Sign-in journal (auth.*), called only from the SECURITY DEFINER auth
 -- functions below. One INSERT per call; auth.rate_limited is written at most
 -- once per 15 minutes for the same reason, source and account. A journal error
@@ -1229,6 +1293,8 @@ REVOKE ALL ON FUNCTION public.scheduled_slot_is_taken(integer) FROM PUBLIC;
 REVOKE ALL ON FUNCTION public.doctor_is_active(integer) FROM PUBLIC;
 REVOKE ALL ON FUNCTION public.is_valid_free_slot(integer, integer, timestamp, timestamp, timestamp) FROM PUBLIC;
 REVOKE ALL ON FUNCTION public.record_audit_event(text, text, integer) FROM PUBLIC;
+REVOKE ALL ON FUNCTION public.record_audit_view(integer) FROM PUBLIC;
+REVOKE ALL ON FUNCTION public.audit_view_window() FROM PUBLIC;
 DROP FUNCTION IF EXISTS public.admin_request_password_reset(integer);
 CREATE OR REPLACE FUNCTION public.admin_request_password_reset(
   target_user_id integer
@@ -1327,6 +1393,8 @@ GRANT EXECUTE ON FUNCTION public.is_valid_free_slot(
 ) TO app_patient, app_registrar;
 GRANT EXECUTE ON FUNCTION public.record_audit_event(text, text, integer)
   TO app_patient, app_doctor, app_registrar, app_admin;
+-- audit.view (plan 18.3): admins only; audit_view_window is not granted to anyone.
+GRANT EXECUTE ON FUNCTION public.record_audit_view(integer) TO app_admin;
 REVOKE ALL ON FUNCTION public.admin_request_password_reset(integer) FROM PUBLIC;
 GRANT EXECUTE ON FUNCTION public.admin_request_password_reset(integer) TO app_admin;
 CREATE OR REPLACE FUNCTION public.revoke_patient_password_reset(raw_token text)

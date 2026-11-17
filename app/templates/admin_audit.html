@@ -68,7 +68,7 @@
         <td>{{ event.actor_email or "—" }}</td>
         <td>{{ event.actor_role }}</td>
         <td><code>{{ event.action }}</code></td>
-        <td>{{ event.target_type }}{% if event.target_id is not none %} #{{ event.target_id }}{% endif %}</td>
+        <td>{{ event.target_type }}{% if event.view_filters is not none %} (filters: {{ event.view_filters|join(", ") if event.view_filters else "none" }}){% elif event.target_id is not none %} #{{ event.target_id }}{% endif %}</td>
         <td>{{ event.reason or "" }}</td>
         <td>{{ event.source or "" }}</td>
         <td>{% if event.old_value is not none and event.new_value is not none %}{{ event.old_value }} → {{ event.new_value }}{% endif %}</td>

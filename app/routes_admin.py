@@ -79,6 +79,7 @@ AUDIT_ACTIONS = (
     "admin.create_denied",
     "appointment.book", "appointment.cancel", "appointment.cancel_future",
     "appointment.complete", "appointment.reschedule",
+    "audit.view",
     "auth.login.failure", "auth.login.success", "auth.logout",
     "auth.rate_limited", "auth.session_expired",
     "clinic.change_deadline.update", "clinic.session_idle.update",
@@ -99,18 +100,53 @@ AUDIT_ACTIONS = (
 )
 AUDIT_ACTION_PREFIXES = (
     "auth.", "appointment.", "medical.", "schedule.", "user.",
-    "service.", "doctor.", "clinic.", "patient.",
+    "service.", "doctor.", "clinic.", "patient.", "audit.",
 )
 AUDIT_ACTOR_ROLES = ("admin", "doctor", "patient", "registrar", "anonymous")
 AUDIT_TARGET_TYPES = (
-    "admin", "appointment", "clinic", "doctor", "holiday", "patient",
+    "admin", "appointment", "audit_log", "clinic", "doctor", "holiday", "patient",
     "registrar", "service", "time_off_request", "user",
 )
 AUDIT_ID_MAX = 9_223_372_036_854_775_807
+# audit.view (plan 18.3): target_id is the bit mask of the filters used, never
+# their values. before_id (paging) is not a filter.
+AUDIT_VIEW_FILTER_BITS = (
+    ("action", 1), ("actor_role", 2), ("actor", 4), ("target_type", 8),
+    ("target_id", 16), ("from", 32), ("to", 64),
+)
+AUDIT_VIEW_UNAVAILABLE = "The audit log is unavailable: the view could not be recorded."
 # Banner "Log integrity" (plan 18.2): the api takes the intervals from its own
 # environment (same names and ranges as audit_anchor), never from the file.
 AUDIT_ANCHOR_INTERVAL = env_seconds("CLINIC_AUDIT_ANCHOR_INTERVAL", INTERVAL_DEFAULT, INTERVAL_RANGE)
 AUDIT_FULL_CHECK_EVERY = env_seconds("CLINIC_AUDIT_FULL_CHECK_EVERY", FULL_EVERY_DEFAULT, FULL_EVERY_RANGE)
+
+
+def audit_view_mask(filters: dict) -> int:
+    """Bit mask of the accepted filters (invalid ones are not in filters)."""
+    return sum(bit for name, bit in AUDIT_VIEW_FILTER_BITS if name in filters)
+
+
+def audit_view_filter_names(mask) -> list:
+    """The filter names of an audit.view mask, for the journal page."""
+    if not isinstance(mask, int):
+        return []
+    return [name for name, bit in AUDIT_VIEW_FILTER_BITS if mask & bit]
+
+
+def _record_audit_view(admin_user, filters: dict) -> bool:
+    try:
+        conn = db_as(admin_user)
+        try:
+            with conn.cursor() as cur:
+                cur.execute("SELECT public.record_audit_view(%s)", (audit_view_mask(filters),))
+            conn.commit()
+        finally:
+            conn.close()
+    except psycopg2.Error as exc:
+        # only the type: never a filter value or a query
+        log.warning("audit view not recorded: %s", type(exc).__name__)
+        return False
+    return True
 
 
 @router.get("/admin/audit")
@@ -203,6 +239,22 @@ def admin_audit(request: Request):
         if before_id is None:
             errors.append("invalid_filter")
 
+    # Plan 18.3: the view is journaled first, in its own transaction; if it
+    # cannot be written the journal is not shown (fail closed, 503, no 500).
+    if not _record_audit_view(admin_user, filters):
+        return templates.TemplateResponse(
+            request,
+            "error.html",
+            {
+                "request": request,
+                "role": admin_user["role"],
+                "title": "Audit log unavailable",
+                "message": AUDIT_VIEW_UNAVAILABLE,
+            },
+            status_code=503,
+            headers={"Cache-Control": "no-store"},
+        )
+
     conn = db_as(admin_user)
     cur = conn.cursor()
     events = []
@@ -249,6 +301,9 @@ def admin_audit(request: Request):
                 "source": row[8],
                 "old_value": row[9],
                 "new_value": row[10],
+                "view_filters": (
+                    audit_view_filter_names(row[6]) if row[4] == "audit.view" else None
+                ),
             }
             for row in rows[:AUDIT_PAGE_SIZE]
         ]

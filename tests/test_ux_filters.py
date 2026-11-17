@@ -419,7 +419,7 @@ def test_audit_log_keyset_pages_without_gaps_or_repeats():
         "SELECT id FROM audit_events WHERE target_type = 'clinic' "
         f"AND target_id = {target} ORDER BY id DESC"
     )]
-    before = int(_psql("SELECT count(*) FROM audit_events WHERE action LIKE 'audit.%'")[0])
+    mark = int(_psql("SELECT coalesce(max(id), 0) FROM audit_events")[0])
     with _client() as admin:
         _login(admin, ADMIN)
         params = {"target_type": "clinic", "target_id": str(target)}
@@ -445,8 +445,16 @@ def test_audit_log_keyset_pages_without_gaps_or_repeats():
         assert PAT_NAME not in full and PAT_PHONE not in full
         patients = admin.get("/admin/audit", params={"target_type": "patient"}).text
         assert PAT_NAME not in patients and PAT_PHONE not in patients
-    after = int(_psql("SELECT count(*) FROM audit_events WHERE action LIKE 'audit.%'")[0])
-    assert before == after == 0
+    # Viewing the journal journals only the view itself (plan 18.3): audit.view by
+    # the admin, target audit_log, target_id = the filter mask (24 type+id, 0 none,
+    # 8 type), at most once per mask in the window; paging and Newest add nothing.
+    views = _psql(
+        "SELECT action || '|' || actor_user_id || '|' || target_type || '|' || target_id "
+        f"FROM audit_events WHERE id > {mark} AND action LIKE 'audit.%'"
+    )
+    admin_id = _psql(f"SELECT id FROM users WHERE email = '{ADMIN}'")[0]
+    allowed = {f"audit.view|{admin_id}|audit_log|{mask}" for mask in (24, 0, 8)}
+    assert set(views) <= allowed and len(views) == len(set(views)), views
 
 
 # --- 5. Reschedule (5.9) ------------------------------------------------------

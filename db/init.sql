@@ -942,6 +942,12 @@ CREATE INDEX IF NOT EXISTS audit_events_reschedule_actor_idx
   ON audit_events (actor_user_id, created_at)
   WHERE action = 'appointment.reschedule';
 
+-- The dedup of audit.view (plan 18.3, public.record_audit_view) looks up the
+-- last view of one admin with one filter mask.
+CREATE INDEX IF NOT EXISTS audit_events_view_actor_idx
+  ON audit_events (actor_user_id, target_id, created_at)
+  WHERE action = 'audit.view';
+
 -- ---------------------------------------------------------------------------
 -- Audit hash chain (plan 17 §6). Every row carries seq, the hash of the row
 -- before it (prev_hash) and its own hash (row_hash = audit_row_hash_v1(prev_hash,
