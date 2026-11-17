@@ -1072,6 +1072,203 @@ ANCHOR_DIR = ROOT / os.environ.get("CLINIC_AUDIT_ANCHOR_DIR", "audit_anchors")
 SERVICES_WITHOUT_KEY = ("db", "migrate", "api", "seed", "proxy", "mailpit")
 
 
+# --- plan 18.1: full check every N seconds and the public status file ---------
+
+PUBLIC_KEYS = {"v", "state", "checked_at", "full_checked_at", "full_ok", "anchored_at", "last_anchor_seq",
+               "problem", "retired_forced", "retired_offline", "replaced_history"}
+_UUID_TEXT = re.compile(r"[0-9a-f-]{36}")
+
+
+def _service(d, src, full_every=600):
+    """The loop of anchor.main without the sleep: (PublicStatus, step(now) -> data, list of full flags)."""
+    public, fulls = anchor.PublicStatus(full_every), []
+
+    def do_cycle(full):
+        fulls.append(full)
+        return anchor.cycle(d, KEY, src, full=full)
+
+    return public, (lambda now: public.step(now, do_cycle)[1]), fulls
+
+
+def test_full_check_runs_every_n_and_on_start(tmp_path):
+    d, src = _dir(tmp_path), FakeSource(rows=3)
+    public, step, fulls = _service(d, src, full_every=600)
+    for now in (1000, 1060, 1599, 1600, 1660, 2199, 2200):
+        data = step(now)
+    assert fulls == [True, False, False, True, False, False, True]
+    assert data["full_checked_at"] == 2200 and data["full_ok"] is True and data["state"] == "ok"
+
+
+def test_full_check_failure_is_retried_on_the_next_cycle(tmp_path):
+    public, fulls = anchor.PublicStatus(600), []
+
+    def database_down(full):
+        fulls.append(full)
+        return anchor.Result(False, "error", "database", line="ERROR audit cycle failed: OperationalError")
+
+    for now in (1000, 1060):
+        public.step(now, database_down)
+    assert fulls == [True, True] and public.full_checked_at is None
+
+
+def test_full_check_catches_tampered_row_before_last_anchor(tmp_path):
+    d, src = _dir(tmp_path), FakeSource(rows=5)
+    public, step, _ = _service(d, src)
+    assert step(1000)["state"] == "ok"          # full check on start, anchor at seq 5
+    src.add(2)
+    src.rows[1]["target_id"] = 99               # seq 2, before the last anchor
+    data = step(1060)                           # incremental step only
+    assert data["state"] == "ok" and data["full_ok"] is True
+    assert anchor.cycle(d, KEY, src).ok         # the incremental check alone does not see it
+    data = step(1600)                           # full check
+    assert data["state"] == "broken" and data["full_ok"] is False
+    assert data["problem"] == {"type": "row_hash", "seq": 2, "kind": None}
+    data = step(1660)                           # stays broken until a full check is ok again
+    assert data["state"] == "broken" and data["problem"]["type"] == "row_hash"
+
+
+def _assert_public_schema(data):
+    assert set(data) == PUBLIC_KEYS
+    text = json.dumps(data)
+    assert not _UUID_TEXT.search(text), text
+    assert not re.search(r"[0-9a-f]{64}", text), text
+    # no key or value names a detail, a MAC, a hash, a chain, a path (the
+    # problem type is checked against the whitelist below)
+    bare = json.dumps({**data, "problem": None})
+    for word in ("detail", "mac", "hash", "chain", "path", "anchors", "/"):
+        assert word not in bare, (word, bare)
+    if data["problem"] is not None:
+        assert set(data["problem"]) == {"type", "seq", "kind"}
+        allowed = anchor.UNCHECKED_REASONS if data["state"] == "unchecked" else anchor.PROBLEM_TYPES
+        assert data["problem"]["type"] in allowed
+
+
+def test_public_status_schema_whitelist(tmp_path):
+    d, src = _dir(tmp_path), FakeSource(rows=3)
+    public, step, _ = _service(d, src)
+    _assert_public_schema(step(1000))
+    src.add(1)
+    src.rows[-1]["action"] = "test.changed"          # a break after the last anchor
+    data = step(1060)
+    _assert_public_schema(data)
+    assert data["state"] == "broken" and data["problem"] == {"type": "row_hash", "seq": 4, "kind": None}
+    other = FakeSource(rows=1)                        # a new chain without retire
+    _, step2, _ = _service(d, other)
+    data = step2(1000)
+    _assert_public_schema(data)
+    assert data["state"] == "broken" and data["problem"]["type"] == "chain_replaced"
+    assert data["problem"]["kind"] == "new"
+
+
+def test_unknown_problem_type_is_written_as_unknown():
+    public = anchor.PublicStatus(600)
+    _, data = public.step(1000, lambda full: anchor.Result(False, "error", "something/else", seq=3))
+    assert data["state"] == "broken" and data["problem"] == {"type": "unknown", "seq": 3, "kind": None}
+
+
+def test_replaced_history_survives_retire_and_new_open(tmp_path):
+    d, old = _dir(tmp_path), FakeSource(rows=2)
+    _, step, _ = _service(d, old)
+    assert step(1000)["state"] == "ok"
+    new = FakeSource(rows=1)
+    _, step, _ = _service(d, new)
+    data = step(1000)
+    assert data["state"] == "broken" and data["replaced_history"] == 1
+    assert anchor.retire(KEY, True, False, d, lambda: (new, lambda: None)) == 0   # RETIRE_FORCE
+    fresh = FakeSource(rows=0)                      # make reset: a new volume, a new chain
+    _, step, _ = _service(d, fresh)
+    for now in (5000, 5060, 5600):
+        data = step(now)
+        assert data["state"] == "broken" and data["replaced_history"] == 1, data
+        assert data["retired_forced"] == 1
+    assert _registry(d)[-1] == "open:"
+
+
+def test_unchecked_on_database_error_and_retired(tmp_path):
+    public = anchor.PublicStatus(600)
+    for error in ("database", "anchor_dir"):
+        _, data = public.step(1000, lambda full: anchor.Result(False, "error", error))
+        assert data["state"] == "unchecked", error
+        assert data["problem"] == {"type": error, "seq": None, "kind": None}
+    d, src = _retired(tmp_path)
+    _, step, _ = _service(d, src)
+    data = step(1000)
+    assert data["state"] == "unchecked" and data["full_ok"] is True
+    assert data["problem"] == {"type": "retired", "seq": None, "kind": None}
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root writes anywhere")
+def test_unchecked_when_the_anchor_directory_is_not_writable(tmp_path):
+    d, src = _dir(tmp_path), FakeSource(rows=1)
+    _, step, _ = _service(d, src)
+    assert step(1000)["state"] == "ok"
+    d.chmod(0o500)
+    try:
+        data = step(1060)
+    finally:
+        d.chmod(0o700)
+    assert data["state"] == "unchecked" and data["problem"]["type"] == "anchor_dir"
+
+
+def test_atomic_write_never_partial(tmp_path):
+    status = tmp_path / "status"
+    status.mkdir()
+    anchor.write_public_status(status, {"v": 1, "n": 0})
+    errors = []
+
+    def writer():
+        for n in range(1000):
+            anchor.write_public_status(status, {"v": 1, "n": n, "pad": "x" * (n % 50) * 40})
+
+    def reader():
+        for _ in range(1000):
+            try:
+                json.loads((status / anchor.PUBLIC_STATUS_NAME).read_text())
+            except ValueError as exc:
+                errors.append(exc)
+
+    threads = [threading.Thread(target=writer), threading.Thread(target=reader)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    assert errors == []
+    assert oct((status / anchor.PUBLIC_STATUS_NAME).stat().st_mode & 0o777) == "0o644"
+    assert sorted(p.name for p in status.iterdir()) == [anchor.PUBLIC_STATUS_NAME]
+
+
+def test_atomic_write_does_not_follow_a_planted_symlink(tmp_path):
+    status, target = tmp_path / "status", tmp_path / "elsewhere"
+    status.mkdir()
+    target.write_text("keep")
+    (status / f".{anchor.PUBLIC_STATUS_NAME}.tmp").symlink_to(target)
+    with pytest.raises(OSError):
+        anchor.write_public_status(status, {"v": 1})
+    assert target.read_text() == "keep"
+
+
+@pytest.mark.parametrize("value", ["59", "86401", "abc", "", "-60", "600.0"])
+def test_full_check_every_validation(monkeypatch, value):
+    monkeypatch.setenv("CLINIC_AUDIT_FULL_CHECK_EVERY", value)
+    with pytest.raises(SystemExit):
+        anchor.full_check_every()
+
+
+def test_full_check_every_bounds_and_default(monkeypatch):
+    monkeypatch.delenv("CLINIC_AUDIT_FULL_CHECK_EVERY", raising=False)
+    assert anchor.full_check_every() == 600
+    for value in ("60", "86400"):
+        monkeypatch.setenv("CLINIC_AUDIT_FULL_CHECK_EVERY", value)
+        assert anchor.full_check_every() == int(value)
+
+
+def test_once_retire_and_health_do_not_write_the_public_status():
+    source = (ROOT / "audit" / "anchor.py").read_text()
+    main = source[source.index("def main("):]
+    assert main.count("write_public_status(") == 1
+    assert main.index("write_public_status(") > main.index("while True:")
+
+
 def _compose_config() -> dict:
     done = subprocess.run(["docker", "compose", "config", "--format", "json"], cwd=ROOT,
                           capture_output=True, text=True, timeout=60)
@@ -1107,7 +1304,10 @@ def test_compose_mounts_the_key_only_on_audit_anchor_and_hardens_it():
         assert anchor_service.get("cap_drop") == ["ALL"], name
         assert "no-new-privileges:true" in anchor_service.get("security_opt", []), name
         assert not anchor_service.get("ports"), name
-    assert services["audit_prepare"]["volumes"] == services["audit_anchor"]["volumes"]
+    # the same anchor directory; /status (plan 18.1) only on the loop
+    anchors = [v for v in services["audit_anchor"]["volumes"] if v["target"] == "/anchors"]
+    assert services["audit_prepare"]["volumes"] == anchors
+    assert {v["target"] for v in services["audit_anchor"]["volumes"]} == {"/anchors", "/status"}
     assert services["audit_prepare"]["command"] == ["python", "anchor.py", "--prepare"]
 
 
@@ -1266,6 +1466,32 @@ def test_audit_anchor_is_healthy():
             break
         time.sleep(3)
     assert state == "healthy", state
+
+
+def _public_status() -> dict:
+    done = subprocess.run(["docker", "compose", "exec", "-T", "audit_anchor", "cat", "/status/status.json"],
+                          cwd=ROOT, capture_output=True, text=True, timeout=60)
+    assert done.returncode == 0, done.stderr
+    return json.loads(done.stdout)
+
+
+def test_status_file_written_and_fresh():
+    """18.1: the loop writes /status/status.json; full check on start."""
+    every = int(os.environ.get("CLINIC_AUDIT_ANCHOR_INTERVAL", "60"))
+    deadline = time.time() + 2 * every + 30
+    while True:
+        data = _public_status()
+        if data["full_checked_at"] is not None or time.time() > deadline:
+            break
+        time.sleep(3)
+    assert set(data) == PUBLIC_KEYS
+    assert data["state"] == "ok", data
+    assert time.time() - data["checked_at"] <= 2 * every + 15
+    assert data["full_checked_at"] is not None and data["full_ok"] is True
+    owner = subprocess.run(["docker", "compose", "exec", "-T", "audit_anchor", "stat", "-c", "%u %a",
+                            "/status", "/status/status.json"],
+                           cwd=ROOT, capture_output=True, text=True, timeout=60).stdout.split()
+    assert owner == ["10002", "755", "10002", "644"], owner
 
 
 def test_make_audit_verify_is_ok_on_an_intact_journal():
