@@ -1,20 +1,9 @@
 #!/usr/bin/env sh
-# Put a new certificate in place without stopping the proxy (certbot
-# deploy-hook or a reissued stand leaf):
-#   scripts/tls_reload.sh NEW_KEY NEW_FULLCHAIN
-# 1. check the candidate (same checks as tls-check); live files untouched on error;
-# 2. back up the live pair to secrets/tls/backup-<UTC>/ (700, files 600);
-# 3. write into the existing files (same inode as the Compose secrets), key first;
-# 4. nginx -t in the running proxy; on error restore the backup and stop;
-# 5. nginx -s reload (graceful);
-# 6. compare the serial the server hands out with the candidate's.
-# COMPOSE comes from the environment like in the Makefile (default
-# "docker compose"). Nothing is deleted; backup-* directories are yours.
+# Safely reload the live certificate; restore backups on failure.
 set -eu
 umask 077
 [ "$#" -eq 2 ] || { echo "error   usage: scripts/tls_reload.sh NEW_KEY NEW_FULLCHAIN" >&2; exit 1; }
-# Paths as given (for messages) and resolved against the caller's directory,
-# before the script moves to the repository root.
+# Resolve input paths before changing directories.
 key_arg="$1"
 cert_arg="$2"
 case "$key_arg" in /*) new_key="$key_arg" ;; *) new_key="$PWD/$key_arg" ;; esac
@@ -32,8 +21,7 @@ flock -n 9 || tls_fail "reload already running (lock $TLS_DIR/.reload.lock)"
 
 tls_settings
 tls_check_settings
-# Copies first: the arguments may be the live files' own backups, or paths
-# certbot replaces while we run.
+# Copy candidates before replacing live files.
 tls_tmp cand_key
 tls_tmp cand_cert
 [ -r "$new_key" ] && [ -f "$new_key" ] || tls_fail "cannot read $key_arg"
@@ -55,8 +43,7 @@ $COMPOSE exec -T proxy nginx -s reload >/dev/null 2>&1 || tls_fail "nginx -s rel
 echo "reload  proxy, candidate serial $cand_serial"
 
 if tls_host_is_ip "$CERT_HOST"; then sni=-noservername; else sni="-servername $CERT_HOST"; fi
-# The serial is read where the proxy is published: CLINIC_PROXY_BIND if it
-# names one address, else the loopback.
+# Verify serial at the proxy's published address.
 bind="$(env_or_dotenv CLINIC_PROXY_BIND)"
 case "$bind" in
   ''|0.0.0.0) check_addr="127.0.0.1:$TLS_PORT" ;;

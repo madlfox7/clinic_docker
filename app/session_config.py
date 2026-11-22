@@ -1,26 +1,21 @@
-"""Session cookie settings, read once from the environment at import.
-
-A bad value stops the api at startup instead of silently falling back.
-The idle timeout is not configured here: the admin sets it in clinic
-settings (clinic_settings.session_idle_minutes) and it is read per request.
-"""
+"""Load cookie settings at startup; read the idle timeout per request."""
 import os
 import re
 
 _DIGITS = re.compile(r"[0-9]{1,3}")
 
-# Used only when the idle setting cannot be read from the database.
+# DB fallback.
 IDLE_FALLBACK_MINUTES = 30
-# Same range as the clinic_settings_session_idle_check constraint.
+# Match DB constraint.
 IDLE_MIN = 5
 IDLE_MAX = 120
-# Patient cancel/reschedule deadline in hours.
-# Same range as clinic_settings_change_deadline_check.
+# Patient deadline, hours.
+# Match DB constraint.
 DEADLINE_MIN = 0
 DEADLINE_MAX = 48
-# "seen" is rewritten (and the cookie re-sent) at most once a minute.
+# Refresh cookie once a minute.
 SESSION_TOUCH_SECONDS = 60
-# Timestamps further in the future than this are treated as a forged or legacy cookie.
+# Reject future timestamps.
 CLOCK_SKEW_SECONDS = 60
 
 
@@ -45,7 +40,7 @@ def _same_site() -> str:
 def _https_only() -> bool:
     raw = os.environ.get("SESSION_HTTPS_ONLY")
     if raw is None:
-        # Fail safe: an api started without compose still marks the cookie Secure.
+        # Keep cookies secure outside Compose.
         return True
     if raw not in ("true", "false"):
         raise RuntimeError("SESSION_HTTPS_ONLY must be true or false")

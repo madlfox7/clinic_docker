@@ -128,7 +128,7 @@ def test_mailpit_cannot_reach_proxy_or_db():
         container_ips.update(inspect.stdout.split())
     assert container_ips
     for name in ("proxy", "db"):
-        # Some hosts answer every unknown name (fake-IP DNS); it must never be the container.
+        # Guard against fake-IP DNS.
         resolved = compose_exec_run("mailpit", ["getent", "hosts", name]).stdout.split()
         assert not container_ips.intersection(resolved), (name, resolved)
 

@@ -56,7 +56,7 @@ PG_INT_MIN = -2_147_483_648
 PG_INT_MAX = 2_147_483_647
 MAX_SLOT_MINUTES = 24 * 60
 MAX_EMAIL_LENGTH = 254
-MAX_PASSWORD_LENGTH = 72  # hashes <=72 bytes, other bytes ignored
+MAX_PASSWORD_LENGTH = 72  # bcrypt limit.
 MAX_TEXT_LENGTH = 200
 MAX_RECORD_BODY_LENGTH = 4000
 NAME_MIN_LENGTH = 2
@@ -74,8 +74,7 @@ MAX_FUTURE_DAYS = 366 * 2
 
 
 def within_length(raw, max_length: int) -> bool:
-    """Reject non-str or input whose UTF-8 byte length exceeds max_length, so oversized
-    payloads (10-50KB manual input) never reach bcrypt or the database unbounded."""
+    """Check that text fits the UTF-8 byte limit before hashing or database use."""
     return isinstance(raw, str) and len(raw.encode("utf-8")) <= max_length
 
 
@@ -129,8 +128,7 @@ PATIENT_PLACEHOLDER_PHONE = "+374 00 000000"
 
 
 def clean_person_name(value):
-    """Patient full name: clean_label (2-100) plus no C1 control characters,
-    matching the CHECK (full_name !~ '[[:cntrl:]]') on patient_profiles."""
+    """Validate a patient name against length and database control-character rules."""
     cleaned = clean_label(value)
     if cleaned is None or any(unicodedata.category(ch) == "Cc" for ch in cleaned):
         return None
@@ -156,7 +154,7 @@ def strip_control_chars(text: str) -> str:
 
 
 def parse_strict_int(raw, min_value: int = PG_INT_MIN, max_value: int = PG_INT_MAX):
-    """Strict int parsing (like ft_atoi with no leniency): rejects None, empty, signs without digits, and any non-digit characters instead of trusting str/int coercion."""
+    """Parse bounded ASCII digits with an optional sign; reject coercion and malformed input."""
     if not isinstance(raw, str):
         return None
     raw = raw.strip()
@@ -167,7 +165,7 @@ def parse_strict_int(raw, min_value: int = PG_INT_MIN, max_value: int = PG_INT_M
     if raw[0] in "+-":
         body = raw[1:]
         negative = raw[0] == "-"
-    # ASCII only: "²".isdigit() is True but int("²") raises
+    # Accept only ASCII digits.
     if body == "" or not (body.isascii() and body.isdigit()):
         return None
     value = -int(body) if negative else int(body)
@@ -187,7 +185,7 @@ SEED_USERS = [
 
 
 def demo_password() -> str:
-    # One password for every demo account, only from the demo_password secret.
+    # Shared demo password.
     value = read_secret("demo_password")
     if not value:
         raise RuntimeError(
@@ -269,7 +267,6 @@ def db_as_guest():
     return conn
 
 
-#
 def _session_expired(request, user_id: int, role: str, reason: str) -> None:
     """Journal one auth.session_expired event; a journal error never blocks the request."""
     try:
@@ -288,11 +285,7 @@ def _session_expired(request, user_id: int, role: str, reason: str) -> None:
 
 
 def _session_user_row(user_id: int):
-    """users row plus clinic_settings.session_idle_minutes in one query.
-
-    If the idle column cannot be read (migration not applied, grant missing),
-    fall back to the users-only query; the caller then uses the fallback idle.
-    """
+    """Load user and idle timeout together, falling back if the setting is unavailable."""
     conn = db()
     try:
         cur = conn.cursor()
@@ -327,15 +320,7 @@ def _idle_seconds(raw) -> int:
 
 
 def load_session_user(request):
-    """Re-read identity, role, blocked state and auth version from users.
-
-    The signed cookie carries only a user id, a revocable auth version and two
-    timestamps: iat (sign-in) and seen (last activity, refreshed at most once a
-    minute). Returns (user, status): status is 'ok', 'anonymous', 'missing',
-    'blocked' or 'expired'. A missing, stale, blocked or expired account clears
-    the session. Idle and absolute timeouts write auth.session_expired; a legacy
-    cookie without valid timestamps is cleared without an event.
-    """
+    """Revalidate the session cookie; journal expiry and clear invalid timestamps."""
     raw_id = request.session.get("user_id")
     raw_auth_version = request.session.get("auth_version")
     has_auth_cookie = (

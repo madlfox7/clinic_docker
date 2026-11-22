@@ -80,7 +80,6 @@ def test_my_page_logs_one_records_view_only_when_it_shows_records():
             page = c.get("/my")
             assert page.status_code == 200
             assert NOTE_DOCTOR1_PATIENT_A in page.text and "rx:audit-my-page" in page.text
-            # One event per page view, not one per record.
             assert _records_views(pat_id) == before + 1
             assert c.get("/my/records").status_code == 200
             assert _records_views(pat_id) == before + 2
@@ -145,7 +144,6 @@ def test_login_success_and_failures_are_journaled_without_secrets():
 
     with _client() as anonymous:
         mark = _audit_mark()
-        # No valid session: logout writes nothing.
         anonymous.post("/logout")
         assert _auth_events_since(mark) == []
 
@@ -208,7 +206,7 @@ def test_password_reset_rate_limit_is_journaled():
 
 
 def test_login_timing_is_equal_with_journal():
-    """Median authenticate_user time for an existing and an unknown email, in one rolled-back transaction."""
+    """Compare authentication timing for known and unknown emails in a rolled-back transaction."""
     completed = subprocess.run(
         ["docker", "compose", "exec", "-T", "db", "psql", "-X", "-U", "clinic", "-d", "clinic",
          "-v", "ON_ERROR_STOP=1", "-At"],

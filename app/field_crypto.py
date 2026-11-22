@@ -1,21 +1,4 @@
-"""AES-256-GCM encryption of medical text (visit_notes.body, prescriptions.body).
-
-Only the api process holds the keys. The database stores a packet:
-
-    fe2:<key_id>:<nonce>:<ciphertext>:<tag>
-
-nonce (12 bytes), ciphertext and tag (16 bytes) are unpadded base64url.
-The associated data binds the packet header, the table, the row id and the
-appointment id, so a packet cannot be relabelled to another key or moved to
-another row (of the same or the other table): it then fails to decrypt.
-
-Legacy fe1 packets (bound to table and key id only) are never shown: only
-migrate_medical_fields decrypts them, once, to rewrite them as fe2.
-
-Key files (Docker secrets, api only):
-  field_encryption_key            one line "<key_id>:<64 hex chars>", the key for new writes
-  field_encryption_previous_keys  zero or more such lines, kept for reading older rows
-"""
+"""Encrypt row-bound medical fields; keep old keys for reads and fe1 for migration."""
 
 import base64
 import binascii
@@ -175,7 +158,7 @@ class Keyring:
             sealed = _b64d(ciphertext_text) + _b64d(tag_text)
             return aead.decrypt(nonce, sealed, aad_for(key_id)).decode("utf-8")
         except (InvalidTag, binascii.Error, ValueError):
-            # Wrong row, wrong table, tampered packet or wrong key bytes.
+            # Reject invalid packets.
             raise FieldDecryptError("integrity_check_failed") from None
 
     def decrypt(self, table: str, row_id: int, appointment_id: int, packet: str) -> str:

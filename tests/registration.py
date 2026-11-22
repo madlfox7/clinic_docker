@@ -1,8 +1,4 @@
-"""Shared registration helpers.
-
-Every POST /register carries a name and a phone, and a new patient signs in
-only after the confirmation link from the email (read from Mailpit) is used.
-"""
+"""Registration test helpers for Mailpit confirmation flows."""
 import os
 import re
 
@@ -21,12 +17,7 @@ VERIFY_LINK = re.compile(r"/verify-email\?token=([0-9a-f]{64})")
 
 
 def clear_registration_attempts() -> None:
-    """Empty the POST /register rate limit table (superuser psql, tests only).
-
-    The whole suite runs from one source (the Docker gateway behind the proxy)
-    and registers far more than 20 accounts in 15 minutes; the limit itself is
-    not raised for tests and the app has no bypass.
-    """
+    """Clear the test registration rate-limit rows via psql; the limit stays enabled."""
     compose_exec("db", ["psql", "-X", "-U", "clinic", "-d", "clinic", "-At", "-c",
                         "DELETE FROM registration_attempts"])
 

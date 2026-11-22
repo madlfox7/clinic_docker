@@ -1,10 +1,4 @@
-"""Run scripts/tls_check.sh with the values Compose will really use.
-
-Reads `docker compose config --format json` on stdin and starts
-tls_check.sh with PUBLIC_BASE_URL, CLINIC_TLS_MODE, SESSION_HTTPS_ONLY and
-the published proxy ports taken from it, so override files and shell
-variables count. Nothing is evaluated by a shell.
-"""
+"""Run scripts/tls_check.sh with the values Compose will really use."""
 import json
 import os
 import sys

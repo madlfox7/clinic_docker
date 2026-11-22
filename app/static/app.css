@@ -1,4 +1,4 @@
-/* Clinic theme on top of Bootstrap 5.3. No inline styles: every visual rule lives here. */
+/* Clinic theme overrides. */
 :root,
 [data-bs-theme=light] {
   --bs-primary: #0b7285;
@@ -18,8 +18,7 @@
   --clinic-muted: #6c7a86;
 }
 
-/* Bootstrap ships its form icons as data: URIs; CSP img-src is 'self' only,
-   so the icons in use are replaced with same-origin SVG files. */
+/* CSP-safe SVG icons. */
 .form-select { --bs-form-select-bg-img: url("/static/img/select-arrow.svg"); max-width: 100%; text-overflow: ellipsis; }
 .form-check-input:checked[type=checkbox] { --bs-form-check-bg-image: url("/static/img/check.svg"); }
 .form-check-input:checked[type=radio] { --bs-form-check-bg-image: url("/static/img/radio.svg"); }
@@ -61,7 +60,7 @@ h3 { font-size: 1.1rem; font-weight: 600; }
 h4 { font-size: 1rem; font-weight: 600; color: var(--clinic-muted); }
 pre { white-space: pre-wrap; word-break: break-word; font-family: inherit; margin: .25rem 0; }
 
-/* Header and navigation */
+/* Header */
 .site-header { background: #ffffff; border-bottom: 1px solid #dde5ea; }
 .brand { display: inline-flex; align-items: center; gap: .5rem; font-weight: 700; font-size: 1.15rem;
   color: var(--bs-body-color); text-decoration: none; }
@@ -80,13 +79,13 @@ pre { white-space: pre-wrap; word-break: break-word; font-family: inherit; margi
 
 .site-footer { background: #ffffff; border-top: 1px solid #dde5ea; color: var(--clinic-muted); font-size: .9rem; }
 
-/* Home hero */
+/* Home */
 .hero { background: linear-gradient(135deg, #0b7285 0%, #1098ad 60%, #12b886 100%); color: #ffffff;
   border-radius: 1rem; padding: 2.5rem 2rem; }
 .hero h1 { font-size: 2.1rem; }
 .hero .btn-light { color: #0b7285; font-weight: 600; }
 
-/* Cards and lists */
+/* Cards */
 .card { border-color: #dde5ea; box-shadow: 0 1px 2px rgba(16, 42, 54, .05); }
 .auth-card { max-width: 28rem; margin: 0 auto; }
 .doctor-avatar { width: 3rem; height: 3rem; border-radius: 50%; display: inline-flex; align-items: center;
@@ -109,7 +108,7 @@ pre { white-space: pre-wrap; word-break: break-word; font-family: inherit; margi
 .check-grid .form-check { margin-bottom: 0; }
 fieldset legend { font-size: 1rem; font-weight: 600; }
 
-/* Slots shown as pills grouped by day */
+/* Slots */
 .slot-list { list-style: none; padding-left: 0; display: flex; flex-wrap: wrap; gap: .5rem; }
 .slot-list > li { background: #ffffff; border: 1px solid #cfdbe1; border-radius: 2rem; padding: .35rem .8rem;
   display: inline-flex; flex-wrap: wrap; align-items: center; gap: .35rem; }
@@ -120,7 +119,7 @@ fieldset legend { font-size: 1rem; font-weight: 600; }
 .slot-list .btn { --bs-btn-padding-y: .15rem; --bs-btn-padding-x: .6rem; --bs-btn-font-size: .85rem; border-radius: 2rem; }
 .slot-time { font-weight: 600; }
 
-/* Calendar: the week grid from lg up, a day list below lg */
+/* Responsive calendar */
 .calendar-week td, .calendar-week th { min-width: 7rem; vertical-align: top; }
 .calendar-week th:first-child { min-width: 4rem; }
 .calendar-event { border-left: 3px solid var(--bs-primary); padding-left: .4rem; margin-bottom: .4rem; font-size: .85rem; }
@@ -129,7 +128,7 @@ fieldset legend { font-size: 1rem; font-weight: 600; }
 .patient-results { list-style: none; padding-left: 0; }
 .patient-results > li { margin-bottom: .25rem; }
 
-/* Admin cabinet dropdown in the desktop header (<details>, no JS required) */
+/* Desktop admin dropdown */
 .cabinet-menu { position: relative; }
 .cabinet-menu > summary { list-style: none; cursor: pointer; white-space: nowrap; }
 .cabinet-menu > summary::-webkit-details-marker { display: none; }

@@ -1,8 +1,4 @@
-"""The public origin of the site (PUBLIC_BASE_URL), read and checked once at import.
-
-Every absolute link the app sends (mail) starts here. A bad value stops the
-api at startup instead of producing broken or plain-HTTP links later.
-"""
+"""Validate the public link origin once at startup; invalid configuration stops the API."""
 import ipaddress
 import os
 import re

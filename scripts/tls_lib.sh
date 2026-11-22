@@ -1,11 +1,9 @@
-# Shared TLS helpers for init_secrets.sh, tls_check.sh and tls_reload.sh.
-# POSIX sh, sourced from the repository root (each script cds there first).
-# Nothing here prints key material: only paths, names, dates and serials.
+# Shared POSIX sh TLS helpers.
+# Never print key material.
 
 TLS_DIR=secrets/tls
 
-# env_or_dotenv NAME: the environment first, else the last NAME= line of .env
-# (read with grep, .env is never sourced), surrounding quotes removed.
+# Read .env without sourcing it.
 env_or_dotenv() {
   eval "value_is_set=\${$1+x}"
   if [ -n "$value_is_set" ]; then
@@ -25,8 +23,7 @@ tls_cleanup() {
   TLS_TMP_FILES=
 }
 trap tls_cleanup EXIT INT TERM
-# tls_tmp NAME: a new private temporary file in secrets/tls, path in $NAME,
-# removed on exit.
+# Create a private temporary TLS file.
 tls_tmp() {
   tmp_file="$(mktemp "$TLS_DIR/.tmp.XXXXXX")"
   TLS_TMP_FILES="$TLS_TMP_FILES $tmp_file"
@@ -40,7 +37,6 @@ tls_warn() {
   echo "warning $*" >&2
 }
 
-# Public key of a certificate and of a private key, to compare the pair.
 tls_cert_pubkey() { openssl x509 -noout -pubkey -in "$1" 2>/dev/null; }
 tls_key_pubkey() { openssl pkey -pubout -in "$1" 2>/dev/null; }
 tls_pair_matches() {
@@ -48,7 +44,6 @@ tls_pair_matches() {
   key_pub="$(tls_key_pubkey "$2")" || return 1
   [ -n "$cert_pub" ] && [ "$cert_pub" = "$key_pub" ]
 }
-# Whole days until the certificate expires (0 when expired or unreadable).
 tls_days_left() {
   end="$(openssl x509 -noout -enddate -in "$1" 2>/dev/null | cut -d= -f2-)"
   end_s="$(date -u -d "$end" +%s 2>/dev/null)" || { echo 0; return 0; }
@@ -57,14 +52,8 @@ tls_days_left() {
 }
 tls_serial() { openssl x509 -noout -serial -in "$1" 2>/dev/null | cut -d= -f2; }
 
-# tls_parse_url: PUBLIC_URL -> URL_HOST (no brackets), URL_PORT, with the
-# rules of docker/proxy/15-clinic-tls.sh and app/public_url.py, so an address
-# the proxy or the api would refuse already fails here (make start, tls-check):
-# scheme://host[:port] and one optional trailing slash; no path, query,
-# fragment or user info; host lower-case [a-z0-9.-] without a leading or
-# trailing dot or dash and without "..", or a bracketed IPv6 literal.
 tls_parse_url() {
-  # The value is not echoed: user info may carry a password.
+  # Do not echo URLs; they may contain credentials.
   url_bad=PUBLIC_BASE_URL
   url_nl='
 '
@@ -118,8 +107,6 @@ tls_parse_url() {
   esac
 }
 
-# tls_settings: TLS_MODE, PUBLIC_URL, URL_HOST (no brackets), URL_PORT,
-# HTTPS_ONLY, PROXY_PORT, TLS_PORT from the environment or .env.
 tls_settings() {
   TLS_MODE="$(env_or_dotenv CLINIC_TLS_MODE)"
   [ -n "$TLS_MODE" ] || TLS_MODE=local
@@ -134,22 +121,18 @@ tls_settings() {
   PROXY_PORT="$(env_or_dotenv CLINIC_PROXY_PORT)"
   TLS_PORT="$(env_or_dotenv CLINIC_PROXY_TLS_PORT)"
   tls_parse_url
-  # CLINIC_PUBLIC_TUNNEL: the public address is a tunnel (ngrok demo) in
-  # front of the local stand; see tls_check_settings.
+  # Tunnel mode uses the local stand.
   PUBLIC_TUNNEL="$(env_or_dotenv CLINIC_PUBLIC_TUNNEL)"
   case "$PUBLIC_TUNNEL" in
     1|true) PUBLIC_TUNNEL=1 ;;
     ''|0|false) PUBLIC_TUNNEL=0 ;;
     *) tls_fail "CLINIC_PUBLIC_TUNNEL must be 1 or 0, got '$PUBLIC_TUNNEL'" ;;
   esac
-  # The name the stand certificate must carry: the PUBLIC_BASE_URL host, or
-  # localhost behind a tunnel (the tunnel connects to https://localhost:<port>).
   CERT_HOST="$URL_HOST"
   [ "$PUBLIC_TUNNEL" = 0 ] || CERT_HOST=localhost
 }
 
-# A mismatch is an error in local mode and a warning in provided mode
-# (a provided setup may sit behind another forwarder).
+# Local mismatches fail; provided mode warns.
 tls_port_problem() {
   if [ "$TLS_MODE" = local ]; then
     tls_fail "$1"
@@ -157,9 +140,6 @@ tls_port_problem() {
   tls_warn "$1"
 }
 
-# Ports and PUBLIC_BASE_URL must agree: the HTTP redirect and the links in
-# mail go to the port of PUBLIC_BASE_URL.
-# 0 when HOST (no brackets) is an IPv4 or IPv6 literal.
 tls_host_is_ip() {
   case "$1" in
     *:*) return 0 ;;
@@ -168,9 +148,7 @@ tls_host_is_ip() {
   return 0
 }
 
-# Tunnel mode: only with the stand CA (local). The public address must be a
-# real https domain on the default port; the port check against the
-# published HTTPS port is skipped for it, nothing else is.
+# Tunnels require local TLS and a default-port domain.
 tls_check_tunnel() {
   [ "$TLS_MODE" = local ] || tls_fail "CLINIC_PUBLIC_TUNNEL=1 works only with CLINIC_TLS_MODE=local"
   case "$PUBLIC_URL" in
@@ -212,9 +190,7 @@ tls_check_settings() {
   fi
 }
 
-# tls_name_matches CERT HOST: -checkip for IP literals (one per call),
-# -checkhost for names. Older OpenSSL returned 0 on a mismatch, so the
-# "does match" line is required as well as exit code 0.
+# Require explicit match output; old OpenSSL may misreport success.
 tls_name_matches() {
   if tls_host_is_ip "$2"; then name_flag=-checkip; else name_flag=-checkhost; fi
   name_out="$(openssl x509 -noout -in "$1" "$name_flag" "$2" 2>/dev/null)" || return 1
@@ -224,13 +200,7 @@ tls_name_matches() {
   return 1
 }
 
-# tls_check_pair KEY CERT: the checks of section 5.2, error = exit 1.
-#   local:    chain against secrets/tls/ca.crt (strict);
-#   provided: first block of the fullchain is the leaf, the rest are
-#             intermediates; trust = CLINIC_TLS_CA_FILE (host only) or the
-#             system store.
-# Optional KEY_LABEL CERT_LABEL name the files in messages (the paths the
-# user gave, when KEY and CERT are private working copies).
+# Validate certificate identity and trust.
 tls_check_pair() {
   key_label="${3:-$1}"
   cert_label="${4:-$2}"
@@ -274,8 +244,7 @@ tls_check_pair() {
     || tls_fail "the certificate chain does not verify (system trust store${ca_file:+ or CLINIC_TLS_CA_FILE}); server.crt must be the full chain"
 }
 
-# tls_backup_live: copy server.key and server.crt to secrets/tls/backup-<UTC>/
-# (700, files 600); prints the directory in TLS_BACKUP_DIR.
+# Back up live TLS files with private permissions.
 tls_backup_live() {
   TLS_BACKUP_DIR="$TLS_DIR/backup-$(date -u +%Y%m%dT%H%M%SZ)"
   suffix=1
@@ -293,8 +262,7 @@ tls_backup_live() {
   echo "backup  $TLS_BACKUP_DIR"
 }
 
-# tls_write_live KEY CERT: write into the existing files (same inode, so the
-# bind-mounted Compose secrets see it after nginx -s reload). Key first.
+# Preserve mounted-secret inodes; write the key first.
 tls_write_live() {
   cat "$1" > "$TLS_DIR/server.key"
   cat "$2" > "$TLS_DIR/server.crt"

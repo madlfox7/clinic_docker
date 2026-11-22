@@ -66,11 +66,7 @@ CHECK (auth_version >= 0);
 CREATE UNIQUE INDEX IF NOT EXISTS users_email_lower_unique
 ON users (lower(email));
 
--- Email confirmation. NULL = not confirmed; the column has no DEFAULT, so every
--- INSERT sets it explicitly (seed: now(); registration and staff invites: NULL).
--- init.sql runs on every start, so the backfill for accounts that existed
--- before the column runs only once, in the same step that adds the column;
--- a restart never confirms a pending registration.
+-- Backfill existing users once; keep future accounts unconfirmed.
 DO $$
 BEGIN
   IF NOT EXISTS (
@@ -85,7 +81,7 @@ BEGIN
 END
 $$;
 
--- One-time confirmation links: only the sha256 of the raw token is stored.
+-- Store confirmation-token hashes only.
 CREATE TABLE IF NOT EXISTS email_verification_tokens (
   id BIGSERIAL PRIMARY KEY,
   user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
@@ -98,8 +94,7 @@ CREATE TABLE IF NOT EXISTS email_verification_tokens (
 CREATE INDEX IF NOT EXISTS email_verification_tokens_user_idx
   ON email_verification_tokens (user_id, created_at DESC);
 
--- Resend requests, separate from password_reset_attempts: hashes of the email
--- and of the source only, one row per accepted request, kept for one day.
+-- Store resend-rate hashes for one day.
 CREATE TABLE IF NOT EXISTS email_verification_attempts (
   id BIGSERIAL PRIMARY KEY,
   email_fingerprint BYTEA NOT NULL,
@@ -112,8 +107,7 @@ CREATE INDEX IF NOT EXISTS email_verification_attempts_email_idx
 CREATE INDEX IF NOT EXISTS email_verification_attempts_source_idx
   ON email_verification_attempts (source_fingerprint, requested_at);
 
--- POST /register attempts that passed the form checks: hashes of the
--- email and of the source only, one row per attempt, kept for one day.
+-- Rate-limit accepted registrations using hashes only.
 CREATE TABLE IF NOT EXISTS registration_attempts (
   id BIGSERIAL PRIMARY KEY,
   email_fingerprint BYTEA NOT NULL,
@@ -125,9 +119,7 @@ CREATE INDEX IF NOT EXISTS registration_attempts_source_idx
 CREATE INDEX IF NOT EXISTS registration_attempts_email_idx
   ON registration_attempts (email_fingerprint, requested_at);
 
--- Patient name and phone. Grants, RLS and the only INSERT paths (register_patient,
--- seed, backfill) are in rls.sql. The CHECKs repeat the api validators because
--- patients and registrars update the row directly through their column grants.
+-- Enforce checks on direct profile writes.
 CREATE TABLE IF NOT EXISTS patient_profiles (
   user_id INTEGER PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
   full_name TEXT NOT NULL,
@@ -160,8 +152,7 @@ INSERT INTO clinic_settings (id, address, phone)
 VALUES (1, 'Educational stand', '000-00-00')
 ON CONFLICT (id) DO NOTHING;
 
--- Idle session timeout in minutes, set by the admin (5-120, default 30).
--- Changed only through public.set_session_idle_minutes, which journals it.
+-- Admin-controlled idle timeout.
 ALTER TABLE clinic_settings
   ADD COLUMN IF NOT EXISTS session_idle_minutes INTEGER NOT NULL DEFAULT 30;
 DO $$
@@ -178,9 +169,7 @@ BEGIN
 END
 $$;
 
--- Patients may cancel or reschedule up to this many hours before the visit
--- (0-48, default 2; 0 = until the start). Staff are not limited by it.
--- Changed only through public.set_patient_change_deadline_hours (journalled).
+-- Patient change deadline; staff are exempt.
 ALTER TABLE clinic_settings
   ADD COLUMN IF NOT EXISTS patient_change_deadline_hours INTEGER NOT NULL DEFAULT 2;
 DO $$
@@ -408,7 +397,6 @@ CREATE TABLE IF NOT EXISTS holidays (
 );
 
 
---this one for rls
 CREATE TABLE IF NOT EXISTS appointments (
   id SERIAL PRIMARY KEY,
   slot_id INTEGER NOT NULL REFERENCES slots(id),
@@ -417,7 +405,7 @@ CREATE TABLE IF NOT EXISTS appointments (
     CHECK (status IN ('scheduled', 'completed', 'cancelled'))
 );
 
--- upgrade older databases: allow 'completed'
+-- Extend status constraint for completed visits.
 DO $$
 BEGIN
   IF EXISTS (
@@ -462,7 +450,7 @@ BEGIN
 END
 $$;
 
--- a completed visit keeps its slot taken, like a scheduled one
+-- Completed visits still reserve slots.
 CREATE UNIQUE INDEX IF NOT EXISTS appointments_one_scheduled_per_slot
 ON appointments (slot_id)
 WHERE status IN ('scheduled', 'completed');
@@ -647,12 +635,10 @@ BEGIN
   END IF;
 END
 $$;
-----------------------------
+-- Policies: rls.sql.
 
 
 
-
----this one for rls
 
 CREATE TABLE IF NOT EXISTS visit_notes (
   id SERIAL PRIMARY KEY,
@@ -666,7 +652,6 @@ ALTER TABLE public.visit_notes
   DROP CONSTRAINT IF EXISTS visit_notes_appointment_id_key;
 DROP INDEX IF EXISTS public.visit_notes_appointment_id_key;
 
---this one for rls
 CREATE TABLE IF NOT EXISTS prescriptions (
   id SERIAL PRIMARY KEY,
   appointment_id INTEGER NOT NULL REFERENCES appointments(id),
@@ -675,13 +660,8 @@ CREATE TABLE IF NOT EXISTS prescriptions (
   body TEXT NOT NULL
 );
 
--- body holds an AES-256-GCM packet written by the api (app/field_crypto.py):
--- fe2:<key_id>:<nonce>:<ciphertext>:<tag>, bound to the table, row id and
--- appointment id. The 4000-character limit applies to the plaintext in the
--- api; the packet is longer, so the old length check goes.
--- New and updated rows must be fe2 packets. NOT VALID keeps an older volume
--- usable until the api startup migration has encrypted its plaintext rows and
--- rewritten fe1 packets (not bound to their row) as fe2.
+-- Require row-bound AES-GCM fe2 bodies.
+-- Permit legacy conversion during startup migration.
 ALTER TABLE public.visit_notes DROP CONSTRAINT IF EXISTS visit_notes_body_length_check;
 ALTER TABLE public.prescriptions DROP CONSTRAINT IF EXISTS prescriptions_body_length_check;
 ALTER TABLE public.visit_notes DROP CONSTRAINT IF EXISTS visit_notes_body_encrypted_check;
@@ -729,15 +709,7 @@ CREATE TABLE IF NOT EXISTS audit_events (
 CREATE INDEX IF NOT EXISTS audit_events_created_at_idx
   ON audit_events (created_at DESC, id DESC);
 
--- Sign-in events (auth.*) go to the same journal. A failed sign-in for an
--- unknown email or a rate-limited request has no actor: actor_user_id is NULL
--- and actor_role is 'anonymous'. The email itself is never stored, not even
--- hashed. source is the client address the api already passes to the auth
--- functions.
--- No foreign key to users (plan 17 Р6): the journal must not depend on rows
--- that can be deleted (a discarded invite), user ids are never reused (SERIAL)
--- and the admin journal reads users through a LEFT JOIN. Older volumes lose
--- the key here, found by its definition rather than its name.
+-- Preserve anonymous auth privacy and deleted-user history.
 DO $$
 DECLARE
   fk record;
@@ -755,8 +727,7 @@ $$;
 ALTER TABLE audit_events ALTER COLUMN actor_user_id DROP NOT NULL;
 ALTER TABLE audit_events ADD COLUMN IF NOT EXISTS reason TEXT;
 ALTER TABLE audit_events ADD COLUMN IF NOT EXISTS source TEXT;
--- The journal only grows, so a CHECK is rebuilt only when its definition
--- differs from the one below (plan 17 П5): a normal start does not rescan it.
+-- Avoid repeated CHECK rebuilds.
 DO $$
 BEGIN
   IF EXISTS (
@@ -804,8 +775,7 @@ BEGIN
   END IF;
 END
 $$;
--- The reasons CHECK is rebuilt only when its definition lacks the newest
--- reason, so a normal restart does not rescan audit_events.
+-- Add new journal reasons without rescanning current volumes.
 DO $$
 BEGIN
   IF EXISTS (
@@ -861,13 +831,10 @@ CREATE INDEX IF NOT EXISTS audit_events_rate_limited_idx
   ON audit_events (created_at)
   WHERE action = 'auth.rate_limited';
 
--- Old and new value: the session idle timeout and patient change deadline
--- changes, and a reschedule (old and new appointment id; new_value is always
--- the target).
+-- Audit settings and reschedule changes.
 ALTER TABLE audit_events ADD COLUMN IF NOT EXISTS old_value INTEGER;
 ALTER TABLE audit_events ADD COLUMN IF NOT EXISTS new_value INTEGER;
--- upgrade older volumes: the CHECK without clinic.change_deadline.update is dropped
--- once and recreated; an up-to-date CHECK is left alone (no scan on start).
+-- Avoid scans unless the constraint changes.
 DO $$
 BEGIN
   IF EXISTS (
@@ -905,11 +872,7 @@ BEGIN
 END
 $$;
 
--- One reschedule event per old visit and per new visit (old_value and
--- new_value are INTEGER). An old volume that already holds duplicates (only
--- possible through direct SQL before this change) keeps starting: the index
--- is skipped with a warning. The block between the markers is also run by
--- tests/test_hardening.py inside a rolled-back transaction.
+-- Preserve startup when legacy duplicates exist.
 -- BEGIN reschedule_unique
 DO $$
 BEGIN
@@ -937,24 +900,17 @@ END
 $$;
 -- END reschedule_unique
 
--- The daily patient reschedule limit counts these rows.
+-- Support daily reschedule limits.
 CREATE INDEX IF NOT EXISTS audit_events_reschedule_actor_idx
   ON audit_events (actor_user_id, created_at)
   WHERE action = 'appointment.reschedule';
 
--- The dedup of audit.view (plan 18.3, public.record_audit_view) looks up the
--- last view of one admin with one filter mask.
+-- Support audit-view deduplication.
 CREATE INDEX IF NOT EXISTS audit_events_view_actor_idx
   ON audit_events (actor_user_id, target_id, created_at)
   WHERE action = 'audit.view';
 
--- ---------------------------------------------------------------------------
--- Audit hash chain (plan 17 §6). Every row carries seq, the hash of the row
--- before it (prev_hash) and its own hash (row_hash = audit_row_hash_v1(prev_hash,
--- audit_canon_v1(row)), SHA-256 in v1)). The chain order is seq, not id. The head row keeps
--- the last seq and hash; the anchors outside the database (audit_anchor) make
--- a recomputed chain detectable. Grants are in rls.sql (the roles do not
--- exist yet when the db container runs this file on a fresh volume).
+-- Chain event hashes; external anchors reveal tampering.
 ALTER TABLE audit_events ADD COLUMN IF NOT EXISTS seq bigint;
 ALTER TABLE audit_events ADD COLUMN IF NOT EXISTS prev_hash bytea;
 ALTER TABLE audit_events ADD COLUMN IF NOT EXISTS row_hash bytea;
@@ -970,9 +926,7 @@ CREATE TABLE IF NOT EXISTS audit_chain_head (
 );
 REVOKE ALL ON TABLE public.audit_chain_head FROM PUBLIC;
 
--- One field of the canonical form: '<length in bytes>:<UTF-8 bytes>', NULL is
--- '-'. Integers are passed as their decimal text, which does not depend on
--- any session setting.
+-- Deterministic audit-field encoding.
 CREATE OR REPLACE FUNCTION public.audit_canon_field(v text)
 RETURNS bytea
 LANGUAGE sql
@@ -985,10 +939,7 @@ AS $$
   END
 $$;
 
--- Canonical form v1 of a journal row (no ::text of dates, no row_to_json:
--- their output depends on TimeZone and DateStyle). created_at is whole
--- microseconds since the UTC epoch. audit/canon.py is the independent Python
--- implementation that verify_audit and the anchors use.
+-- Keep audit hashes independent of timezone and locale.
 CREATE OR REPLACE FUNCTION public.audit_canon_v1(
   p_seq bigint, p_id bigint, p_created_at timestamptz, p_actor_user_id integer,
   p_actor_role text, p_action text, p_target_type text, p_target_id integer,
@@ -1014,7 +965,6 @@ AS $$
     || public.audit_canon_field(p_new_value::text)
 $$;
 
--- The one place that names the hash algorithm of the chain (v1: SHA-256).
 CREATE OR REPLACE FUNCTION public.audit_row_hash_v1(p_prev bytea, p_canon bytea)
 RETURNS bytea
 LANGUAGE sql
@@ -1024,7 +974,7 @@ AS $$
   SELECT sha256(p_prev || p_canon)
 $$;
 
--- The first prev_hash of a chain: hash of the 16 raw bytes of chain_id.
+-- Seed the chain from its UUID.
 CREATE OR REPLACE FUNCTION public.audit_genesis_hash_v1(p_chain uuid)
 RETURNS bytea
 LANGUAGE sql
@@ -1034,10 +984,7 @@ AS $$
   SELECT sha256(uuid_send(p_chain))
 $$;
 
--- BEFORE INSERT: the chain values and created_at from the client are always
--- overwritten. The head row lock is held until COMMIT, so concurrent inserts
--- get consecutive seq values; a ROLLBACK takes back both the row and the head.
--- Rule: the journal insert is the last locking step of a transaction.
+-- Serialize inserts; avoid lock-order deadlocks.
 CREATE OR REPLACE FUNCTION public.audit_chain_before_insert()
 RETURNS trigger
 LANGUAGE plpgsql
@@ -1065,12 +1012,7 @@ END
 $$;
 REVOKE ALL ON FUNCTION public.audit_chain_before_insert() FROM PUBLIC;
 
--- Genesis (once) and the chain constraints and trigger, all in one DO block,
--- that is one transaction, under ACCESS EXCLUSIVE (a SHARE ROW EXCLUSIVE lock
--- would deadlock with an api transaction that read the journal first). Rows
--- that exist before genesis get their hashes now, in id order; changes made
--- to them before this moment are not covered. If rows have seq but the head
--- is gone the chain is not rebuilt: that would launder a forgery.
+-- Fail closed if the chain head is missing.
 DO $$
 DECLARE
   r record;
@@ -1136,11 +1078,7 @@ BEGIN
 END
 $$;
 
--- Append-only journal (plan 17 §7.1, A3). Application roles already lack
--- UPDATE, DELETE and TRUNCATE (rls.sql, 42501 at the privilege check); these
--- triggers stop the superuser and table owner too. Only an explicit DISABLE
--- TRIGGER (a logged DDL statement) gets past them, and verify_audit reports
--- any of the six journal triggers that is missing or not in mode 'A'.
+-- Block owner writes; audit verifies trigger state.
 CREATE OR REPLACE FUNCTION public.audit_append_only()
 RETURNS trigger
 LANGUAGE plpgsql
@@ -1152,10 +1090,7 @@ END;
 $function$;
 REVOKE ALL ON FUNCTION public.audit_append_only() FROM PUBLIC;
 
--- The head moves only from inside zz_audit_chain: a trigger on the head
--- itself already runs at depth 1 for a direct UPDATE, and at depth 2 when the
--- UPDATE comes from the chain trigger. Even then it may only step one row
--- forward on the same chain (P2).
+-- Restrict head updates to trigger-driven, one-step advances.
 CREATE OR REPLACE FUNCTION public.audit_chain_head_guard()
 RETURNS trigger
 LANGUAGE plpgsql
@@ -1205,9 +1140,7 @@ END
 $$;
 
 -- BEGIN audit_trigger_mode
--- The journal triggers fire ALWAYS, also with session_replication_role =
--- replica. DISABLE + ENABLE TRIGGER leaves mode 'O', so every migrate puts
--- 'A' back.
+-- Restore ALWAYS trigger mode on startup.
 DO $$
 DECLARE
   t record;

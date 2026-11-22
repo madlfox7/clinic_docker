@@ -11,7 +11,7 @@ COPY --chown=app:app db/init.sql /app/schema/init.sql
 
 EXPOSE 8000
 USER app
-# Encrypt any medical text still stored as plaintext, then serve.
-# Both steps need /run/secrets/field_encryption_key, which only api mounts.
-# Forwarded headers are not trusted by uvicorn; app/trusted_proxy.py checks the peer.
+# Migrate medical fields before serving.
+# Only the api mounts the encryption key.
+# Validate forwarded headers in app/trusted_proxy.py.
 CMD ["sh", "-c", "python -m migrate_medical_fields && exec uvicorn main:app --host 0.0.0.0 --port 8000 --no-proxy-headers"]

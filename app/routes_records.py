@@ -335,9 +335,7 @@ def save_doctor_record(
 
     conn = db_as(user)
     cur = conn.cursor()
-    # Only locate the doctor's own appointment; the RLS policies decide
-    # whether a record may be written (scheduled or completed visit,
-    # last 12 months).
+    # RLS checks the visit.
     cur.execute(
         """
         SELECT a.id, a.doctor_id, a.patient_user_id
@@ -354,9 +352,7 @@ def save_doctor_record(
     saved = False
     if appointment is not None:
         try:
-            # The packet is bound to the row id and appointment id, so take the
-            # id from the sequence first, encrypt (after the plaintext length
-            # check), then insert with that id. Only the packet reaches SQL.
+            # Allocate the row id before encrypting.
             cur.execute("SELECT nextval(%s::regclass)", (f"public.{table}_id_seq",))
             record_id = cur.fetchone()[0]
             stored_body = encrypt_body(table, record_id, appointment[0], body)
@@ -403,7 +399,7 @@ def complete_doctor_appointment(request: Request, appointment_id: str):
 
     conn = db_as(user)
     cur = conn.cursor()
-    # RLS allows only the doctor's own started scheduled visit -> completed.
+    # RLS checks ownership and status.
     try:
         cur.execute(
             "UPDATE appointments SET status = 'completed' WHERE id = %s",

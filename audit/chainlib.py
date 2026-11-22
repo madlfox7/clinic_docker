@@ -1,15 +1,4 @@
-"""Shared code of anchor.py and verify_audit.py (plan 17 §8-§9).
-
-- verification of the journal rows (canon and hashes from canon.py only);
-- anchor files <chain_id>.log and the chain registry chains.log: one strict
-  line format each, a HMAC-SHA256 chain over the lines (prev_mac of the first
-  line = 32 zero bytes);
-- the registry rules of §8.6;
-- the exclusive lock on <anchor dir>/.lock (Securo Б-B1).
-
-Nothing here logs or returns the key, a MAC input or the content of an event:
-errors carry a type, a seq and a chain id at most.
-"""
+"""Shared journal and HMAC anchor checks; never expose keys or events."""
 from __future__ import annotations
 
 import datetime as _dt
@@ -49,7 +38,7 @@ _UUID = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{1
 _ANCHOR_FILE = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\.log$")
 
 
-# --- the MAC: the one place that names it (HMAC-SHA256) ------------------------
+# HMAC
 
 def line_mac(key: bytes, prev_mac: bytes, body: str) -> bytes:
     return hmac.new(key, prev_mac + body.encode("ascii"), hashlib.sha256).digest()
@@ -90,7 +79,7 @@ class Broken(Exception):
         return " ".join(parts)
 
 
-# --- line files (anchors and registry) -----------------------------------------
+# Line files
 
 @dataclass
 class Anchor:
@@ -120,7 +109,7 @@ class Entry:
 def _read_lines(path: Path) -> list[str]:
     data = path.read_bytes()
     if data and not data.endswith(b"\n"):
-        # a torn last line (crash mid-write) is a format error, not data
+        # Reject partial lines.
         torn = data.count(b"\n") + 1
         raise Broken("registry_format" if path.name == REGISTRY else "anchor_format",
                      detail=f"file={path.name} line={torn}")
@@ -210,8 +199,7 @@ def parse_registry(path: Path, key: bytes) -> tuple[list[Entry], bytes]:
 
 @contextmanager
 def _named(path: Path):
-    """fd-based calls (fchmod, fsync, flock) raise OSError without a file
-    name; add the path so the log says which file failed."""
+    """Attach the relevant path to fd-based OSErrors for useful logs."""
     try:
         yield
     except OSError as exc:
@@ -221,8 +209,7 @@ def _named(path: Path):
 
 
 def append_line(path: Path, key: bytes, prev_mac: bytes, body: str) -> bytes:
-    """Append one MAC-chained line and fsync it. Files are 0644 inside the
-    700 anchor directory, so the host user can read them (Securo fix 3)."""
+    """Append and fsync a MAC-chained line; 0644 files remain protected by the 700 directory."""
     mac = line_mac(key, prev_mac, body)
     created = not path.exists()
     fd = os.open(path, os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o644)
@@ -260,9 +247,7 @@ def _fsync_dir(directory: Path) -> None:
 
 @contextmanager
 def locked(directory: Path):
-    """Exclusive flock on <dir>/.lock for a whole read -> verify -> append ->
-    fsync step, in every mode (loop, --once, --retire; Б-B1). prev_mac is
-    always read from the file under this lock, never kept in memory."""
+    """Lock the full read/verify/append cycle; read prev_mac under lock, never from memory."""
     fd = os.open(directory / LOCK, os.O_RDWR | os.O_CREAT, 0o644)
     try:
         with _named(directory / LOCK):
@@ -277,16 +262,16 @@ def anchor_files(directory: Path) -> list[Path]:
     return sorted(p for p in directory.iterdir() if _ANCHOR_FILE.match(p.name))
 
 
-# --- registry state -------------------------------------------------------------
+# Registry state
 
 @dataclass
 class RegistryState:
     entries: list[Entry] = field(default_factory=list)
-    current: str | None = None          # C: open chain (last open/switch without a later retire)
-    last_retired: Entry | None = None   # the retire entry when there is no C
+    current: str | None = None          # Current open chain.
+    last_retired: Entry | None = None   # Latest retire entry.
     known: set = field(default_factory=set)
-    switched_to: dict = field(default_factory=dict)   # new id -> list of switch entries
-    opened: dict = field(default_factory=dict)        # id -> number of open lines
+    switched_to: dict = field(default_factory=dict)   # Switches by destination id.
+    opened: dict = field(default_factory=dict)        # Open-line counts by id.
 
 
 def registry_state(entries: list[Entry]) -> RegistryState:
@@ -312,16 +297,13 @@ def registry_state(entries: list[Entry]) -> RegistryState:
 
 @dataclass
 class Decision:
-    action: str                 # first_open | open | normal | switch | retired_check | error
+    action: str                 # Decision category.
     kind: str | None = None     # switch kind / error type
     old: str | None = None
 
 
 def journal_holds_chain(source, head: dict | None, beyond_genesis: bool = False) -> bool:
-    """З-10/З-11: does the database hold a chain worth protecting? A head with
-    last_seq > 0, or journal rows without a head. beyond_genesis (the daemon):
-    a chain of genesis rows only (last_seq == genesis_rows, an old journal
-    hashed at migration and never anchored) counts as empty."""
+    """Return whether journal data needs protection; the daemon treats genesis-only rows as empty."""
     if head is None:
         return next(iter(source.rows_from(1)), None) is not None
     floor = head["genesis_rows"] if beyond_genesis else 0
@@ -330,10 +312,7 @@ def journal_holds_chain(source, head: dict | None, beyond_genesis: bool = False)
 
 def decide(state: RegistryState, head_chain: str, genesis_rows: int, has_registry: bool,
            has_anchor_files: bool, *, holds_chain: bool) -> Decision:
-    """§8.6 rules 1-7 for the head chain H against the registry. With no
-    registry: anchors left over, or a database that already holds a chain
-    (holds_chain, journal_holds_chain(beyond_genesis=True)) is registry_missing
-    (З-11: the anchor directory was removed or renamed), never a first_open."""
+    """Choose the registry action for the head chain; missing registry is not first_open if data remains."""
     if not has_registry:
         if has_anchor_files or holds_chain:
             return Decision("error", "registry_missing")
@@ -354,13 +333,10 @@ def decide(state: RegistryState, head_chain: str, genesis_rows: int, has_registr
     return Decision("switch", "reused", old=c)
 
 
-# --- journal verification ---------------------------------------------------------
+# Journal verification
 
 def check_rows(rows, chain_id: str, prev_hash: bytes, expect_seq: int, anchors: dict | None = None):
-    """Stream rows in seq order from expect_seq on, linked to prev_hash.
-
-    anchors: {seq: row_hash hex} checked on the way. Returns (count, last_seq,
-    last_hash). Raises Broken at the first break."""
+    """Verify ordered rows and optional anchor hashes; return counts and final hash or raise Broken."""
     count, last_seq, last_hash = 0, expect_seq - 1, prev_hash
     for row in rows:
         seq = row["seq"]
@@ -380,7 +356,7 @@ def check_rows(rows, chain_id: str, prev_hash: bytes, expect_seq: int, anchors: 
 
 
 def check_full(source, chain_id: str, anchors: list[Anchor]):
-    """Whole chain from seq 1, every anchor of the file, head, tail truncation."""
+    """Verify the full chain, all anchors, head and truncation."""
     by_seq = {a.seq: a.row_hash for a in anchors}
     count, last_seq, last_hash = check_rows(source.rows_from(1), chain_id,
                                             canon.genesis_prev_hash(chain_id), 1, by_seq)
@@ -395,12 +371,11 @@ def check_full(source, chain_id: str, anchors: list[Anchor]):
 
 
 def check_from_anchor(source, chain_id: str, anchor: Anchor | None):
-    """Incremental check of the anchor cycle (§8.5): the anchored row still has
-    its hash, then every row after it links on; head = last row."""
+    """Check the anchored row, remaining links and head for one incremental cycle."""
     if anchor is None:
         return check_full(source, chain_id, [])
     if anchor.seq == 0:
-        # anchored while the chain was still empty (fresh volume)
+        # Fresh-volume anchor.
         if anchor.row_hash != canon.genesis_prev_hash(chain_id).hex():
             raise Broken("anchor_mismatch", seq=0)
         return check_full(source, chain_id, [])
@@ -428,7 +403,7 @@ def check_triggers(source) -> None:
             raise Broken("trigger_mode", detail=f"name={name} mode={mode}")
 
 
-# --- database source (clinic_auditor) -----------------------------------------------
+# Database source
 
 ROW_COLUMNS = ("seq", "id", "created_at", "actor_user_id", "actor_role", "action", "target_type",
                "target_id", "reason", "source", "old_value", "new_value", "prev_hash", "row_hash",
@@ -462,7 +437,7 @@ class DbSource:
         return self._row(found) if found else None
 
     def rows_from(self, seq: int):
-        # server-side cursor: 100k rows are streamed, not loaded (§9.1)
+        # Stream large journals.
         with self.conn.cursor(name=f"audit_rows_{uuid.uuid4().hex}") as cur:
             cur.itersize = 2000
             cur.execute(f"SELECT {', '.join(ROW_COLUMNS)} FROM public.audit_events "
@@ -481,7 +456,7 @@ class DbSource:
 
 
 def connect():
-    import psycopg2  # only inside the service image
+    import psycopg2  # Image-only dependency.
 
     password = Path(os.environ.get("CLINIC_AUDIT_DB_PASSWORD_FILE", "/run/secrets/audit_db_password")).read_text().strip()
     conn = psycopg2.connect(host=os.environ.get("PGHOST", "db"), user=os.environ.get("PGUSER", "clinic_auditor"),

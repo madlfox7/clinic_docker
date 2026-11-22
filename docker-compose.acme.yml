@@ -1,7 +1,5 @@
-# Optional, provided mode with HTTP-01 webroot only (CLINIC_ACME_WEBROOT=true):
-#   docker compose -f docker-compose.yml -f docker-compose.acme.yml up -d
-# certbot on the host writes challenges into ./acme-webroot; the proxy reads
-# them read-only. DNS-01 needs none of this.
+# Optional HTTP-01 challenge mount.
+# Host certbot writes here; proxy mounts read-only. DNS-01 needs no mount.
 services:
   proxy:
     volumes:

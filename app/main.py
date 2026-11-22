@@ -44,7 +44,7 @@ def _session_secret() -> str:
 
 
 SESSION_SECRET = _session_secret()
-# Fail at startup when the medical field key is missing, empty or malformed.
+# Validate key at startup.
 init_keyring()
 
 _TOKEN_QUERY = re.compile(r"([?&]token=)[^&\s\"]+")
@@ -78,8 +78,7 @@ for _logger_name in ("uvicorn.access", "uvicorn", "uvicorn.error"):
 
 
 app = FastAPI(dependencies=[Depends(verify_csrf)])
-# Cookie lifetime equals the absolute session limit; the server also checks
-# iat/seen in load_session_user. Cookie name stays "session".
+# Match cookie and server session limits.
 app.add_middleware(
     SessionMiddleware,
     secret_key=SESSION_SECRET,
@@ -89,7 +88,7 @@ app.add_middleware(
     https_only=HTTPS_ONLY,
     path="/",
 )
-# Added last, so it runs first: only the proxy (or loopback) reaches the app.
+# Check the proxy first.
 app.add_middleware(TrustedProxyMiddleware)
 
 _ERROR_TEXT = {
@@ -107,7 +106,7 @@ def _error_page(request: Request, status_code: int, headers=None, message=None, 
         status_code, ("Request failed", "The request could not be completed.")
     )
     role = None
-    # load_role=False (unexpected errors): no database, no session change.
+    # Don't mutate state on unexpected errors.
     if load_role:
         try:
             user, status = load_session_user(request)
@@ -139,7 +138,7 @@ async def html_http_error(request: Request, exc: StarletteHTTPException):
 
 @app.exception_handler(FieldDecryptError)
 async def medical_record_unreadable(request: Request, exc: FieldDecryptError):
-    # Only the reason code and path are logged: never the packet, text or key.
+    # Never log medical text or key material.
     log.error("medical record could not be decrypted: reason=%s path=%s", exc.reason, request.url.path)
     return _error_page(
         request,
@@ -162,7 +161,7 @@ _FALLBACK_500 = (
 
 @app.exception_handler(Exception)
 async def unexpected_error(request: Request, exc: Exception):
-    # Details stay in the server log; the page shows only a short reference.
+    # Hide details from users.
     reference = secrets.token_hex(4)
     log.exception(
         "unexpected error ref=%s %s %s %s",
@@ -184,5 +183,5 @@ app.include_router(booking_router)
 app.include_router(admin_router)
 app.include_router(records_router)
 app.include_router(schedule_router)
-# CSS/JS/SVG only; StaticFiles never lists directories and does not follow symlinks.
+# No directory listing or symlink traversal.
 app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")

@@ -1,9 +1,4 @@
-"""Versioned URLs for files under static/.
-
-Each file's SHA-256 is computed once at startup and appended as ?v=<hash>,
-so the proxy can cache /static responses for a long time and a changed file
-gets a new URL.
-"""
+"""Add a startup-computed content hash to static URLs for safe long-term caching."""
 import hashlib
 from pathlib import Path
 

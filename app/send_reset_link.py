@@ -1,10 +1,4 @@
-"""Server-only reset for the last remaining administrator.
-
-The web interface cannot email a reset link to the sole admin account.
-Run this inside the API container:
-
-    python send_reset_link.py admin@clinic.local
-"""
+"""Send a reset link to the sole administrator from inside the API container."""
 
 import sys
 

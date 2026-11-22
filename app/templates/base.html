@@ -21,7 +21,7 @@
     {%- set nav_items = nav_items + [("/registrar/appointments", "Appointments calendar"), ("/registrar/patients", "Patients")] %}
   {%- endif %}
   {%- if role == "admin" %}
-    {#- Short labels so the admin menu fits on one line; the public list is "Doctor list" to avoid two "Doctors". #}
+    {#- Short labels keep the menu compact. #}
     {%- set nav_items = [("/", "Home"), ("/doctors", "Doctor list"), ("/admin/users", "Staff"), ("/admin/doctors", "Doctors"), ("/admin/services", "Services"), ("/admin/schedule", "Schedule"), ("/admin/audit", "Audit"), ("/admin/settings", "Settings")] %}
   {%- endif %}
   {%- if role in ("patient", "doctor", "registrar", "admin") %}
@@ -29,7 +29,7 @@
   {%- else %}
     {%- set nav_items = nav_items + [("/login", "Login"), ("/register", "Register")] %}
   {%- endif %}
-  {#- The active item is the longest nav path that matches the current path. #}
+  {#- Mark the longest route active. #}
   {%- set current_path = request.url.path %}
   {%- set nav_state = namespace(active="") %}
   {%- for href, label in nav_items %}
@@ -37,7 +37,7 @@
       {%- if href|length > nav_state.active|length %}{% set nav_state.active = href %}{% endif %}
     {%- endif %}
   {%- endfor %}
-  {#- Admin on wide screens: Cabinet, Settings and Logout sit in a <details> dropdown (no JS needed). #}
+  {#- Desktop admin menu. #}
   {%- set cabinet_menu_hrefs = ("/me", "/admin/settings", "/logout") %}
   {%- macro nav_item(href, label) %}
       {%- if href == "/logout" %}

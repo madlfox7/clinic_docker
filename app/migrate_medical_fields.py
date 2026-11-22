@@ -1,19 +1,4 @@
-"""Bring stored medical text to the current row-bound packet format (fe2).
-
-Runs in the api container before uvicorn starts (see docker/api/Dockerfile),
-because only the api has the field encryption key. Safe to run repeatedly:
-
-  - plaintext rows (older volumes)       -> encrypted, bound to the row
-  - fe1 packets (no row binding)         -> decrypted the old way, rewritten as fe2
-  - fe2 packets                          -> left alone (bound already)
-
-    python -m migrate_medical_fields              # the steps above
-    python -m migrate_medical_fields --reencrypt  # also fe2 rows under older key ids
-
-The key never reaches SQL: the clinic_api-only functions hand out stored
-values and accept finished fe2 packets. Output names tables, counts and key
-ids only, never text, packets or key material.
-"""
+"""Migrate medical text to fe2; reruns leave fe2 unchanged unless re-encrypting."""
 
 import sys
 

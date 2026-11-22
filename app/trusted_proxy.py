@@ -1,11 +1,4 @@
-"""Accept HTTP requests only from the nginx proxy (or loopback inside the container).
-
-The proxy's address is dynamic, so it is resolved by name (TRUSTED_PROXY_HOST,
-default "proxy") lazily, cached for 30 s, and re-resolved on a miss at most
-once every 5 s. Any other peer, such as a neighbour container on a shared
-network, gets 403 before the app runs. Requests from the proxy are marked in
-the ASGI scope so client_ip() can trust X-Real-IP from it and from nobody else.
-"""
+"""Trust only the named proxy; cache its changing address briefly."""
 import asyncio
 import ipaddress
 import logging

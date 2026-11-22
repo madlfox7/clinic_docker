@@ -1,5 +1,4 @@
-"""A fake journal for the unit tests of audit/anchor.py and verify_audit.py:
-rows, head and trigger modes in memory, hashed with audit/canon.py."""
+"""In-memory audit-journal fake for anchor and verifier unit tests."""
 import datetime as dt
 import sys
 import uuid
@@ -21,7 +20,7 @@ class FakeSource:
         self.modes = {key: "A" for key in chainlib.TRIGGERS}
         self.head_override = None
         self.add(rows)
-        # the rows given here were there at migration (genesis), unless told otherwise
+        # Genesis rows predate migration.
         self.genesis_rows = rows if genesis_rows is None else genesis_rows
 
     def add(self, count=1):

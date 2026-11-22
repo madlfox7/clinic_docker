@@ -113,7 +113,7 @@ def test_medical_text_is_stored_encrypted_and_shown_as_plaintext():
 def test_unreadable_packet_gives_clear_error_without_details():
 	visit = _past_visit(DOC)
 	try:
-		# A packet from another key (not on this stand) cannot be decrypted.
+		# Reject packets from other keys.
 		foreign = field_crypto.Keyring.from_texts("other:" + os.urandom(32).hex())
 		row_id = int(psql("SELECT nextval('public.visit_notes_id_seq')"))
 		packet = foreign.encrypt("visit_notes", row_id, visit, "foreign-key-text")
@@ -140,7 +140,7 @@ def _drop_body_check(table):
 
 
 def _restore_schema():
-	# Rerun the normal migrate service: init.sql recreates the NOT VALID check.
+	# Recreate the check through migration.
 	completed = subprocess.run(
 		["docker", "compose", "run", "--rm", "--no-deps", "-T", "migrate"],
 		cwd=ROOT, capture_output=True, text=True,
@@ -156,8 +156,7 @@ def test_api_migration_binds_legacy_rows_once():
 	}
 	visit = _past_visit(DOC)
 	try:
-		# An older volume holds plaintext rows (before encryption) and fe1 packets
-		# (encrypted, but not bound to their row), written before this check.
+		# Legacy-row migration fixtures.
 		_drop_body_check("visit_notes")
 		_drop_body_check("prescriptions")
 		for table, (plain, fe1_text) in legacy.items():
@@ -169,7 +168,6 @@ def test_api_migration_binds_legacy_rows_once():
 				)
 		_restore_schema()
 
-		# Until it is migrated, the api refuses to show an unbound row.
 		with client() as doctor:
 			login(doctor, DOC)
 			page = doctor.get(f"/doctor/appointments/{visit}/records")
@@ -193,7 +191,6 @@ def test_api_migration_binds_legacy_rows_once():
 				assert marker not in stored and is_packet(stored)
 				opened.append(decrypt(table, int(row_id), visit, stored))
 			assert opened == list(texts)
-		# No plaintext or fe1 row is left anywhere: the bound-packet check validates.
 		psql(
 			"BEGIN;"
 			" ALTER TABLE visit_notes VALIDATE CONSTRAINT visit_notes_body_bound_check;"
@@ -216,7 +213,7 @@ def test_api_migration_binds_legacy_rows_once():
 
 
 def test_packet_moved_to_another_row_does_not_decrypt():
-	# Unit level: the packet opens only for its own table, row id and appointment id.
+	# Bind packets to table and row.
 	ring = field_crypto.Keyring.from_texts("v1:" + os.urandom(32).hex())
 	packet = ring.encrypt("visit_notes", 10, 20, "bound text")
 	assert ring.decrypt("visit_notes", 10, 20, packet) == "bound text"
@@ -228,21 +225,20 @@ def test_packet_moved_to_another_row_does_not_decrypt():
 		with pytest.raises(field_crypto.FieldDecryptError) as failed:
 			ring.decrypt(table, row_id, appointment_id, packet)
 		assert failed.value.reason == "integrity_check_failed"
-	# The api never shows a legacy fe1 packet; only the migration opens it.
+	# Legacy packets require migration.
 	old = legacy_packet("visit_notes", "unbound text", ring)
 	with pytest.raises(field_crypto.FieldDecryptError) as failed:
 		ring.decrypt("visit_notes", 10, 20, old)
 	assert failed.value.reason == "unbound_packet"
 	assert ring.decrypt_legacy("visit_notes", old) == "unbound text"
 
-	# Stand level: a database superuser copies one patient's note packet into
-	# another row of the same table (another visit, and the same visit).
+	# Test cross-row copying as superuser.
 	marker = uuid.uuid4().hex[:10]
 	text_a = f"patient A diagnosis {marker}"
 	text_b = f"patient B diagnosis {marker}"
 	rx_a = f"patient A prescription {marker}"
 	rx_b = f"patient B prescription {marker}"
-	# One past visit per doctor (each takes that doctor's first slot).
+	# Seed past visits.
 	visit_a = _past_visit(DOC)
 	visit_b = _past_visit(DOC2, patient_email=PAT2)
 	try:
@@ -267,15 +263,14 @@ def test_packet_moved_to_another_row_does_not_decrypt():
 			login(doctor, DOC2)
 			login(pat_b, PAT2)
 			b_url = f"/doctor/appointments/{visit_b}/records"
-			# Legitimate write and read of the same rows.
 			page = doctor.get(b_url)
 			assert page.status_code == 200 and text_b in page.text and rx_b in page.text
 			assert text_b in pat_b.get("/my/records").text
 
 			for table, row_id, foreign in (
-				("visit_notes", note_b, packet_a),       # A's note -> B's note row
-				("prescriptions", rx_b_id, rx_packet_a),  # A's rx -> B's rx row
-				("visit_notes", note_b, packet_b2),      # same visit, other note row
+				("visit_notes", note_b, packet_a),       # Cross-patient note transfer.
+				("prescriptions", rx_b_id, rx_packet_a),  # Cross-patient prescription transfer.
+				("visit_notes", note_b, packet_b2),      # Same-visit transfer.
 			):
 				original = psql(f"SELECT body FROM {table} WHERE id = {row_id}")
 				psql(f"UPDATE {table} SET body = '{foreign}' WHERE id = {row_id}")
@@ -292,7 +287,6 @@ def test_packet_moved_to_another_row_does_not_decrypt():
 				finally:
 					psql(f"UPDATE {table} SET body = '{original}' WHERE id = {row_id}")
 
-			# Rows restored: everyone sees their own text again.
 			page = doctor.get(b_url)
 			assert page.status_code == 200 and text_b in page.text and rx_b in page.text
 			assert text_a not in page.text
@@ -302,7 +296,7 @@ def test_packet_moved_to_another_row_does_not_decrypt():
 				own = pat_a.get("/my/records").text
 				assert text_a in own and rx_a in own and text_b not in own
 
-		# The database itself refuses unbound fe1 packets in new or changed rows.
+		# Enforce packet binding in PostgreSQL.
 		denied = subprocess.run(
 			["docker", "compose", "exec", "-T", "db", "psql", "-X", "-U", "clinic", "-d", "clinic",
 			 "-v", "ON_ERROR_STOP=1", "-At", "-c",
@@ -361,7 +355,7 @@ finally:
 conn = db()
 try:
     with conn.cursor() as cur:
-        # Unbound legacy packets are not accepted either: only finished fe2 packets.
+        # Reject unbound legacy packets.
         cur.execute(
             "SELECT public.medical_body_replace('visit_notes', 1, 'x', %s)",
             ("fe1:v1:AAAAAAAAAAAAAAAA:AAAA:AAAAAAAAAAAAAAAAAAAAAA",),
@@ -378,7 +372,7 @@ print(json.dumps(result))
 
 
 def test_rotation_keeps_old_rows_readable_and_writes_new_key_id():
-	# Unit level: a keyring with an old and a current key.
+	# Key-rotation fixture.
 	old_line = "v1:" + os.urandom(32).hex()
 	new_line = "v2:" + os.urandom(32).hex()
 	old_ring = field_crypto.Keyring.from_texts(old_line)
@@ -390,15 +384,14 @@ def test_rotation_keeps_old_rows_readable_and_writes_new_key_id():
 	with pytest.raises(field_crypto.FieldDecryptError):
 		old_ring.decrypt("visit_notes", 5, 7, new_packet)
 	with pytest.raises(field_crypto.FieldDecryptError):
-		rotated.decrypt("prescriptions", 5, 7, old_packet)  # bound to its table
+		rotated.decrypt("prescriptions", 5, 7, old_packet)  # Table-bound packet.
 	tampered = old_packet[:-3] + ("AAA" if not old_packet.endswith("AAA") else "BBB")
 	with pytest.raises(field_crypto.FieldDecryptError):
 		rotated.decrypt("visit_notes", 5, 7, tampered)
 	with pytest.raises(field_crypto.FieldKeyError):
 		field_crypto.Keyring.from_texts(new_line, "v2:" + os.urandom(32).hex())
 
-	# Stand level: re-encrypt real rows with a new current key inside the api,
-	# through the same SQL functions as the startup migration, then roll back.
+	# Exercise re-encryption without committing.
 	marker = uuid.uuid4().hex[:10]
 	visit = _past_visit(DOC)
 	try:
@@ -450,7 +443,6 @@ print(json.dumps(result))
 		assert result["stand_reads_new"] is False
 		assert result["counts"]["visit_notes"]["encrypted"] >= 1
 		assert result["counts"]["visit_notes"]["failed"] == 0
-		# rolled back: the stand still reads the row with its own key
 		stored = psql(f"SELECT body FROM visit_notes WHERE id = {row_id}")
 		assert decrypt("visit_notes", row_id, visit, stored) == f"rotation note {marker}"
 	finally:

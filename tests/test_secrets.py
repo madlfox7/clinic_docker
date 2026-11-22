@@ -30,7 +30,7 @@ FORBIDDEN_ENV = (
     "FIELD_ENCRYPTION_KEY",
 )
 OLD_DEMO_PASSWORD = "password" + "123"
-# Lists of rejected weak values may name the old demo password; nothing else may.
+# Restrict demo-password references to rejection tests.
 DENYLIST_NAMES = {"DEFAULT_REGISTRATION_PASSWORDS", "_REJECTED_SECRETS"}
 
 
@@ -125,8 +125,7 @@ def test_seed_reads_demo_password_only_from_secret_file():
     compose = (ROOT / "docker-compose.yml").read_text(encoding="utf-8")
     assert "./secrets/demo_password" in compose
 
-    # Run demo_password() inside the seed image: the mounted file works, and a
-    # missing or empty file fails even when an env variable offers a value.
+    # Check seed-image secret-file handling.
     script = """
 import json, os, tempfile
 import secret_files
@@ -218,8 +217,7 @@ def test_field_key_is_mounted_only_on_api_and_never_leaks():
 
 
 def test_api_refuses_to_start_without_a_valid_field_key():
-    # Import main (the uvicorn app) with a private secrets dir: a missing, empty
-    # or malformed key stops startup, and an env variable is never used instead.
+    # Reject invalid keys; ignore env fallback.
     script = r"""
 import json, os, shutil, subprocess, sys, tempfile
 result = {"uid": os.getuid()}
@@ -316,7 +314,7 @@ def test_secret_files_are_readable_only_by_their_container_user():
         mode = path.stat().st_mode
         assert not mode & (stat.S_IROTH | stat.S_IWOTH), f"secrets/{name} is world-accessible"
         acl = subprocess.run(["getfacl", "-cpn", str(path)], capture_output=True, text=True).stdout
-        # Files handed to the container uid by the root fallback carry no ACL.
+        # Check root-fallback file permissions.
         if path.stat().st_uid == os.getuid():
             assert f"user:{uid}:r--" in acl.splitlines(), (name, acl)
             assert "other::---" in acl.splitlines(), (name, acl)

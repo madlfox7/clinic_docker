@@ -1,20 +1,7 @@
 #!/usr/bin/env sh
-# Public demo of the local stand through ngrok (make ngrok / make ngrok-off).
-#   scripts/ngrok_demo.sh on    start the stand with the tunnel address, then
-#                               run ngrok in the foreground (Ctrl+C closes the
-#                               tunnel; the stand keeps running)
-#   scripts/ngrok_demo.sh off   start the stand again with the .env settings
-#                               (tunnel off): links and the 308 go to localhost
-# NGROK_DOMAIN (environment or .env) is the reserved ngrok domain, for example
-# outspoken-wiry-fabric.ngrok-free.dev. The authtoken stays in ngrok's own
-# config (ngrok config add-authtoken) or NGROK_AUTHTOKEN; it is never read
-# into this script, stored in the repository or printed.
-# The settings go to `make start` through the environment, which beats .env
-# for init_secrets.sh (env_or_dotenv) and for Compose interpolation; .env is
-# not edited. COMPOSE, MAKE and PYTHON come from the Makefile.
-# Exit codes: 0 done (or ngrok closed with Ctrl+C), 1 a configuration error
-# (tls_fail: domain, ngrok, ports, the address in the containers), 2 usage;
-# otherwise ngrok's own code. make ngrok itself reports 2 for any failure.
+# ngrok demo: on starts a tunnel; off restores .env.
+# Ctrl+C closes tunnel only; domain comes from env/.env.
+# Never read or print the ngrok token.
 set -eu
 umask 077
 cd "$(dirname "$0")/.."
@@ -25,9 +12,7 @@ COMPOSE="${COMPOSE:-docker compose}"
 MAKE="${MAKE:-make}"
 PYTHON="${PYTHON:-python3}"
 
-# The published HTTPS port of the proxy (container 8443) as Compose will use
-# it, override files and environment included; the tunnel must go there, the
-# HTTP port only answers with a 308 to PUBLIC_BASE_URL (a loop).
+# Use the published HTTPS port for the tunnel.
 proxy_https_port() {
   $COMPOSE config --format json | "$PYTHON" -c '
 import json, sys
@@ -43,10 +28,7 @@ print(ports[0]["published"])
 '
 }
 
-# What the running stand actually uses. `sudo docker compose` (COMPOSE="sudo
-# ...") drops PUBLIC_BASE_URL and CLINIC_PUBLIC_TUNNEL from the environment,
-# so the containers would keep the .env address while the tunnel points at
-# them. Only these two non-secret variables are read, by name.
+# Check container settings; sudo compose may drop overrides.
 effective_value() {
   $COMPOSE exec -T "$1" printenv "$2" 2>/dev/null | tr -d '\r' | tail -n 1
 }
@@ -73,7 +55,6 @@ ngrok_on() {
   NGROK_DOMAIN="$(env_or_dotenv NGROK_DOMAIN)"
   [ -n "$NGROK_DOMAIN" ] \
     || tls_fail "NGROK_DOMAIN is not set; add NGROK_DOMAIN=<your-domain>.ngrok-free.dev to .env (the domain from the ngrok dashboard)"
-  # The same rules as PUBLIC_BASE_URL in tunnel mode: a bare lower-case domain.
   case "$NGROK_DOMAIN" in
     *://*|*/*|*:*) tls_fail "NGROK_DOMAIN must be the bare domain (like name.ngrok-free.dev), without https://, port or path" ;;
   esac
@@ -90,8 +71,7 @@ ngrok_on() {
     tls_fail "ngrok config check failed; run: ngrok config add-authtoken <token from the ngrok dashboard>"
   fi
   if [ -z "${NGROK_AUTHTOKEN:-}" ]; then
-    # Only whether an authtoken line exists is checked; its value is not read
-    # into a variable or printed.
+    # Check token presence only; never read its value.
     config_file="$(printf '%s\n' "$check_out" | sed -n 's/^Valid configuration file at //p' | tail -n 1)"
     if [ -z "$config_file" ] || ! [ -f "$config_file" ] \
       || ! grep -Eq '^[[:space:]]*authtoken:[[:space:]]*[^[:space:]#"'"'"']' "$config_file"; then
@@ -114,7 +94,7 @@ ngrok_on() {
   echo "        PUBLIC: anyone with the link reaches the stand. Close the tunnel after the demo."
   echo "        Ctrl+C closes the tunnel; the stand keeps running with the tunnel links until: make ngrok-off"
   echo "ngrok http https://localhost:$https_port --url https://$NGROK_DOMAIN --upstream-tls-verify --upstream-tls-verify-cas $ca"
-  # Not exec: after Ctrl+C the reminder below is still printed.
+  # Keep the reminder after Ctrl+C.
   trap ':' INT
   rc=0
   ngrok http "https://localhost:$https_port" --url "https://$NGROK_DOMAIN" \
@@ -124,7 +104,6 @@ ngrok_on() {
 }
 
 ngrok_off() {
-  # Drop the tunnel settings of this shell too, so .env (or its default) wins.
   unset PUBLIC_BASE_URL
   CLINIC_PUBLIC_TUNNEL=0
   export CLINIC_PUBLIC_TUNNEL

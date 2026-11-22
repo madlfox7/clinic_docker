@@ -1,5 +1,4 @@
-# audit_anchor (plan 17 §8): HMAC anchors of the audit chain head and
-# verify_audit. Same base image as the api.
+# audit_anchor stores HMAC chain anchors and verifies the journal.
 FROM python:3.12.14-slim-trixie@sha256:f77ac9e44ae96ef2c90b8053ea08c31f8be030f824196b0ae4db6d462c84e51f
 
 WORKDIR /audit
@@ -10,12 +9,9 @@ COPY docker/audit_anchor/requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 COPY audit/canon.py audit/chainlib.py audit/anchor.py audit/verify_audit.py ./
 
-# /status: the public status of the loop (plan 18.1), a named volume that
-# the api mounts read-only. A new named volume copies this owner and mode.
+# /status is public and mounted read-only by the api.
 RUN mkdir /status && chown 10002:10002 /status && chmod 755 /status
-# /anchors: the anchors and the chain registry, the external named volume
-# audit_anchors (docker-compose.yml). An empty new volume copies this owner
-# and mode on its first mount; audit_prepare sets them again in any case.
+# /anchors stores chain data in the external audit_anchors volume.
 RUN mkdir /anchors && chown 10002:10002 /anchors && chmod 700 /anchors
 
 ENV PYTHONDONTWRITEBYTECODE=1

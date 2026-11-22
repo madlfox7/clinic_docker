@@ -29,9 +29,7 @@ from field_crypto import decrypt_body
 from mailer import deliver_appointment_emails
 from routes_auth import _login_doctor_id, _normalize_registration_email, require_user
 
-# Two-key advisory locks: (class, patient id); same key in rls.sql
-# (record_appointment_reschedule). Booking and rescheduling of one patient
-# serialize on it; the int4 pair space is apart from hashtextextended keys.
+# Share the patient lock with rescheduling.
 PATIENT_LOCK_CLASS = 1
 
 
@@ -701,8 +699,7 @@ def cancel_appointment(request: Request, appointment_id: str):
             conn.close()
             return RedirectResponse("/my?cancel_error=1", status_code=303)
         if not before_deadline:
-            # Own, scheduled and still ahead, but inside the change deadline
-            # (the patient UPDATE policy would refuse it anyway).
+            # Visit is inside the change deadline.
             cur.close()
             conn.close()
             return RedirectResponse("/my?cancel_error=too_late", status_code=303)
@@ -853,7 +850,7 @@ def my_appointments(request: Request):
     )
     doctors = [{"id": row[0], "full_name": row[1]} for row in cur.fetchall()]
 
-    # Fixed SQL fragments only; every user value goes in as a parameter.
+    # Fixed SQL; parameterized values.
     where = ["a.patient_user_id = %s", MY_STATUS_FILTERS[status]]
     query_args = [user["id"]]
     if doctor_id is not None:
@@ -921,7 +918,7 @@ def my_appointments(request: Request):
     ]
     items_by_id = {item["id"]: item for item in items}
     if items_by_id:
-        # Records of this page only, filtered by patient as well as by RLS.
+        # Filter by patient and RLS.
         page_ids = list(items_by_id)
         cur.execute(
             """
@@ -953,7 +950,7 @@ def my_appointments(request: Request):
             reschedule_confirmation = _load_my_confirmation(
                 cur, user["id"], confirmation_id
             )
-    # Same read event as /my/records, once per page and only when bodies will be shown.
+    # Journal pages that show record bodies.
     if any(item["notes"] or item["prescriptions"] for item in items):
         record_audit_event(cur, "medical.records.view", "patient", user["id"])
         conn.commit()
@@ -1021,7 +1018,7 @@ def doctor_appointments(request: Request):
     page = parse_page(params.get("page"))
     conn = db_as(user)
     cur = conn.cursor()
-    # Visibility stays with RLS appointments_doctor and doctor_visit_patients.
+    # RLS controls access.
     cur.execute(
         """
         SELECT a.id, dp.email, svc.name, a.starts_at, a.ends_at, a.status, dp.blocked,
@@ -1096,13 +1093,8 @@ def doctor_appointments(request: Request):
     )
 
 
-# --- Reschedule (14_ux_filters.md п. 5) ---------------------------------------
-# Same doctor and service only. One transaction under db_as(user): the old visit
-# is cancelled first, then the new slot is checked and inserted (Б1), the journal
-# function checks the pair again before COMMIT (Б3). No new grants (Б4).
-
-# Moves a patient may make in 24 hours (registrars are not limited); the same
-# number is in record_appointment_reschedule in rls.sql.
+# Reschedule
+# Same doctor/service; one transaction.
 RESCHEDULE_DAILY_LIMIT = 3
 
 RESCHEDULE_ERRORS = (
@@ -1207,8 +1199,7 @@ def reschedule_form(request: Request, appointment_id: str):
             )
             row = cur.fetchone()
             patient = {"email": row[0], "blocked": row[1], "full_name": row[2]}
-        # Free slots of the same doctor and service. A slot that only overlaps the
-        # visit being moved counts as free: the move cancels it first (Б1).
+        # Cancel first; ignore its overlap.
         cur.execute(
             """
             SELECT s.id, s.starts_at,
@@ -1312,11 +1303,7 @@ def reschedule_appointment(
     conn = db_as(user)
     cur = conn.cursor()
     try:
-        # 1. owner of the visit, without a lock (patients: own visits only).
-        # The patient deadline is checked here, before the advisory lock and the
-        # daily limit: inside the deadline the UPDATE policy also hides the row
-        # from SELECT ... FOR UPDATE in step 3, so it could not be told apart
-        # there. too_late is only ever given for an own open visit.
+        # Check ownership/deadline before locking.
         if role == "patient":
             cur.execute(
                 """
@@ -1340,16 +1327,16 @@ def reschedule_appointment(
             conn.rollback()
             return RedirectResponse("/my?reschedule_error=too_late", status_code=303)
         patient_id = owner[0]
-        # 2. one patient at a time, as in booking
+        # 2. Lock patient actions.
         cur.execute(
             "SELECT pg_advisory_xact_lock(%s::int, %s::int)", (PATIENT_LOCK_CLASS, patient_id)
         )
-        # 3. lock the visit; a parallel cancel or move leaves nothing here
+        # 3. Lock the visit.
         visit = _load_reschedulable(cur, user, appointment_id, lock=True)
         if visit is None:
             conn.rollback()
             return _reschedule_denied(role)
-        # the daily limit, counted under the lock and only for an own open visit
+        # Count the daily limit under the lock.
         if role == "patient":
             cur.execute("SELECT public.own_reschedules_last_day()")
             if cur.fetchone()[0] >= RESCHEDULE_DAILY_LIMIT:
@@ -1364,12 +1351,12 @@ def reschedule_appointment(
             if not patient_row or patient_row[0]:
                 conn.rollback()
                 return _reschedule_error(appointment_id, "patient_blocked")
-        # 4. visits with notes or prescriptions stay where they are
+        # 4. Keep visits with records.
         cur.execute("SELECT public.appointment_has_medical_records(%s)", (appointment_id,))
         if cur.fetchone()[0]:
             conn.rollback()
             return _reschedule_error(appointment_id, "has_records")
-        # 5. the new slot: not the same slot, same doctor and service, bookable
+        # 5. Validate slot.
         if new_slot_id == visit["slot_id"]:
             conn.rollback()
             return _reschedule_error(appointment_id, "same_slot")
@@ -1413,9 +1400,7 @@ def reschedule_appointment(
             conn.rollback()
             return _reschedule_error(appointment_id, "unavailable")
 
-        # No SAVEPOINT before record_appointment_reschedule: it checks that both
-        # rows were written by this transaction (xmin).
-        # 6. cancel the old visit first, so its own time and buffer are free (Б1)
+        # Journal both rows; cancel old visit first.
         cur.execute(
             """
             UPDATE appointments
@@ -1430,7 +1415,7 @@ def reschedule_appointment(
         if cur.rowcount != 1:
             conn.rollback()
             return _reschedule_denied(role)
-        # 7. taken / overlap checks after the cancel
+        # 7. Check conflicts.
         cur.execute("SELECT public.scheduled_slot_is_taken(%s)", (new_slot_id,))
         if cur.fetchone()[0]:
             conn.rollback()
@@ -1450,7 +1435,7 @@ def reschedule_appointment(
         if cur.fetchone():
             conn.rollback()
             return _reschedule_error(appointment_id, "overlap")
-        # 8. insert exactly like booking; RLS INSERT runs is_valid_free_slot
+        # 8. Insert through RLS.
         cur.execute(
             """
             INSERT INTO appointments (
@@ -1472,11 +1457,11 @@ def reschedule_appointment(
             conn.rollback()
             return _reschedule_error(appointment_id, "unavailable")
         new_id = inserted[0]
-        # 9. the journal event checks the pair again; 42501 rolls everything back
+        # 9. Journal rechecks the pair.
         cur.execute(
             "SELECT public.record_appointment_reschedule(%s, %s)", (appointment_id, new_id)
         )
-        # 10. mail data for both visits, before COMMIT (a failure here is not fatal)
+        # 10. Prepare mail; failures are non-fatal.
         old_notice = new_notice = None
         cur.execute("SAVEPOINT reschedule_notice")
         try:
@@ -1486,7 +1471,7 @@ def reschedule_appointment(
             log.exception("could not prepare reschedule email")
             cur.execute("ROLLBACK TO SAVEPOINT reschedule_notice")
             old_notice = new_notice = None
-        # 11. one COMMIT
+        # 11. Commit.
         conn.commit()
     except psycopg2.errors.UniqueViolation:
         conn.rollback()

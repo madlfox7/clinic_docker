@@ -1,16 +1,6 @@
 """Independent check of the audit journal (plan 17 §9.1, A5).
 
-    python verify_audit.py [--strict] [--anchors <dir>]
-
-Recomputes the canon and every hash itself (canon.py) and trusts no function
-in the database. Checks seq from 1, prev_hash links, row_hash, hash_version,
-the head, the anchor file of the chain (MAC chain, every anchor against its
-row, no truncated tail), the chain registry (§8.6 rules again, not trusting
-anchor.py) and the mode 'A' of the six journal triggers.
-
-Exit codes: 0 OK (WARN lines for forced/offline retires are allowed),
-1 BROKEN, 2 the check could not run (no key, database unavailable, bad
-arguments), 3 with --strict when a retire was forced or offline.
+Exit codes: 0 OK, 1 broken, 2 unchecked, 3 strict warning.
 """
 from __future__ import annotations
 
@@ -39,8 +29,7 @@ def check_registry(directory: Path, key: bytes, head: dict, source):
     entries, _ = cl.parse_registry(registry, key)
     warnings, forced, offline = [], 0, 0
     opened, seen_before = {}, set()
-    # A switch stays BROKEN for good; the registry is still read to the end so
-    # that a later forced retire of the replaced chain is shown as a WARN too.
+    # Keep scanning for later warnings.
     switched: cl.Broken | None = None
 
     def broken(kind: str, detail: str) -> cl.Broken:
@@ -136,8 +125,7 @@ def main(argv=None, out=print) -> int:
     args = parser.parse_args(argv)
     raw = os.environ.get("CLINIC_AUDIT_ANCHOR_INTERVAL", "60")
     every = int(raw) if raw.isdigit() else 60
-    # Not BROKEN: nothing was checked. Only the exception type is printed,
-    # never a path content, a password or the key.
+    # Report why nothing was checked.
     try:
         key = cl.load_key(KEY_FILE)
     except (OSError, ValueError) as exc:

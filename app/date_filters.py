@@ -1,8 +1,4 @@
-"""Shared GET filter parsing: strict ISO dates, day/week views, LIKE escaping.
-
-Used by the calendars, the slot list, /my, the audit log and the reschedule page.
-Bad input never raises: the caller gets a default value and an error code to show.
-"""
+"""Parse shared date and search filters; invalid input returns defaults and error codes."""
 from datetime import date, datetime, time, timedelta
 from urllib.parse import urlencode
 
@@ -58,10 +54,7 @@ def day_start(day):
 
 
 def date_range(request, max_days=MAX_FILTER_RANGE_DAYS):
-    """Optional from/to dates. Returns (from_day, to_day, errors).
-
-    A bad or out-of-order pair is dropped with an error; to - from is at most max_days.
-    """
+    """Parse an optional bounded date range; invalid or reversed pairs are dropped."""
     errors = []
     from_day, from_error = parse_iso_day(request.query_params.get("from"))
     to_day, to_error = parse_iso_day(request.query_params.get("to"))
@@ -100,10 +93,7 @@ def parse_page(raw, max_page=500):
 
 
 def clean_search(raw, max_length=MAX_SEARCH_LENGTH):
-    """Free-text search: stripped, <= max_length, no NUL/control characters.
-
-    Returns (value, error). An empty value means no filter.
-    """
+    """Return a normalized search value and error; empty means no filter."""
     if raw is None:
         return "", None
     if not isinstance(raw, str) or contains_nul(raw) or has_control_char(raw):

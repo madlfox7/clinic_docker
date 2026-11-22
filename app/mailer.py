@@ -195,8 +195,7 @@ def send_password_reset(recipient: str, token: str) -> None:
 
 
 def send_existing_account_notice(recipient: str) -> None:
-    """Registration with an address that already has an account. No token,
-    no name: only links to the normal sign-in and reset pages."""
+    """Notify existing accounts without exposing names or tokens."""
     base_url = public_base_url()
     send_account_message(
         recipient,

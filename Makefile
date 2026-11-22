@@ -1,14 +1,13 @@
-# Docker Compose lifecycle and tests for this project.
-# Every target goes through $(COMPOSE), so another project name works too:
-#   make start COMPOSE="docker compose -p planera"
+# Docker Compose lifecycle and tests.
+# Targets use $(COMPOSE).
 
 COMPOSE ?= docker compose
 PYTHON ?= python3
 TEST_BASE ?= https://localhost:8450
-# CA the tests verify the stand certificate against (SSL_CERT_FILE for pytest only).
+# Test CA certificate (pytest only).
 TEST_CA ?= secrets/tls/ca.crt
 TEST_MAILPIT ?= http://127.0.0.1:8025
-# Compose project the tests inspect (docker compose exec ...); empty = default.
+# Test Compose project override.
 TEST_PROJECT ?=
 TEST_FILES ?= tests/test_stage4.py tests/test_rls_boundary.py tests/test_secrets.py \
 	tests/test_field_encryption.py tests/test_ui_security.py tests/test_ui_fixes.py \
@@ -18,47 +17,36 @@ TEST_FILES ?= tests/test_stage4.py tests/test_rls_boundary.py tests/test_secrets
 	tests/test_audit_status_ui.py tests/test_audit_view.py tests/test_audit_errors.py
 PYTEST_ARGS ?= -q
 CONFIRM ?=
-# yes (with CONFIRM=yes): reset/fclean close the audit chain even when it is
-# broken; the registry records it as forced (plan 17 §8.6).
+# Forced retirement needs CONFIRM=yes; registry records it.
 RETIRE_FORCE ?=
-# Extra arguments of make audit-verify, e.g. VERIFY_ARGS=--strict
+# audit-verify options.
 VERIFY_ARGS ?=
-# The docker command for "volume inspect" and "volume rm" in reset/fclean: the
-# words of $(COMPOSE) before "compose", so the same prefix (sudo -n docker,
-# env ... docker) and the same daemon. Empty if COMPOSE has no "compose" word
-# (then reset/fclean stop and ask for DOCKER=...). ":=": a DOCKER exported in
-# the environment is ignored (another daemon would look like "no such volume");
-# only "make ... DOCKER=..." on the command line overrides it.
+# Match volume operations to COMPOSE's daemon.
+# Without "compose", reset/fclean require DOCKER=.
+# Command-line DOCKER overrides; exported values are ignored.
 words_before_compose = $(if $(1),$(if $(filter compose,$(firstword $(1))),,$(firstword $(1)) $(call words_before_compose,$(wordlist 2,$(words $(1)),$(1)))))
 DOCKER := $(if $(filter compose,$(COMPOSE)),$(strip $(call words_before_compose,$(COMPOSE))))
 
 .DEFAULT_GOAL := help
 .PHONY: help start stop restart restart_up clean reset fclean logs ps test tls-check ngrok ngrok-off audit-verify
 
-# Anonymous volumes mounted by this project's containers (the postgres image
-# declares one on the one-shot migrate container). "down -v" misses them once
-# "up" has recreated a container, so the wipe targets remove them by name.
+# Remove anonymous project volumes that "down -v" may miss.
 define project_anon_volumes
 $$(for c in $$($(COMPOSE) ps -aq); do \
 	$(DOCKER) inspect -f '{{range .Mounts}}{{if eq .Type "volume"}}{{.Name}} {{end}}{{end}}' "$$c"; \
 done | tr ' ' '\n' | grep -E '^[0-9a-f]{64}$$' | sort -u)
 endef
 
-# RETIRE_FORCE=yes is only valid together with CONFIRM=yes; checked before
-# anything else runs.
+# Require confirmation for forced retirement.
 define check_retire_force
 @if [ "$(RETIRE_FORCE)" = "yes" ] && [ "$(CONFIRM)" != "yes" ]; then \
 	echo "RETIRE_FORCE=yes needs CONFIRM=yes: nothing was changed." >&2; exit 1; \
 fi
 endef
 
-# The audit anchor volume (docker-compose.yml, audit_anchors): external, so
-# "down -v" never removes it. Its name comes from "$(COMPOSE) config"; when the
-# daemon says "no such volume" it is created (label clinic.audit=keep, empty:
-# the audit_anchor image gives it owner 10002 and mode 700 on the first
-# mount). Any other error of "volume inspect" calls fail (defined by the
-# caller) and nothing is created. A new volume next to an old ./audit_anchors
-# directory gets a warning: the anchors there are not copied (README).
+# External anchors survive wipes; get the name from Compose.
+# Create only when inspect reports missing; fail on other errors.
+# Warn before leaving old bind-mounted anchors behind.
 define ensure_anchor_volume
 if [ -z "$(DOCKER)" ]; then \
 	echo "cannot derive the docker command from COMPOSE='$(COMPOSE)' (no 'compose' word); set DOCKER=... Nothing was changed." >&2; \
@@ -85,23 +73,11 @@ if [ "$$inspect_rc" != 0 ]; then \
 fi
 endef
 
-# Before down -v, in the same shell line (plan 17 §8.6, Б3): stop proxy and api
-# so nothing more is written, then close the open audit chain in the registry
-# (anchor.py --retire). A failed retire stops make before down -v. Three cases:
-# audit_anchor running -> exec; not running but the database volume exists ->
-# a one-off run (starts db and migrate); the volume certainly missing ->
-# --offline. "run" has no --no-build; the image is built only when missing.
-# The volume is looked up with "$(DOCKER) volume inspect" (name from
-# "$(COMPOSE) config"; "docker compose volumes" is missing before Compose
-# 2.33). Only "no such volume" counts as missing: any other error (permission
-# denied, no daemon, sudo asking for a password) stops make, nothing deleted,
-# so the offline retire never skips the chain check by mistake.
-# The anchor volume is checked first: a missing one is created empty
-# (ensure_anchor_volume; the retire then needs RETIRE_FORCE like before with a
-# missing directory), then anchor.py --check-dir in a one-off audit_anchor
-# container: /anchors must be 700, owner uid 10002, no ACL, or make stops
-# (З-10). down -v keeps the volume (external).
-# Then down -v and the anonymous volumes listed above (only this project's).
+# Stop writers before retiring the chain; failures prevent deletion.
+# Retire online when possible; offline only if the DB volume is absent.
+# Other inspect errors fail closed; never bypass chain verification.
+# Check anchors (700, uid 10002, no ACL) before deletion.
+# External anchors survive "down -v"; remove project volumes only.
 define wipe_stack
 @stopped() { echo "  proxy and api are stopped; $(MAKE) start COMPOSE='$(COMPOSE)' brings the stand back." >&2; }; \
 if [ -z "$(DOCKER)" ]; then \
@@ -166,7 +142,7 @@ for v in $$anon; do \
 done
 endef
 
-# Asks before a step that deletes the database volume; CONFIRM=yes skips the question.
+# Confirm before deleting the database volume.
 define confirm_wipe
 @if [ "$(CONFIRM)" != "yes" ]; then \
 	printf '%s\n' "WARNING: '$@' deletes the database volume of '$(COMPOSE)'. All data will be lost."; \
@@ -176,16 +152,10 @@ define confirm_wipe
 fi
 endef
 
-# A server certificate reissued by init_secrets.sh is written into the same
-# files the running proxy has mounted; nginx only reads them on (re)load, so
-# a proxy that "up" did not recreate is reloaded here (graceful, plan 5.6).
+# Reload nginx after certificate reissue if proxy was not recreated.
 #
-# $(1): the "up" arguments. start: --build -d. restart: -d --no-recreate --wait
-# after stop, so the services come up in dependency order (db healthy, then
-# migrate, audit_prepare, seed, api, proxy), the same containers keep their
-# environment (tunnel mode of make ngrok: PUBLIC_BASE_URL, CLINIC_PUBLIC_TUNNEL)
-# and make waits until they are running/healthy. "compose restart" restarted
-# everything at once: migrate before db, proxy before api.
+# $(1): "up" args. Restart preserves containers/settings and waits for health.
+# Dependency order matters; "compose restart" ignores it.
 define start_stack
 cp -n .env.example .env
 ./scripts/init_secrets.sh
@@ -238,7 +208,7 @@ restart:
 		echo "restart: a service did not come up running/healthy (see: make ps; make logs; make audit-verify)." >&2; \
 		exit 1; }
 
-# not for direct use: the "up" half of restart
+# Internal restart target.
 restart_up:
 	$(call start_stack,-d --no-recreate --wait)
 
@@ -259,7 +229,6 @@ fclean:
 logs:
 	$(COMPOSE) logs -f
 
-# Independent check of the audit chain inside audit_anchor (key and anchors are there).
 audit-verify:
 	$(COMPOSE) exec -T audit_anchor python verify_audit.py $(VERIFY_ARGS)
 
@@ -270,13 +239,10 @@ test:
 	$(if $(TEST_PROJECT),COMPOSE_PROJECT_NAME=$(TEST_PROJECT)) CLINIC_TEST_BASE=$(TEST_BASE) CLINIC_MAILPIT=$(TEST_MAILPIT) SSL_CERT_FILE=$(TEST_CA) \
 		$(PYTHON) -m pytest $(PYTEST_ARGS) $(TEST_FILES)
 
-# Ports and environment come from $(COMPOSE) config (override files and shell
-# variables included), not from a grep of .env.
 tls-check:
 	$(COMPOSE) config --format json | $(PYTHON) scripts/tls_compose_env.py
 
-# Public demo through ngrok (README, Demo via ngrok). The tunnel settings go to
-# "make start" through the environment; .env is not edited.
+# Pass tunnel settings through environment; leave .env untouched.
 ngrok:
 	COMPOSE="$(COMPOSE)" MAKE="$(MAKE)" PYTHON="$(PYTHON)" ./scripts/ngrok_demo.sh on
 

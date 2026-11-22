@@ -1,5 +1,4 @@
-"""17_tls_audit_chain part A: local CA and server certificate, HTTPS on the
-proxy, HTTP redirect and HSTS, Secure cookie, production certificate mode."""
+"""Test proxy TLS, redirects, cookies and production certificate mode."""
 import hashlib
 import json
 import os
@@ -36,8 +35,7 @@ def _sha(path: pathlib.Path) -> str:
 
 
 def _script_copy(tmp_path: pathlib.Path) -> pathlib.Path:
-    """scripts/ in a temporary root: init_secrets.sh cds to its parent, so the
-    copy only ever touches tmp_path/secrets, never the stand's own files."""
+    """Copy scripts to a temporary root so init_secrets never touches stand secrets."""
     shutil.copytree(ROOT / "scripts", tmp_path / "scripts")
     return tmp_path
 
@@ -64,7 +62,7 @@ def _issue_leaf(tmp: pathlib.Path, ca_dir: pathlib.Path, name: str, san: str, da
     return key, crt
 
 
-# --- 1. Local CA and server certificate --------------------------------------
+# Local CA and server certificate
 
 def test_ca_key_is_never_mounted_and_tls_files_reach_only_the_proxy():
     config = json.loads(_compose("config", "--format", "json").stdout)
@@ -134,13 +132,13 @@ def test_ca_refuses_client_auth_and_localhost_subdomains(tmp_path):
     assert checked.returncode != 0 and "excluded subtree violation" in checked.stdout + checked.stderr
     _, leaf = _issue_leaf(tmp_path, TLS, "leaf", "DNS:localhost", 5, eku="serverAuth, clientAuth")
     assert _openssl("verify", "-purpose", "sslserver", "-CAfile", str(TLS / "ca.crt"), str(leaf)).returncode == 0
-    # The leaf asks for clientAuth too, but the CA's EKU does not pass it on.
+    # CA EKU controls client auth.
     client = _openssl("verify", "-purpose", "sslclient", "-CAfile", str(TLS / "ca.crt"), str(leaf), check=False)
     assert client.returncode != 0, client.stdout
 
 
 def test_name_constraints_refuse_a_leaf_for_another_site(tmp_path):
-    # The CA key is only read; the leaf lives in tmp_path and is removed with it.
+    # Keep the CA key read-only.
     _, crt = _issue_leaf(tmp_path, TLS, "example.com", "DNS:example.com", 5)
     checked = _openssl("verify", "-CAfile", str(TLS / "ca.crt"), str(crt), check=False)
     assert checked.returncode != 0 and "permitted subtree violation" in checked.stdout + checked.stderr
@@ -213,7 +211,7 @@ def test_tls_file_modes_and_proxy_access():
         assert path.stat().st_mode & 0o777 == 0o600, name
         acl = subprocess.run(["getfacl", "-cpn", str(path)], capture_output=True, text=True).stdout.splitlines()
         assert not [line for line in acl if line.startswith("user:") and line != "user::rw-"], (name, acl)
-    # busybox `test -r` looks at mode bits only and ignores the ACL, so read the file.
+    # Check ACLs via actual reads.
     read = "cat /run/secrets/tls_key > /dev/null"
     ok = _compose("exec", "-T", "-u", "101", "proxy", "sh", "-c", read)
     assert ok.returncode == 0, ok.stderr
@@ -221,7 +219,7 @@ def test_tls_file_modes_and_proxy_access():
     assert denied.returncode != 0
 
 
-# --- 2. HTTPS on the proxy -----------------------------------------------------
+# HTTPS proxy
 
 def _published(target: int) -> int:
     config = json.loads(_compose("config", "--format", "json").stdout)
@@ -285,7 +283,7 @@ def test_tls_12_and_13_pass_and_tls_11_is_refused_by_the_server():
         old.minimum_version = old.maximum_version = ssl.TLSVersion.TLSv1_1
     except (ValueError, ssl.SSLError) as exc:
         pytest.skip(f"this client cannot speak TLS 1.1 at all: {exc}")
-    # Control: the same client talks TLS 1.1 to a local server that allows it.
+    # TLS 1.1 control server.
     if not _client_can_speak_tls11(old):
         pytest.skip("this OpenSSL refuses TLS 1.1 on the client side; the server refusal cannot be shown")
     with pytest.raises(ssl.SSLError) as refused:
@@ -335,7 +333,7 @@ def _client_can_speak_tls11(client: ssl.SSLContext) -> bool:
 
 
 def test_certificate_is_checked_against_the_stand_ca_only():
-    # The compiled-in system store, not SSL_CERT_FILE (which points at the stand CA).
+    # Verify the compiled-in trust store.
     paths = ssl.get_default_verify_paths()
     system_only = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
     loaded = False
@@ -376,7 +374,7 @@ def test_tls_server_config_statics():
     assert _compose("run", "--rm", "--no-deps", "-T", "proxy", "nginx", "-t").returncode == 0
 
 
-# --- 4. Tests verify certificates ----------------------------------------------
+# Certificate verification
 
 def test_no_test_or_experiment_disables_certificate_checks():
     forbidden = re.compile(r"verify\s*=\s*False|CERT_NONE|check_hostname\s*=\s*False|_create_unverified_context")
@@ -401,7 +399,7 @@ def test_default_test_base_is_https():
     assert "TEST_BASE ?= https://localhost:8450" in makefile and "SSL_CERT_FILE=$(TEST_CA)" in makefile
 
 
-# --- 2.3-2.5 HTTP redirect and HSTS ---------------------------------------------
+# HTTP redirect and HSTS
 
 def _proxy_env() -> dict:
     config = json.loads(_compose("config", "--format", "json").stdout)
@@ -488,8 +486,6 @@ def test_hsts_and_clinic_page_when_api_is_down():
     stopped = _compose("stop", "api")
     assert stopped.returncode == 0, stopped.stderr
     try:
-        # A stopped container's address may not answer at all: nginx then
-        # waits proxy_connect_timeout (60 s) and answers 504.
         with _https_client() as c:
             response = c.get("/login", timeout=100)
         assert response.status_code in (502, 504), response.status_code
@@ -540,7 +536,7 @@ def test_proxy_config_is_valid_with_good_values():
         assert "syntax is ok" in done.stderr, done.stderr[-2000:]
 
 
-# --- 3. Secure cookie and one PUBLIC_BASE_URL ------------------------------------
+# Secure cookie and public URL
 
 MAILPIT = os.environ.get("CLINIC_MAILPIT", "http://127.0.0.1:8025")
 
@@ -685,7 +681,7 @@ def test_init_secrets_accepts_matching_ports(tmp_path):
     assert done.returncode == 0, done.stderr
 
 
-# --- 5. provided mode, tls-check and reload --------------------------------------
+# Provided mode and reload
 
 PROD_HOST = "clinic.example.org"
 
@@ -750,14 +746,13 @@ def test_provided_mode_with_corporate_ca_file(tmp_path):
     assert _shas(tls) == before
     assert not (tls / "ca.key").exists()
     for name in ("server.key", "server.crt"):
-        # 600 plus the ACL (the group bits show the ACL mask).
+        # Check mode and ACL mask.
         assert (tls / name).stat().st_mode & 0o777 in (0o600, 0o640)
         acl = subprocess.run(["getfacl", "-cpn", str(tls / name)], capture_output=True, text=True).stdout
         assert "user:101:r--" in acl, acl
     config = subprocess.run(["docker", "compose", "-f", "docker-compose.yml", "config"], cwd=ROOT,
                             capture_output=True, text=True, env={**os.environ, "CLINIC_TLS_CA_FILE": str(ca / "ca.crt")})
     assert config.returncode == 0 and str(ca) not in config.stdout
-    # A stray CA key next to a provided certificate is reported.
     (tls / "ca.key").write_text("not a key\n")
     done = _run_init(root, **_provided_env(ca))
     assert done.returncode == 0 and "ca.key is not used in provided mode" in done.stderr
@@ -934,7 +929,6 @@ def test_reload_reports_a_served_serial_that_did_not_change(tmp_path):
     key, crt = _issue_leaf(tmp_path, tls, "new", "DNS:localhost, IP:127.0.0.1, IP:::1", 90)
     done = _run_reload(root, key, crt, env)
     assert done.returncode != 0 and "WARN served serial" in done.stderr and "!= candidate" in done.stderr, done.stderr
-    # The new files passed nginx -t, so they stay.
     assert _sha(tls / "server.crt") == _sha(crt)
     assert "nginx -s reload" in calls.read_text()
 
@@ -972,8 +966,7 @@ def test_reload_replaces_the_stand_certificate_without_a_restart(tmp_path):
             assert all(oct(f.stat().st_mode & 0o777) == "0o600" for f in backup.iterdir())
         finally:
             if backup is None:
-                # The script failed before or after its own backup: take the
-                # backup it made, if any; without one the live files are untouched.
+                # Restore a script-created backup.
                 made = sorted(set(tls_live.glob("backup-*")) - backups_before)
                 backup = made[0] if made else None
             if backup is not None and _shas(tls_live) != before:
@@ -1040,8 +1033,7 @@ def test_provided_proxy_serves_only_its_own_name(tmp_path):
         with socket.create_connection((ip, 8443), timeout=5) as raw:
             with context.wrap_socket(raw, server_hostname=PROD_HOST) as tls:
                 assert ("DNS", PROD_HOST) in tls.getpeercert()["subjectAltName"]
-        # A foreign SNI is refused by the server (ssl_reject_handshake: alert
-        # unrecognized_name), before any certificate reaches the client.
+        # Reject foreign SNI before presenting a certificate.
         with pytest.raises(ssl.SSLError) as refused:
             with socket.create_connection((ip, 8443), timeout=5) as raw:
                 context.wrap_socket(raw, server_hostname="other.example")
@@ -1110,7 +1102,7 @@ def test_only_a_replaced_leaf_is_marked_for_a_proxy_reload(tmp_path):
     marker = tls / ".leaf_reissued"
     first = _run_init(root)
     assert first.returncode == 0, first.stderr
-    # First pair on an empty secrets/tls: no proxy can hold an older one.
+    # Start with empty TLS secrets.
     assert not marker.exists() and "nginx -s reload" not in first.stdout
     key, crt = _issue_leaf(tmp_path, tls, "short", "DNS:localhost, IP:127.0.0.1, IP:::1", 10)
     (tls / "server.key").write_bytes(key.read_bytes())
@@ -1124,8 +1116,7 @@ def test_only_a_replaced_leaf_is_marked_for_a_proxy_reload(tmp_path):
 
 
 def _make_start_copy(tmp_path: pathlib.Path, reload_failures: int) -> tuple[pathlib.Path, pathlib.Path, pathlib.Path]:
-    """Repository copy with a fake COMPOSE whose `nginx -s reload` fails the
-    first reload_failures times (as while entrypoint.d still runs)."""
+    """Use a repository copy where fake COMPOSE delays nginx reloads."""
     root = _script_copy(tmp_path / "repo")
     shutil.copy2(ROOT / "Makefile", root / "Makefile")
     shutil.copy2(ROOT / ".env.example", root / ".env.example")
@@ -1222,7 +1213,7 @@ def test_provided_mode_refuses_an_ip_address(tmp_path, url):
 
 
 
-# --- Tunnel mode (ngrok demo, CLINIC_PUBLIC_TUNNEL) ---------------------------------
+# Tunnel mode
 
 TUNNEL_URL = "https://demo-clinic.ngrok-free.app"
 
@@ -1297,11 +1288,10 @@ def test_init_and_tls_check_refuse_what_the_proxy_and_api_refuse(tmp_path, url, 
     env = _tunnel_env(PUBLIC_BASE_URL=url, CLINIC_PUBLIC_TUNNEL=tunnel)
     done = _run_init(root, **env)
     assert done.returncode != 0 and "PUBLIC_BASE_URL" in done.stderr, done.stderr
-    # Refused before anything is written, and the value is not echoed
-    # (user info may carry a password).
+    # Never write or echo credentials.
     assert not (root / "secrets" / "tls").exists()
     assert "pa55word" not in done.stdout + done.stderr
-    # tls-check on a stand that has its secrets (made with a good address).
+    # Validate tls-check with provisioned secrets.
     assert _run_init(root, **_tunnel_env()).returncode == 0
     check = subprocess.run(["sh", str(root / "scripts" / "tls_check.sh")], cwd="/", capture_output=True, text=True,
                            env={**{k: v for k, v in os.environ.items()
@@ -1349,8 +1339,7 @@ def test_tunnel_flag_only_in_local_mode(tmp_path):
 
 
 def test_stand_answers_a_tunnel_host_over_localhost_sni():
-    """What ngrok does: TLS to localhost:<port> with SNI localhost (verified
-    against the stand CA) and the public tunnel name in Host."""
+    """Mimic ngrok TLS: localhost SNI and the public Host."""
     host = TUNNEL_URL.removeprefix("https://")
     with httpx.Client(base_url=f"https://localhost:{_tls_port()}", verify=_strict_context(),
                       follow_redirects=False, timeout=10, headers={"Host": host}) as c:

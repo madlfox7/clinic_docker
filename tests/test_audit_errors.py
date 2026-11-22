@@ -1,6 +1,4 @@
-"""A failed audit cycle says what failed: errno, the call and the path, never
-file contents or the message of a database error (WSL2 /mnt/c used to show a
-bare "PermissionError"). Unit tests, no docker."""
+"""Check audit errors omit sensitive contents; no Docker needed."""
 import os
 import stat
 import sys
@@ -14,12 +12,12 @@ sys.path.insert(0, str(ROOT / "audit"))
 import anchor  # noqa: E402
 import chainlib as cl  # noqa: E402
 
-# --- "audit cycle failed" says errno, call and path (never contents) ------------------
+# Audit failure message
 
 def test_cycle_error_names_errno_call_and_path(tmp_path):
     locked = tmp_path / "anchors"
     locked.mkdir()
-    locked.chmod(0o500)     # no write: the file cannot be created
+    locked.chmod(0o500)     # Read-only target.
     try:
         if os.access(locked, os.W_OK):
             pytest.skip("running as root: permissions are not enforced")
@@ -59,4 +57,4 @@ def test_run_cycle_logs_the_described_error(monkeypatch, tmp_path):
     result = anchor.run_cycle(b"k" * 32, {})
     assert result.line == ("ERROR audit cycle failed: PermissionError errno=EACCES(13) op=cl.connect "
                            "path=/run/secrets/audit_db_password")
-    assert result.error == "database"     # the classification stays the same
+    assert result.error == "database"

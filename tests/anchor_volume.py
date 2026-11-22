@@ -1,7 +1,4 @@
-"""The audit anchor volume of the stand under test (docker-compose.yml,
-audit_anchors). There is no host directory: the files are read and written
-through a one-off audit_anchor container (uid 10002, the image's python), with
-the project, compose files and env file of the caller (COMPOSE_* variables)."""
+"""Read and restore external anchors via a one-off container."""
 import io
 import json
 import subprocess
@@ -79,7 +76,7 @@ def remove_volume() -> None:
         gone = subprocess.run(["docker", "volume", "rm", name], capture_output=True, text=True, timeout=120)
         if gone.returncode == 0:
             return
-        time.sleep(2)    # a one-off container may still hold it for a moment
+        time.sleep(2)    # Wait for one-off containers to release the volume.
     raise AssertionError(gone.stderr)
 
 

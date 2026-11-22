@@ -1,6 +1,4 @@
-"""make ngrok / make ngrok-off (scripts/ngrok_demo.sh) without Docker or a
-real tunnel: a fake ngrok and a fake COMPOSE record what they were given.
-The real ngrok is kept out of PATH (every directory that has one is dropped)."""
+"""Test ngrok targets with fakes, without Docker or a real tunnel."""
 import json
 import os
 import pathlib
@@ -15,8 +13,7 @@ FAKE_TOKEN = "fake-token-must-never-be-printed-123"
 MAKE = shutil.which("make")
 
 FAKE_COMPOSE = r'''#!/usr/bin/env python3
-"""Fake `docker compose`: logs each call with the values Compose would use
-(environment before .env, as in Compose interpolation)."""
+"""Fake `docker compose` and log its effective environment."""
 import json, os, pathlib, sys
 dotenv = {}
 if pathlib.Path(".env").exists():
@@ -25,7 +22,7 @@ if pathlib.Path(".env").exists():
             k, v = line.split("=", 1)
             dotenv[k.strip()] = v.strip()
 def value(name, default=""):
-    # FAKE_SUDO: like `sudo docker compose`, the environment does not reach Compose
+    # FAKE_SUDO keeps the shell environment out of Compose.
     if name in os.environ and not os.environ.get("FAKE_SUDO"):
         return os.environ[name]
     return dotenv.get(name, default)
@@ -146,14 +143,14 @@ def test_env_example_names_the_users_ngrok_domain():
 def test_ngrok_free_dev_domain_passes_all_three_parsers(tmp_path):
     url = f"https://{DOMAIN}"
     env = {k: v for k, v in os.environ.items() if not k.startswith("CLINIC_") and k != "PUBLIC_BASE_URL"}
-    # tls_lib (init_secrets.sh in tunnel mode)
+    # Check tunnel parsing in init_secrets.
     root = tmp_path / "repo"
     shutil.copytree(ROOT / "scripts", root / "scripts")
     done = subprocess.run(["sh", str(root / "scripts" / "init_secrets.sh")], cwd="/", capture_output=True, text=True,
                           env={**env, "PUBLIC_BASE_URL": url, "CLINIC_PUBLIC_TUNNEL": "1",
                                "CLINIC_PROXY_PORT": "8082", "CLINIC_PROXY_TLS_PORT": "8452"}, timeout=60)
     assert done.returncode == 0 and f"PUBLIC_BASE_URL {url} is a tunnel" in done.stdout, done.stderr
-    # docker/proxy/15-clinic-tls.sh, run here with its output directory moved
+    # Isolate proxy TLS output.
     out = tmp_path / "nginx"
     script = tmp_path / "15-clinic-tls.sh"
     text = (ROOT / "docker" / "proxy" / "15-clinic-tls.sh").read_text()
@@ -163,7 +160,7 @@ def test_ngrok_free_dev_domain_passes_all_three_parsers(tmp_path):
                            env={**env, "PUBLIC_BASE_URL": url, "CLINIC_PUBLIC_TUNNEL": "1"})
     assert proxy.returncode == 0, proxy.stderr
     assert (out / "redirect.conf").read_text() == f"return 308 {url}$request_uri;\n"
-    # app/public_url.py
+    # Check public URL parsing.
     api = subprocess.run(["python3", "-c", "import public_url; print(public_url.public_base_url())"],
                          cwd=ROOT / "app", capture_output=True, text=True, timeout=30,
                          env={**env, "PUBLIC_BASE_URL": url, "SESSION_HTTPS_ONLY": "true"})
@@ -179,7 +176,7 @@ def test_make_ngrok_starts_the_stand_with_the_tunnel_and_runs_ngrok_to_the_https
     assert demo.ngrok_args.read_text().splitlines() == [
         "http", "https://localhost:8452", "--url", f"https://{DOMAIN}",
         "--upstream-tls-verify", "--upstream-tls-verify-cas", str(demo.root / "secrets" / "tls" / "ca.crt")]
-    # The environment beat .env for Compose and for init_secrets.sh; .env is untouched.
+    # Check env precedence without changing .env.
     ups = demo.ups()
     assert len(ups) == 1
     assert ups[0]["PUBLIC_BASE_URL"] == f"https://{DOMAIN}" and ups[0]["CLINIC_PUBLIC_TUNNEL"] == "1"
@@ -196,7 +193,7 @@ def test_make_ngrok_takes_the_https_port_from_the_stand_settings(tmp_path):
     done = demo.make("ngrok")
     assert done.returncode == 0, done.stderr
     assert demo.ngrok_args.read_text().splitlines()[1] == "https://localhost:9443"
-    # Never the HTTP port (it only redirects to PUBLIC_BASE_URL: a loop).
+    # Avoid an HTTP redirect loop.
     assert "9073" not in demo.ngrok_args.read_text()
 
 
@@ -259,7 +256,7 @@ def test_make_ngrok_without_an_authtoken(tmp_path):
 def test_make_ngrok_accepts_the_authtoken_from_the_environment_without_printing_it(tmp_path):
     demo = Demo(tmp_path, authtoken=False)
     demo.dotenv(**STAND)
-    done = demo.make("ngrok", NGROK_AUTHTOKEN=FAKE_TOKEN)  # Demo.make asserts it is not printed
+    done = demo.make("ngrok", NGROK_AUTHTOKEN=FAKE_TOKEN)
     assert done.returncode == 0, done.stderr
     assert FAKE_TOKEN not in demo.ngrok_args.read_text()
 
@@ -276,7 +273,7 @@ def test_make_ngrok_off_goes_back_to_the_dotenv_address(tmp_path):
     demo = Demo(tmp_path)
     demo.dotenv(**STAND)
     assert demo.make("ngrok").returncode == 0
-    # Even with the tunnel values exported in this shell, .env wins again.
+    # Recheck .env precedence.
     done = demo.make("ngrok-off", PUBLIC_BASE_URL=f"https://{DOMAIN}", CLINIC_PUBLIC_TUNNEL="1")
     assert done.returncode == 0, done.stderr
     last = demo.ups()[-1]
@@ -300,13 +297,13 @@ def test_sudo_dropping_the_environment_stops_before_ngrok(tmp_path):
     demo = Demo(tmp_path)
     demo.dotenv(NGROK_DOMAIN=DOMAIN, **STAND)
     done = demo.make("ngrok", FAKE_SUDO="1")
-    assert done.returncode == 2      # make's own code for a failed recipe
+    assert done.returncode == 2
     err = done.stderr
     assert "the api container uses PUBLIC_BASE_URL=https://localhost:8452, not https://" + DOMAIN in err
     assert "ngrok not started" in err and "sudo -E" in err and "without sudo" in err
     assert not _ngrok_started(demo)
     assert "Site:" not in done.stdout
-    # the script: 1, like every other configuration error (tls_fail); 2 is only usage
+    # Check error and usage exit codes.
     script = demo.script("on", FAKE_SUDO="1")
     assert script.returncode == 1, script.stderr
     assert "ngrok not started" in script.stderr
@@ -329,7 +326,7 @@ def test_one_container_on_the_old_address_stops_before_ngrok(tmp_path, stale):
 
 def test_tunnel_flag_missing_in_the_proxy_stops_before_ngrok(tmp_path):
     demo = Demo(tmp_path)
-    # the address reaches Compose through .env, the flag does not (stale proxy)
+    # Set the tunnel URL in .env for the proxy.
     demo.dotenv(NGROK_DOMAIN=DOMAIN, **{**STAND, "PUBLIC_BASE_URL": f"https://{DOMAIN}"})
     done = demo.script("on", FAKE_SUDO="1")
     assert done.returncode == 1 and "CLINIC_PUBLIC_TUNNEL=0, not 1" in done.stderr

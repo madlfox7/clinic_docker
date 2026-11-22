@@ -86,7 +86,7 @@ def _asset_urls(html):
     return parser.urls
 
 
-# --- headers on every kind of response -------------------------------------
+# Response headers
 
 @pytest.mark.parametrize(
     "path",
@@ -143,7 +143,7 @@ def test_static_never_carries_a_session_cookie():
 
 
 def test_static_range_requests_stay_cheap():
-    # CVE-2025-62727: many overlapping ranges used to make StaticFiles spin.
+    # Guard against overlapping-range DoS.
     ok = httpx.get(BASE + "/static/app.css", headers={"Range": "bytes=0-10"}, timeout=10.0)
     assert ok.status_code == 206
     assert len(ok.content) == 11
@@ -200,7 +200,7 @@ def test_static_cannot_escape_its_folder(path):
     assert "SESSION_SECRET" not in response.text and "from fastapi" not in response.text
 
 
-# --- every role renders its pages, all assets same-origin --------------------
+# Role pages and same-origin assets
 
 def _check_page(c, path):
     response = c.get(path)
@@ -235,7 +235,7 @@ def test_guest_pages_render():
             _assert_security_headers(response, path)
 
 
-# --- static checks: templates, JS, CSS, SVG, vendored Bootstrap ---------------
+# Static asset checks
 
 def _templates():
     files = sorted(TEMPLATES.glob("*.html"))
@@ -265,7 +265,7 @@ def test_data_attributes_are_quoted_and_carry_no_personal_data():
         text = path.read_text(encoding="utf-8")
         for match in re.finditer(r"\sdata-[a-z-]+(\s*=\s*)?([^\s>]*)", text):
             if match.group(1) is None:
-                continue  # boolean data attribute
+                continue  # Ignore boolean attributes.
             value = match.group(2)
             assert value.startswith('"'), f"{path.name}: unquoted {match.group(0)!r}"
         for match in re.finditer(r'\sdata-[a-z-]+="([^"]*)"', text):
@@ -307,7 +307,7 @@ def test_app_css_uses_only_same_origin_urls():
     css = re.sub(r"/\*.*?\*/", "", (STATIC / "app.css").read_text(encoding="utf-8"), flags=re.S)
     assert "@import" not in css
     for url in re.findall(r"url\(\s*['\"]?([^'\")]+)", css):
-        # Absolute: url() inside a custom property resolves against the stylesheet using it.
+        # Resolve url() from the using stylesheet.
         assert url.startswith("/static/") and not url.startswith("//"), url
         assert (STATIC / url.removeprefix("/static/")).is_file(), url
 
@@ -349,13 +349,12 @@ def test_nginx_includes_security_headers_in_every_location():
     assert "listen 8080;" in http_server and "listen 8443 ssl;" in tls_server
     for server in servers:
         assert "include /etc/nginx/clinic/security_headers.conf;" in server, server
-    # Plain HTTP: one location that only redirects, no app and no HSTS.
+    # HTTP should only redirect.
     assert "proxy_pass" not in http_server and hsts not in http_server
     assert "clinic_locations.conf" not in http_server
     http_blocks = re.findall(r"location\s+[^{]+\{(.*?)\n    \}", http_server, re.S)
     assert len(http_blocks) == 1 and "include /tmp/nginx/clinic/redirect.conf;" in http_blocks[0]
     assert "include /etc/nginx/clinic/security_headers.conf;" in http_blocks[0]
-    # HTTPS: the shared locations, every one with both header includes.
     assert "include /etc/nginx/clinic/clinic_locations.conf;" in tls_server
     assert hsts in tls_server.split("location", 1)[0]
     blocks = re.findall(r"location\s+[^{]+\{(.*?)\n    \}", locations, re.S)
@@ -366,7 +365,7 @@ def test_nginx_includes_security_headers_in_every_location():
         if "proxy_pass" in block:
             for header in ("Host", "Cookie", "X-Real-IP"):
                 assert f"proxy_set_header {header}" in block, block
-            # Client-supplied forwarding headers are overwritten, never passed on.
+            # Never trust client forwarding headers.
             assert "proxy_set_header X-Forwarded-For $remote_addr;" in block, block
             assert 'proxy_set_header Forwarded "";' in block, block
             assert "proxy_add_x_forwarded_for" not in block, block

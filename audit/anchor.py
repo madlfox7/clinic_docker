@@ -1,33 +1,5 @@
 """audit_anchor service (plan 17 §8): every CLINIC_AUDIT_ANCHOR_INTERVAL
-seconds check the journal from the last anchor on and, only if it is intact,
-append a HMAC-signed anchor line for the chain head.
-
-    python anchor.py                      loop (the service)
-    python anchor.py --once               one cycle now (E6, tests)
-    python anchor.py --retire [--force]   close the open chain before a wipe
-    python anchor.py --retire --offline   close it without a database
-    python anchor.py --health             healthcheck of the running loop
-    python anchor.py --prepare            first open before seed/api (audit_prepare)
-    python anchor.py --check-dir          the anchor directory is 700, uid 10002, no ACL
-
-The loop also runs the full check of verify_audit (whole chain from seq 1,
-registry, triggers) on its first cycle and then every
-CLINIC_AUDIT_FULL_CHECK_EVERY seconds (plan 18.1), and writes the public
-status /status/status.json for the banner on /admin/audit: a fixed list of
-fields (public_status), never a path, a chain id, a hash or a MAC.
-
-No registry and no anchors while the database holds a chain (last_seq beyond
-the genesis rows) is registry_missing, not a first open (З-11): the loop
-writes nothing and turns red until the directory is back or a forced reset.
-
---retire refuses with 2 when the chain is broken, was replaced
-(chain_replaced) or the registry is missing while the database holds a chain;
---force closes it anyway as forced (<break>@<seq>, chain_replaced@- or
-no_registry@-), 3 when the database is unavailable.
-
-The key (/run/secrets/audit_anchor_key) is mounted only into this service.
-Output carries seq, break type and chain id only: never the key, a MAC input
-or the content of an event.
+seconds check the chain and anchor it if intact.
 """
 from __future__ import annotations
 
@@ -48,20 +20,19 @@ import verify_audit
 ANCHOR_DIR = Path(os.environ.get("CLINIC_AUDIT_ANCHOR_PATH", "/anchors"))
 KEY_FILE = os.environ.get("CLINIC_AUDIT_ANCHOR_KEY_FILE", "/run/secrets/audit_anchor_key")
 STATUS_FILE = Path(os.environ.get("CLINIC_AUDIT_STATUS_FILE", "/tmp/audit_anchor_status.json"))
-# Public status for the api (mounted read-only there): plan 18.1.
+# API status file.
 PUBLIC_STATUS_DIR = Path(os.environ.get("CLINIC_AUDIT_PUBLIC_STATUS_DIR", "/status"))
 PUBLIC_STATUS_NAME = "status.json"
-# The problem types the public status may carry (plan 18 §5); anything else
-# is written as "unknown", which the banner shows as broken.
+# Unknown types are broken.
 PROBLEM_TYPES = (
     "gap", "hash_version", "prev_hash", "row_hash", "anchor_mismatch", "truncated", "head",
     "head_missing", "trigger_mode", "registry_missing", "registry_format", "registry_mac",
     "anchor_format", "anchor_mac", "anchor_file_missing", "anchor_copy_mismatch",
     "chain_replaced", "genesis_rows",
 )
-# Errors that mean "nothing was checked", not a broken chain.
+# No-check errors.
 UNCHECKED_ERRORS = ("database", "anchor_dir")
-# problem.type of state "unchecked": why nothing was checked.
+# Unchecked reasons.
 UNCHECKED_REASONS = ("database", "anchor_dir", "retired")
 
 
@@ -87,9 +58,9 @@ class Result:
     def __init__(self, ok: bool, state: str, error: str | None = None, anchored=None, line: str = "",
                  seq=None, kind=None):
         self.ok, self.state, self.error, self.anchored, self.line = ok, state, error, anchored, line
-        self.seq, self.kind = seq, kind   # seq of the break, kind of a chain_replaced
-        self.full = None                  # FullCheck when the full check ran in this cycle
-        self.counts = None                # registry counts (switch, forced, offline) or None
+        self.seq, self.kind = seq, kind   # Break location.
+        self.full = None                  # Full check result.
+        self.counts = None                # Registry counts.
 
 
 class FullCheck:
@@ -102,9 +73,7 @@ _SWITCH_KIND = re.compile(r"\bkind=(new|reused|retired_reused)\b")
 
 
 def full_check(directory: Path, key: bytes, source, every: int) -> FullCheck:
-    """verify_audit.verify itself (triggers, registry, whole chain from seq 1,
-    every anchor, head): the same code as make audit-verify. Only the type,
-    seq and switch kind of a break are kept, never its detail text."""
+    """Run full verification and retain only the break type, sequence and switch kind."""
     lines: list[str] = []
     if verify_audit.verify(source, directory, key, False, None, every, out=lines.append) == 0:
         return FullCheck(True)
@@ -141,8 +110,7 @@ def _anchor(directory: Path, key: bytes, source, chain_id: str) -> Result:
 
 
 def cycle(directory: Path, key: bytes, source, full: bool = False, every: int = 60) -> Result:
-    """One read -> verify -> append -> fsync step under the directory lock;
-    full: then the full check (plan 18.1) under the same lock and snapshot."""
+    """Verify and anchor under the directory lock; optionally run a full check there too."""
     if not os.access(directory, os.W_OK | os.X_OK):
         return Result(False, "error", "anchor_dir", line=f"anchor directory {directory} is not writable")
     with cl.locked(directory):
@@ -247,17 +215,12 @@ def health() -> int:
 
 
 def describe_error(exc: BaseException) -> str:
-    """The error of a failed cycle for the log: the type and, for
-    an OSError, errno, the failing call and the path, e.g.
-    "PermissionError errno=EPERM(1) op=os.fchmod path=/anchors/chains.log".
-    Never the message of a database error (it can carry connection details)
-    and never file contents: paths and errno only."""
+    """Describe failure without database messages or file contents; include OS error details."""
     text = type(exc).__name__
     if isinstance(exc, OSError):
         if exc.errno is not None:
             text += f" errno={errno.errorcode.get(exc.errno, '?')}({exc.errno})"
-        # the last call in our own code (anchor, chainlib, verify_audit),
-        # not inside pathlib or contextlib
+        # Report our call site.
         here = os.path.dirname(os.path.abspath(__file__))
         frames = [f for f in traceback.extract_tb(exc.__traceback__)
                   if os.path.dirname(os.path.abspath(f.filename)) == here and f.name != "_named"]
@@ -279,8 +242,8 @@ def run_cycle(key: bytes, conn_holder: dict, full: bool = False, every: int = 60
         try:
             return cycle(ANCHOR_DIR, key, cl.DbSource(conn), full, every)
         finally:
-            conn.rollback()  # a fresh snapshot for the next cycle
-    except Exception as exc:  # database down, permissions: no anchor, red health
+            conn.rollback()  # Fresh snapshot next cycle.
+    except Exception as exc:  # Missing anchor is unhealthy.
         if conn_holder.get("conn") is not None:
             try:
                 conn_holder["conn"].close()
@@ -291,10 +254,7 @@ def run_cycle(key: bytes, conn_holder: dict, full: bool = False, every: int = 60
 
 
 class PublicStatus:
-    """State of the loop behind /status/status.json (plan 18.1). The full
-    check runs on the first cycle and then every full_every seconds; a failed
-    attempt (database) is retried on the next cycle. replaced_history and the
-    retire counts never go down while the loop runs."""
+    """Track public loop status; full checks repeat periodically and counters never decrease."""
 
     def __init__(self, full_every: int):
         self.full_every = full_every
@@ -324,10 +284,7 @@ class PublicStatus:
         return result, self.public(result, now)
 
     def public(self, result: Result, now: float) -> dict:
-        """broken: a break in this cycle or in the last full check, or a
-        replaced chain in the registry; unchecked: database or anchor
-        directory errors and a retired chain (problem.type says which);
-        ok: everything else."""
+        """Classify status as broken, unchecked or ok; problem identifies the relevant cause."""
         problem = None
         if not result.ok and result.error not in UNCHECKED_ERRORS:
             state = "broken"
@@ -361,8 +318,7 @@ def _problem(kind, seq, switch_kind) -> dict:
 
 
 def write_public_status(directory: Path, data: dict) -> None:
-    """Atomic: tmp file (O_NOFOLLOW, 0644) -> fsync -> rename -> fsync of the
-    directory. A reader sees the old or the new file, never a partial one."""
+    """Atomically replace status via a no-follow temp file and fsync, avoiding partial reads."""
     body = json.dumps(data, separators=(",", ":"), allow_nan=False).encode("ascii")
     tmp = directory / f".{PUBLIC_STATUS_NAME}.tmp"
     fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW, 0o644)
@@ -383,10 +339,7 @@ ACL_XATTRS = ("system.posix_acl_access", "system.posix_acl_default")
 
 
 def check_dir(directory: Path, uid: int | None = None) -> str | None:
-    """--check-dir: the anchor directory (the named volume audit_anchors) is a
-    real directory, not a symlink, owned by uid 10002, mode exactly 700 and
-    without a POSIX ACL, so nobody but audit_anchor can read or change the
-    anchors. None when it is, else the reason (paths and numbers only)."""
+    """Check for a real uid-10002 mode-700 directory without a POSIX ACL; return a reason if unsafe."""
     uid = AUDIT_UID if uid is None else uid
     try:
         info = os.lstat(directory)
@@ -401,7 +354,7 @@ def check_dir(directory: Path, uid: int | None = None) -> str | None:
     try:
         acl = [name for name in os.listxattr(directory, follow_symlinks=False) if name in ACL_XATTRS]
     except OSError:
-        acl = []     # no xattr support: no ACL either
+        acl = []     # No ACL support.
     if acl:
         return f"anchor directory {directory} has a POSIX ACL ({', '.join(acl)})"
     return None
@@ -417,16 +370,7 @@ def check_dir_main() -> int:
 
 
 def prepare(key: bytes) -> int:
-    """--prepare, the one-shot audit_prepare service: runs after migrate and
-    before seed and api (docker-compose.yml), so a fresh stand gets its open
-    line before anything can write to the journal; otherwise the first event
-    could beat the first loop cycle and look like a lost registry (З-11).
-    With a registry or anchors there is nothing to do (the loop checks them).
-    1 only when a first cycle was needed and could not run (database, anchor
-    directory): seed and api then do not start on a stand without anchors.
-    Alarms (registry_missing, a broken chain) are the loop's job: 0.
-    First the anchor directory itself (check_dir): 1 when it is not 700 and
-    owned by uid 10002, before anything is read or written there."""
+    """Prepare fresh anchors before writes; fail closed on unsafe setup."""
     problem = check_dir(ANCHOR_DIR)
     if problem:
         say(f"audit_prepare: ERROR {problem}")
@@ -451,11 +395,7 @@ NIL_CHAIN = "00000000-0000-0000-0000-000000000000"
 
 
 def _retire_without_registry(registry: Path, key: bytes, force: bool, open_source) -> int:
-    """З-10: no chains.log, but the database may still hold a chain (the anchor
-    directory was removed or renamed). "A chain" = a head with last_seq > 0, or
-    journal rows without a head. An empty chain (fresh volume, genesis only)
-    has nothing to protect. Otherwise refuse (2) unless forced; forced writes
-    the first line of a new registry: retire <chain> ... forced no_registry@-."""
+    """Handle a missing registry: protect a non-empty journal unless retirement is forced."""
     try:
         source, close = open_source()
     except Exception as exc:
@@ -484,13 +424,12 @@ def _retire_without_registry(registry: Path, key: bytes, force: bool, open_sourc
 
 
 def retire(key: bytes, force: bool, offline: bool, directory: Path | None = None, open_source=_db_source) -> int:
-    """Close the open chain C in the registry (§8.6): normal after a full check,
-    forced (only with --force, the break is printed first) or offline."""
+    """Retire the open chain after verification, with --force, or offline without a database."""
     directory = directory or ANCHOR_DIR
     with cl.locked(directory):
         registry = directory / cl.REGISTRY
         if not registry.exists():
-            if offline:     # no database volume either: nothing to protect (unchanged)
+            if offline:     # Nothing to protect.
                 say("retire: no chain registry, nothing to close")
                 return 0
             return _retire_without_registry(registry, key, force, open_source)
@@ -506,8 +445,7 @@ def retire(key: bytes, force: bool, offline: bool, directory: Path | None = None
             return 0
         switches = state.switched_to.get(current, [])
         if switches and not force and not offline:
-            # chain_replaced not acknowledged by anyone: a plain reset would wipe
-            # the evidence and turn the daemon green again (Securo, 90f093f §2)
+            # Never clear unacknowledged replacement evidence.
             last = switches[-1]
             say(f"BROKEN type=chain_replaced kind={last.switch_kind} old={last.old or '-'} new={current}")
             say("retire refused: the chain was replaced (chain_replaced); "
@@ -524,7 +462,7 @@ def retire(key: bytes, force: bool, offline: bool, directory: Path | None = None
             return 3
         try:
             head = source.head()
-            if switches:   # only with --force here
+            if switches:   # Requires --force.
                 if head is not None and head["chain_id"] == current:
                     last_seq, last_hash = head["last_seq"], bytes(head["last_hash"]).hex()
                 else:
@@ -600,7 +538,7 @@ def main(argv=None) -> int:
         write_status(result, every)
         try:
             write_public_status(PUBLIC_STATUS_DIR, data)
-        except OSError as exc:   # the anchors matter more than the banner
+        except OSError as exc:   # Keep anchor errors.
             say(f"WARN public status not written ({type(exc).__name__})")
         time.sleep(every)
 

@@ -1,12 +1,4 @@
-"""Test order on the disposable stand -p e6 only.
-
-Some e6-only tests change the stand for good: make reset (a new empty
-journal), a replaced chain, a changed row, or no chain head at all
-(test_missing_head_stops_migrate leaves migrate refusing to start, which is
-what it checks). Tests that expect the stand as make start left it (for
-example an anchor on seq >= 1 of the seeded journal) would fail after them in
-a cascade. On -p e6 these tests therefore run at the very end, in this order;
-elsewhere they are skipped and the order does not change."""
+"""Run destructive audit tests last, only on the disposable -p e6 stand."""
 import os
 
 LAST_ON_E6 = (

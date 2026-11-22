@@ -38,7 +38,7 @@ def test_status_badge_classes_come_from_a_fixed_table():
     assert "{{ classes.get(status, 'text-bg-light border') }}\">{{ status }}</span>" in macro
     for path in templates.glob("*.html"):
         text = path.read_text(encoding="utf-8")
-        # A raw status must never be written into a class attribute.
+        # Keep raw statuses out of CSS classes.
         assert not re.search(r'class="[^"]*\{\{[^}]*status[^}]*\}\}', text.replace("classes.get(status", "")), path.name
 
 
@@ -73,9 +73,8 @@ def test_week_grid_only_from_lg_and_day_list_below():
     assert "d-md-block" not in html.split("Week of", 1)[1]
 
 
-# --- guest "Book" -> login -> that doctor's slots (item 4) -------------------
-# Only ?doctor=<int> is supported. The server builds the slots path itself; a free-form
-# "next" is never read, and every bad value ends at the role's default page (/me).
+# Guest booking redirect
+# Reject free-form redirects; accept doctor IDs.
 
 PAT = "pat@clinic.local"
 DOC = "doc@clinic.local"
@@ -95,7 +94,7 @@ def _login_with(email, fields=(), query=""):
     with _client() as c:
         c.get("/login" + query)
         data = [("email", email), ("password", PASSWORD), ("csrf_token", c.csrf_token()), *fields]
-        # Raw urlencoded body so repeated fields (doctor=1&doctor=2) really are sent twice.
+        # Send duplicate fields explicitly.
         return c.post(
             "/login" + query,
             content=urlencode(data),
@@ -210,9 +209,8 @@ def test_blocked_patient_with_doctor_value_stays_logged_out():
         psql(f"UPDATE users SET blocked = FALSE WHERE email = '{PAT2}'")
 
 
-# --- logout confirmation -----------------------------------------------------
-# Every logout form (nav, admin <details>, mobile menu, already-logged-in login
-# page) asks before submitting. Cancel is handled in app.js via data-confirm.
+# Logout confirmation
+# app.js handles confirmation cancellation.
 
 LOGOUT_CONFIRM = "Log out?"
 
@@ -290,14 +288,12 @@ def test_logout_forms_ask_for_confirmation(email, pages):
                 assert form["handlers"] == []
                 assert not form["inline_script"]
             assert not re.search(r"<script\b(?![^>]*\bsrc=)", page.text, re.I)
-            # Admin desktop: logout lives inside the cabinet <details>.
             if email == ADMIN and path != "/login":
                 desktop = page.text.split('<nav class="d-none d-lg-block"', 1)[1].split("</nav>", 1)[0]
                 menu = desktop.split('<details class="cabinet-menu">', 1)[1].split("</details>", 1)[0]
                 menu_forms = _logout_forms(menu)
                 assert len(menu_forms) == 1
                 assert menu_forms[0]["attrs"].get("data-confirm") == LOGOUT_CONFIRM
-            # Mobile menu always carries its own logout form.
             mobile = page.text.split('<details class="mobile-nav', 1)[1].split("</details>", 1)[0]
             mobile_forms = _logout_forms(mobile)
             assert len(mobile_forms) == 1

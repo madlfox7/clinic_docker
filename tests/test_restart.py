@@ -1,8 +1,4 @@
-"""make restart in dependency order (round 24/25): "compose restart" restarted
-everything at once (migrate before db: rc 2; proxy before api: nginx resolved
-"api" once at start to a wrong address and answered 500 until a reload). The
-proxy keeps a static proxy_pass and no resolver (Н-4: a dynamic lookup sent
-client requests to an outside address while the api was down)."""
+"""Check restart order and keep nginx's API upstream static."""
 import json
 import os
 import re
@@ -36,16 +32,14 @@ def test_make_restart_is_stop_then_up_in_dependency_order():
     assert "did not come up running/healthy" in recipe
     start = _recipe("start")
     assert "docker compose -p stub up --build -d" in start
-    # the same steps as start around "up" (secrets, .env, reload after a new certificate)
+    # Reuse startup setup.
     strip = lambda text: [l for l in text.splitlines() if " up " not in l]
     assert [l for l in strip(start)] == [l for l in strip(recipe)
                                          if l.startswith(("cp -n", "./scripts", "fail() {", "if [ -e secrets/tls"))]
 
 
 def test_nginx_has_no_dynamic_resolver_and_a_static_api_upstream():
-    """Н-4: no resolver directive (a name lookup at request time could go to the
-    host's DNS while the api is down), every proxy_pass is the literal
-    http://api:8000 without variables."""
+    """Avoid request-time DNS; proxy only to the static api:8000 upstream."""
     conf = (PROXY / "nginx.conf").read_text() + (PROXY / "clinic_locations.conf").read_text()
     code = "\n".join(line.split("#", 1)[0] for line in conf.splitlines())
     assert not re.search(r"\bresolver(_timeout)?\b", code)
@@ -54,7 +48,7 @@ def test_nginx_has_no_dynamic_resolver_and_a_static_api_upstream():
     assert "$" not in "".join(passes)
 
 
-# --- live, disposable stand only -------------------------------------------------
+# Live disposable-stand tests
 
 def _compose(*args, timeout=300):
     return subprocess.run(["docker", "compose", *args], cwd=ROOT, capture_output=True, text=True, timeout=timeout)
@@ -93,7 +87,7 @@ def test_live_make_restart_four_times():
         done = subprocess.run(["make", "restart", "COMPOSE=docker compose"], cwd=ROOT,
                               capture_output=True, text=True, timeout=900)
         assert done.returncode == 0, (attempt, done.stdout[-3000:], done.stderr[-3000:])
-        assert _login_page_status() == 200, attempt              # right away, no reload, no wait
+        assert _login_page_status() == 200, attempt
         assert _inspect("migrate", "{{.State.ExitCode}}") == "0", attempt
         assert _inspect("audit_prepare", "{{.State.ExitCode}}") == "0", attempt
         assert _inspect("seed", "{{.State.ExitCode}}") == "0", attempt
@@ -101,14 +95,12 @@ def test_live_make_restart_four_times():
         verify = subprocess.run(["make", "-s", "audit-verify", "COMPOSE=docker compose"], cwd=ROOT,
                                 capture_output=True, text=True, timeout=300)
         assert verify.returncode == 0, (attempt, verify.stdout + verify.stderr)
-    assert _reloads() == reloads                                  # never "nginx -s reload"
+    assert _reloads() == reloads
 
 
 @pytest.mark.skipif(PROJECT != "e6", reason="only on a disposable stand -p e6 (tunnel mode, no ngrok)")
 def test_live_make_restart_keeps_tunnel_mode():
-    """make ngrok sets PUBLIC_BASE_URL and CLINIC_PUBLIC_TUNNEL in the
-    environment of make start only; make restart from a plain shell must not
-    recreate proxy/api with the .env values (no ngrok is run here)."""
+    """Restart must preserve tunnel settings from the original start."""
     tunnel = "https://demo-tunnel.ngrok-free.dev"
     env = dict(os.environ, CLINIC_PUBLIC_TUNNEL="1", PUBLIC_BASE_URL=tunnel)
     plain = {k: v for k, v in os.environ.items() if k not in ("CLINIC_PUBLIC_TUNNEL", "PUBLIC_BASE_URL")}

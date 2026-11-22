@@ -82,22 +82,20 @@ services:
       SESSION_ABSOLUTE_HOURS: ${SESSION_ABSOLUTE_HOURS:-12}
       SESSION_SAME_SITE: ${SESSION_SAME_SITE:-lax}
       SESSION_HTTPS_ONLY: ${SESSION_HTTPS_ONLY:-true}
-      # banner on /admin/audit (plan 18.2): the freshness limits come from the
-      # api's own environment, the same values audit_anchor gets
+      # Shared audit freshness limits.
       CLINIC_AUDIT_ANCHOR_INTERVAL: ${CLINIC_AUDIT_ANCHOR_INTERVAL:-60}
       CLINIC_AUDIT_FULL_CHECK_EVERY: ${CLINIC_AUDIT_FULL_CHECK_EVERY:-600}
-    # status.json of audit_anchor, read-only; no anchor key, no anchors and no
-    # auditor password in the api
+    # API gets status only; no audit secrets.
     volumes:
       - audit_status:/audit_status:ro
     secrets:
       - clinic_api_password
       - session_secret
       - smtp_password
-      # medical field keys: api only, never db/migrate/seed
+      # API-only medical field keys.
       - field_encryption_key
       - field_encryption_previous_keys
-    # app: only proxy reaches api:8000; mail: SMTP to mailpit or an outside server.
+    # Proxy-only API ingress; SMTP egress.
     networks:
       - app
       - backend
@@ -127,14 +125,12 @@ services:
     depends_on:
       migrate:
         condition: service_completed_successfully
-      # З-11: the chain registry is opened before anything writes to the journal
+      # Initialize registry before journal writes.
       audit_prepare:
         condition: service_completed_successfully
     command: ["python", "seed.py"]
 
-  # Audit chain anchors (plan 17 §8): reads the journal as clinic_auditor and
-  # appends HMAC-signed anchor lines outside the database. The HMAC key is
-  # mounted here only (never db, migrate, api, seed, proxy, mailpit).
+  # HMAC anchors stay outside DB; key mounted only here.
   audit_anchor:
     build:
       context: .
@@ -145,18 +141,12 @@ services:
       PGUSER: clinic_auditor
       PGDATABASE: ${POSTGRES_DB:-clinic}
       CLINIC_AUDIT_ANCHOR_INTERVAL: ${CLINIC_AUDIT_ANCHOR_INTERVAL:-60}
-      # full check of the whole chain (verify_audit): on start, then every N s
+      # Full-chain verification cadence.
       CLINIC_AUDIT_FULL_CHECK_EVERY: ${CLINIC_AUDIT_FULL_CHECK_EVERY:-600}
     secrets:
       - audit_db_password
       - audit_anchor_key
-    # audit_anchors: an external named volume of this project (see volumes:),
-    # so "down -v", "make reset" and "make fclean" keep the anchors and the
-    # chain registry. Inside it /anchors is 700 and owned by uid 10002
-    # (audit_prepare); no host directory, so no host uid, ACL or file system
-    # (WSL /mnt/c, rootless Docker) is involved.
-    # audit_status: the public status.json of the loop (plan 18.1), written
-    # only here; the api mounts it read-only for the banner on /admin/audit.
+    # External anchors survive wipes; API status is read-only.
     volumes:
       - audit_anchors:/anchors
       - audit_status:/status
@@ -173,10 +163,7 @@ services:
     security_opt:
       - no-new-privileges:true
     restart: unless-stopped
-    # --health only reads the status file of the loop (red: last cycle not ok,
-    # e.g. chain_replaced or a broken chain, or no cycle/anchor for 2 intervals).
-    # timeout/retries leave room for a slow python start on a loaded host;
-    # a red status still turns unhealthy within about 4 x 15 s.
+    # Red status/missed cycles fail health; retries allow slow startup.
     healthcheck:
       test: ["CMD", "python", "anchor.py", "--health"]
       interval: 15s
@@ -184,11 +171,7 @@ services:
       retries: 4
       start_period: 30s
 
-  # One-shot, after migrate and before seed/api (З-11): on a fresh stand it
-  # writes the "open" line of the chain registry before the first event, so
-  # the loop never mistakes a fresh journal for a lost registry. Same image,
-  # key and directory as audit_anchor; with a registry it does nothing, and
-  # alarms stay the loop's job (anchor.py --prepare).
+  # Prevent fresh journals looking like lost registries.
   audit_prepare:
     build:
       context: .
@@ -208,10 +191,7 @@ services:
     depends_on:
       migrate:
         condition: service_completed_successfully
-    # Starts as root only to set the owner and mode of the volume root
-    # (not recursive), then drops to uid 10002 (setpriv, no capabilities
-    # left) for anchor.py --prepare, which checks the directory first
-    # (--check-dir: 700, uid 10002, no ACL) and stops seed/api if it is not.
+    # Set permissions as root; prepare runs uid 10002 without capabilities.
     user: "0"
     command:
       - sh
@@ -245,31 +225,24 @@ services:
     build:
       context: .
       dockerfile: docker/proxy/Dockerfile
-    # Listens on all interfaces by default; set CLINIC_PROXY_BIND=127.0.0.1 in .env
-    # to open the site on this machine only. HTTPS goes to CLINIC_PROXY_TLS_PORT
-    # (stands: HTTP port + 370, e.g. 8080/8450, 8082/8452, 8083/8453). Port lists
-    # from override files are appended, so an override that changes these ports
-    # must use `ports: !override` and list both lines.
+    # Bind locally if needed; replace both ports in overrides.
     ports:
       - "${CLINIC_PROXY_BIND:-0.0.0.0}:${CLINIC_PROXY_PORT:-8080}:8080"
       - "${CLINIC_PROXY_BIND:-0.0.0.0}:${CLINIC_PROXY_TLS_PORT:-8450}:8443"
     networks:
       - frontend
       - app
-    # The server certificate and key, for the proxy only. The CA key
-    # (secrets/tls/ca.key) stays on the host and is never mounted.
+    # Proxy-only server key; CA key stays on host.
     secrets:
       - tls_cert
       - tls_key
-    # Read by docker/proxy/15-clinic-tls.sh at start: redirect origin, HSTS
-    # max-age, TLS mode. A bad value stops the proxy.
+    # Invalid TLS settings stop startup.
     environment:
       PUBLIC_BASE_URL: ${PUBLIC_BASE_URL:-https://localhost:8450}
       CLINIC_HSTS_MAX_AGE: ${CLINIC_HSTS_MAX_AGE:-3600}
       CLINIC_TLS_MODE: ${CLINIC_TLS_MODE:-local}
       CLINIC_ACME_WEBROOT: ${CLINIC_ACME_WEBROOT:-false}
-      # 1: PUBLIC_BASE_URL is a public tunnel (ngrok demo) in front of the
-      # local stand; local mode only. Default 0.
+      # 1 enables a public tunnel; default 0.
       CLINIC_PUBLIC_TUNNEL: ${CLINIC_PUBLIC_TUNNEL:-0}
     depends_on:
       - api
@@ -309,10 +282,7 @@ secrets:
 volumes:
   db_data:
   audit_status: {}
-  # Anchors and chain registry (plan 17 §8). External: "docker compose down -v"
-  # never removes it; make start creates it (label clinic.audit=keep) when it
-  # is missing. One per project (fixer_audit_anchors, e6_...), or the name in
-  # CLINIC_AUDIT_ANCHOR_VOLUME (the disposable e6 stand).
+  # External anchors survive wipes; override name for disposable stands.
   audit_anchors:
     external: true
     name: ${CLINIC_AUDIT_ANCHOR_VOLUME:-${COMPOSE_PROJECT_NAME}_audit_anchors}

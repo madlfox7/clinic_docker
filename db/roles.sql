@@ -84,7 +84,7 @@ REVOKE ALL PRIVILEGES ON ALL SEQUENCES IN SCHEMA public FROM clinic_api;
 REVOKE SELECT (password_hash) ON public.users FROM clinic_api;
 GRANT SELECT (id, email, role, blocked, auth_version) ON public.users TO clinic_api;
 GRANT SELECT ON public.doctors TO clinic_api;
--- load_session_user reads the idle timeout; address and phone stay closed.
+-- Expose only the idle timeout.
 GRANT SELECT (id, session_idle_minutes) ON public.clinic_settings TO clinic_api;
 
 ALTER DEFAULT PRIVILEGES IN SCHEMA public
@@ -92,9 +92,8 @@ ALTER DEFAULT PRIVILEGES IN SCHEMA public
 ALTER DEFAULT PRIVILEGES IN SCHEMA public
   REVOKE ALL ON SEQUENCES FROM clinic_api;
 
--- Audit chain reader for the audit_anchor service and verify_audit (plan 17
--- §8.1): reads the journal and its head, nothing else, writes nothing. The
--- password comes from the audit_db_password secret (set_auditor_password.sql).
+-- Auditor reads: journal and head only.
+-- Password comes from the audit_db_password secret.
 DO $$
 BEGIN
   IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'clinic_auditor') THEN

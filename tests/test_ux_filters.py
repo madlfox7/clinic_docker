@@ -1,5 +1,4 @@
-"""UX filters, pagination and reschedule (14_ux_filters.md): /doctors, slots,
-/my, audit log, appointment reschedule, registrar calendar."""
+"""Test doctor/slot filters, pagination, audit views and appointment rescheduling."""
 import os
 import re
 import subprocess
@@ -121,7 +120,7 @@ def _status(appointment_id: int) -> str:
     return _psql(f"SELECT status FROM appointments WHERE id = {appointment_id}")[0]
 
 
-# --- 1. /doctors filters and the slot date window -----------------------------
+# Doctor filters and slot dates
 
 def test_doctors_filter_by_specialty_and_name_for_guest_and_patient():
     rows = _psql(
@@ -201,7 +200,7 @@ def test_slots_show_selected_window_and_hide_past_by_default():
             assert f'/slots/{far}/book' in other_week.text
             assert "patient_email=pat2%40clinic.local" in other_week.text
             assert "service_id=1" in other_week.text
-            # patient: never past or other patients' data, even for a past day
+            # Restrict patients to own, current or future dates.
             pat_back = pat.get(
                 f"/doctors/{doctor}/slots",
                 params={"service_id": "1", "day": past_day, "view": "day"},
@@ -237,7 +236,7 @@ def test_registrar_can_hide_taken_slots():
         _cleanup_slots([taken, free])
 
 
-# --- 3. /my: filters, pagination, readable dates ------------------------------
+# Patient filters and pagination
 
 def _my_ids(html: str) -> list[int]:
     return [int(x) for x in re.findall(r'action="/appointments/(\d+)/cancel"', html)]
@@ -330,7 +329,7 @@ def test_my_filters_never_show_other_patients():
         _cleanup_slots([slot])
 
 
-# --- 4. Audit log: filters and keyset pagination ------------------------------
+# Audit filters and pagination
 
 def _audit_ids(html: str) -> list[int]:
     return [int(x) for x in re.findall(r'data-audit-id="(\d+)"', html)]
@@ -340,11 +339,7 @@ SEED_BASE = 800_000_000
 
 
 def _seed_audit_rows(count: int) -> int:
-    """count clinic.settings.update rows on a target no earlier run used.
-
-    The journal is append-only, so seeded rows stay: the target is the largest
-    seeded target so far plus a step, worked out in the same statement
-    (plan 17 §9.2, Securo review fix 7), not a random number."""
+    """Count settings events on a fresh target; append-only journal rows remain."""
     admin = _user_id(ADMIN)
     return int(_psql(
         "WITH b AS (SELECT coalesce(max(target_id) FILTER (WHERE target_id >= "
@@ -395,7 +390,7 @@ def test_audit_log_filters_narrow_and_reject_garbage():
             assert "were not valid" in page.text, bad
         sqli = admin.get("/admin/audit", params={"action": "x' OR 1=1 --", "target_id": str(target)})
         assert len(_audit_ids(sqli.text)) == 3
-        # actor: exact normalized email only
+        # Match normalized actor email exactly.
         reg_email_part = REG.split("@")[0]
         for partial in (reg_email_part, REG[:-3], "%", "reg@%"):
             page = admin.get("/admin/audit", params={"actor": partial})
@@ -435,7 +430,7 @@ def test_audit_log_keyset_pages_without_gaps_or_repeats():
         third_link = re.search(r'href="(/admin/audit\?[^"]*before_id=\d+[^"]*)"', second.text)
         third = admin.get(third_link.group(1).replace("&amp;", "&"))
         page3 = _audit_ids(third.text)
-        # A row vanishing between pages is tamper detection now (E6, plan 17 §10).
+        # A missing row between pages indicates tampering.
         assert page1 + page2 + page3 == expected
         assert len(set(page1 + page2 + page3)) == len(expected)
         assert not re.search(r'before_id=\d+', third.text.split("Newest", 1)[-1])
@@ -445,9 +440,7 @@ def test_audit_log_keyset_pages_without_gaps_or_repeats():
         assert PAT_NAME not in full and PAT_PHONE not in full
         patients = admin.get("/admin/audit", params={"target_type": "patient"}).text
         assert PAT_NAME not in patients and PAT_PHONE not in patients
-    # Viewing the journal journals only the view itself (plan 18.3): audit.view by
-    # the admin, target audit_log, target_id = the filter mask (24 type+id, 0 none,
-    # 8 type), at most once per mask in the window; paging and Newest add nothing.
+    # One audit event per filter mask.
     views = _psql(
         "SELECT action || '|' || actor_user_id || '|' || target_type || '|' || target_id "
         f"FROM audit_events WHERE id > {mark} AND action LIKE 'audit.%'"
@@ -457,7 +450,7 @@ def test_audit_log_keyset_pages_without_gaps_or_repeats():
     assert set(views) <= allowed and len(views) == len(set(views)), views
 
 
-# --- 5. Reschedule (5.9) ------------------------------------------------------
+# Rescheduling
 
 import threading  # noqa: E402
 
@@ -494,8 +487,7 @@ class _Setup:
     """Old visit of `patient` on DOC at 10:00 of a free far-future day plus target slots."""
 
     def __init__(self, patient=None, times=("10:00", "12:00", "13:00", "14:00")):
-        # A fresh patient unless one is named: the journal keeps every move, and
-        # PAT would run out of its 3 reschedules a day (plan 17 §9.2 (а)).
+        # Preserve daily quota with a fresh patient.
         self.fresh = patient is None
         if self.fresh:
             self.email, self.patient = create_fresh_patient("move")
@@ -549,7 +541,6 @@ def test_patient_reschedules_own_visit_and_old_slot_is_free_again():
             assert _psql(f"SELECT slot_id FROM appointments WHERE id = {new}") == [str(target)]
             events = _reschedule_events(s.old, new)
             assert events == [f"patient|appointment.reschedule|appointment|{new}|{s.old}|{new}||"]
-            # the old slot is bookable by someone else
             again = pat2.post(f"/slots/{s.old_slot}/book")
             assert "unavailable" not in str(again.url)
             assert len(_scheduled_on(s.old_slot)) == 1
@@ -652,7 +643,7 @@ def test_reschedule_to_slot_overlapping_old_reservation_succeeds():
     day = _free_days(1)[0]
     old_slot = _make_slot(doctor, f"{day} 10:00")
     neighbour = _make_slot(doctor, f"{day} 10:30")
-    # the old visit still reserves 10:00-11:00 (a buffer from before a service change)
+    # Preserve the old scheduling buffer.
     old = int(_psql(
         "INSERT INTO appointments (slot_id, patient_user_id, doctor_id, starts_at, ends_at, "
         f"reserved_ends_at) SELECT id, {patient}, doctor_id, starts_at, starts_at + INTERVAL '30 minutes', "
@@ -774,7 +765,7 @@ def test_registrar_reschedules_and_blocked_patient_is_refused():
             new = _new_visits_for(s.patient, s.old)[0]
             assert f"appointment_id={new}" in url
             assert _reschedule_events(s.old, new)[0].startswith("registrar|appointment.reschedule|")
-            # move against blocking: refused or done before the block, never a 500
+            # Exercise blocked-move handling.
             current = new
             for target in (s.targets[1], s.targets[2], s.slot(s.doctor, f"{s.day} 17:00")):
                 try:
@@ -875,7 +866,7 @@ def test_reschedule_event_has_no_pii_and_cannot_be_forged():
             assert f"{s.old} → {new}" in by_old.text
             assert PAT_NAME not in by_old.text and PAT_PHONE not in by_old.text
         pat_id = s.patient
-        # a valid pair of another patient, a reversed pair, a foreign mix, missing ids
+        # Patient-pair validation cases.
         _psql(f"UPDATE appointments SET status = 'cancelled' WHERE id = {other.old}")
         other_new = _book_sql(other.targets[0], other.patient)
         forged = [
@@ -995,12 +986,11 @@ def test_old_volume_check_is_upgraded_once_and_reschedule_works():
         assert len(_reschedule_events(s.old)) == 1
     finally:
         s.cleanup()
-    # a second start leaves the extended CHECK alone (same constraint, no rebuild)
     _run_migrate()
     assert _change_check() == (oid, definition)
 
 
-# --- 2. Registrar calendar and doctor appointment list ------------------------
+# Registrar calendar and doctor appointments
 
 def test_registrar_calendar_status_service_filters_and_actions():
     s = _Setup(times=("10:00", "11:00"))

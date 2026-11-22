@@ -1,13 +1,4 @@
-"""Plan 18.3: views of the admin journal are journaled (audit.view).
-
-One event per view: the admin, target audit_log, target_id = the bit mask of
-the filters used (1 action, 2 actor_role, 4 actor, 8 target_type, 16
-target_id, 32 from, 64 to), never a filter value. The same mask by the same
-admin is written again only after public.audit_view_window() (10 minutes)
-since the last written one. If the view cannot be written, the journal is not
-shown (503). The e2e flow uses a fresh admin account, so the window of
-earlier runs does not matter; the window itself and the failed write are
-tested on the disposable stand -p e6 only."""
+"""Test audit-view logging; destructive cases require a disposable -p e6 stand."""
 import os
 import re
 import subprocess
@@ -76,8 +67,7 @@ def _login(c, email):
 
 @pytest.fixture
 def fresh_admin():
-    """A new admin with the demo password (copy of the admin's hash), removed
-    afterwards; its journal events stay (no foreign key, plan 17 Р6)."""
+    """Create and later remove a test admin; its audit events remain."""
     email = f"view-admin-{uuid.uuid4().hex[:12]}@example.test"
     admin_id = int(_psql(
         "INSERT INTO users (email, password_hash, role, blocked, email_verified_at) "
@@ -90,7 +80,7 @@ def fresh_admin():
               f"DELETE FROM users WHERE id = {admin_id}")
 
 
-# --- SQL: the function and its grants ----------------------------------------------
+# SQL function grants
 
 @pytest.mark.parametrize("role", sorted(OTHERS))
 def test_record_audit_view_is_refused_to_other_roles(role):
@@ -154,7 +144,7 @@ def test_twenty_parallel_views_write_one_event(fresh_admin):
     assert _views(admin_id, mark) == ["0"]
 
 
-# --- e2e ------------------------------------------------------------------------
+# End-to-end audit view
 
 def test_views_are_journaled_once_per_filter_set_without_values(fresh_admin):
     email, admin_id = fresh_admin
@@ -164,19 +154,19 @@ def test_views_are_journaled_once_per_filter_set_without_values(fresh_admin):
         _login(admin, email)
         first = admin.get("/admin/audit")
         assert first.status_code == 200
-        assert _views(admin_id, mark) == ["0"]                       # 1. first view: one event
-        assert admin.get("/admin/audit").status_code == 200           # 2. F5 ...
+        assert _views(admin_id, mark) == ["0"]
+        assert admin.get("/admin/audit").status_code == 200
         newest = re.findall(r'data-audit-id="(\d+)"', first.text)
         assert newest
-        assert admin.get("/admin/audit", params={"before_id": newest[-1]}).status_code == 200  # ... paging
+        assert admin.get("/admin/audit", params={"before_id": newest[-1]}).status_code == 200
         assert _views(admin_id, mark) == ["0"]
-        assert admin.get("/admin/audit", params={"action": "auth."}).status_code == 200    # 3. new filter
+        assert admin.get("/admin/audit", params={"action": "auth."}).status_code == 200
         assert _views(admin_id, mark) == ["0", "1"]
         assert admin.get("/admin/audit", params={"action": "auth."}).status_code == 200
         assert _views(admin_id, mark) == ["0", "1"]
-        assert admin.get("/admin/audit", params={"actor": PAT}).status_code == 200          # 4. a person
+        assert admin.get("/admin/audit", params={"actor": PAT}).status_code == 200
         assert _views(admin_id, mark) == ["0", "1", "4"]
-        # bad filters are not in the mask; an unknown email still is (a search for a person)
+        # Keep unknown-email searches in the mask.
         admin.get("/admin/audit", params={"action": "x' OR 1=1", "target_id": "abc", "before_id": "5"})
         admin.get("/admin/audit", params={"actor": f"nobody-{uuid.uuid4().hex}@example.com",
                                           "from": "2026-01-01", "to": "2026-01-02"})
@@ -231,7 +221,7 @@ def test_route_records_the_view_before_reading_and_fails_closed():
     assert "conn.commit()" in helper
 
 
-# --- -p e6 only: the window and a failed write ---------------------------------------
+# E6 window and failed write
 
 E6_ONLY = pytest.mark.skipif(PROJECT != "e6", reason="only on the disposable stand -p e6")
 
@@ -247,7 +237,7 @@ def _short_window():
     try:
         yield
     finally:
-        _psql(_window_sql("10 minutes"))   # migrate (rls.sql) puts the same back
+        _psql(_window_sql("10 minutes"))   # Restore the normal test window.
         assert _psql("SELECT public.audit_view_window()::text") == ["00:10:00"]
 
 

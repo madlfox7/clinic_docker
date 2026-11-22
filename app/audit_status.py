@@ -1,15 +1,4 @@
-"""Banner "Log integrity" on /admin/audit (plan 18.2).
-
-The api only reads /audit_status/status.json, written by audit_anchor
-(mounted read-only here; the api has no anchor key, no anchors and no
-auditor password). read_banner is a pure function: a strict schema v1, then
-green only when the file is fresh, ok, fully checked and has no history of a
-replaced chain. Anything else is "broken" or "not checked"; nothing raises.
-
-The banner is an indicator, not the source of truth: an attacker with code
-execution in the api draws whatever he likes in his own answer. The source
-of truth is make audit-verify and copies of the anchors outside this server.
-"""
+"""Audit status indicator; verify against external anchors."""
 from __future__ import annotations
 
 import json
@@ -21,13 +10,13 @@ from datetime import datetime, timedelta, timezone
 
 STATUS_PATH = os.environ.get("CLINIC_AUDIT_STATUS_PATH", "/audit_status/status.json")
 MAX_BYTES = 4096
-# Same ranges as audit/anchor.py; a bad value here falls back to the default.
+# Match audit/anchor.py settings.
 INTERVAL_DEFAULT, INTERVAL_RANGE = 60, (10, 3600)
 FULL_EVERY_DEFAULT, FULL_EVERY_RANGE = 600, (60, 86400)
-# Times "in the future" more than this are not trusted (same host clock).
+# Reject future timestamps.
 FUTURE_SLACK = 60
 
-# English texts: the interface has no i18n (base.html is lang="en").
+# English-only UI.
 INTEGRITY_PROBLEMS = {
     "gap": "a journal row is missing (gap in seq)",
     "hash_version": "unknown hash version of a journal row",
@@ -67,11 +56,11 @@ LOCAL_ZONE = "Asia/Yerevan"
 
 @dataclass(frozen=True)
 class Banner:
-    state: str                     # ok | broken | unchecked
-    reason: str | None = None      # problem type (broken) or UNCHECKED_REASONS key
-    text: str | None = None        # fixed text for the reason
-    seq: int | None = None         # seq of the problem
-    kind: str | None = None        # switch kind of chain_replaced
+    state: str                     # ok, broken, unchecked
+    reason: str | None = None      # Problem type.
+    text: str | None = None        # Display text.
+    seq: int | None = None         # Problem sequence.
+    kind: str | None = None        # Replacement type.
     checked_at: str | None = None
     full_checked_at: str | None = None
     anchored_at: str | None = None
@@ -100,7 +89,7 @@ def _zone():
     try:
         from zoneinfo import ZoneInfo
         return ZoneInfo(LOCAL_ZONE)
-    except Exception:   # no tz database in the image: Yerevan is UTC+4 all year
+    except Exception:   # UTC+4 year-round.
         return timezone(timedelta(hours=4), LOCAL_ZONE)
 
 
@@ -137,7 +126,7 @@ def _read(path: str) -> bytes | None:
     except FileNotFoundError:
         return None
     except OSError:
-        raise _Invalid from None   # a symlink (ELOOP), no access, ...
+        raise _Invalid from None   # Reject unsafe paths.
     try:
         info = os.fstat(fd)
         if not stat.S_ISREG(info.st_mode) or info.st_size > MAX_BYTES:
@@ -152,7 +141,7 @@ def _read(path: str) -> bytes | None:
 
 def _parse(data: bytes) -> dict:
     def no_constants(name):
-        raise _Invalid   # NaN, Infinity
+        raise _Invalid   # Reject NaN/Infinity.
 
     try:
         doc = json.loads(data.decode("utf-8"), parse_constant=no_constants)
@@ -188,7 +177,7 @@ def _parse(data: bytes) -> dict:
 def _broken(doc: dict, common: dict) -> Banner:
     problem = doc["problem"]
     if problem is None or problem["type"] in UNCHECKED_REASONS:
-        # broken without a (known) break type: a replaced chain in the history
+        # Unknown breaks are still broken.
         if doc["replaced_history"] > 0:
             return Banner("broken", "chain_replaced", INTEGRITY_PROBLEMS["chain_replaced"], **common)
         return Banner("broken", "unknown", UNKNOWN_PROBLEM, **common)
@@ -202,7 +191,7 @@ def _broken(doc: dict, common: dict) -> Banner:
 def read_banner(path: str, now: float, interval: int, full_every: int) -> Banner:
     try:
         return _banner(path, now, interval, full_every)
-    except Exception:   # never a 500 because of the banner
+    except Exception:   # Don't fail the page.
         return Banner("unchecked", "invalid", UNCHECKED_REASONS["invalid"])
 
 
@@ -227,7 +216,7 @@ def _banner(path: str, now: float, interval: int, full_every: int) -> Banner:
     if doc["state"] == "broken" or doc["replaced_history"] > 0 or doc["full_ok"] is False:
         return _broken(doc, common)
     if problem is not None and problem["type"] not in UNCHECKED_REASONS:
-        return _broken(doc, common)          # "ok" or "unchecked" with a break type: not trusted
+        return _broken(doc, common)          # Breaks are untrusted.
     times = [t for t in (doc["checked_at"], doc["full_checked_at"], doc["anchored_at"]) if t is not None]
     if any(t > now + FUTURE_SLACK for t in times):
         return Banner("unchecked", "future", UNCHECKED_REASONS["future"], **common)

@@ -71,8 +71,7 @@ DEFAULT_REGISTRATION_PASSWORDS = {
 }
 SAME_PASSWORD_ERROR = "Choose a password different from your current one."
 EDGE_SPACE_ERROR = "Password must not start or end with a space."
-# One answer for every failed sign-in (unknown email, wrong password, blocked
-# or unconfirmed account), so the login form does not tell who is registered.
+# Prevent account enumeration.
 LOGIN_FAILED = "Invalid email or password. If you have just registered, confirm your email first."
 
 
@@ -126,7 +125,7 @@ def _login_page(
             "registered": registered,
             "password_reset": password_reset,
             "notice": notice,
-            # Only a validated integer ever reaches the form, never the raw value.
+            # Use only the validated value.
             "doctor_id": doctor_id,
         },
         status_code=status_code,
@@ -137,11 +136,7 @@ LOGIN_DOCTOR_MAX_DIGITS = 9
 
 
 def _login_doctor_id(values) -> int | None:
-    """Doctor id from the guest "Book" button (?doctor=<id>), or None.
-
-    Exactly one value of 1-9 ASCII digits, positive and inside int4. Anything else,
-    including duplicates, is ignored. There is no free-form return URL.
-    """
+    """Accept one positive int4 doctor id from ?doctor=; ignore malformed or duplicate values."""
     if len(values) != 1:
         return None
     raw = values[0]
@@ -243,11 +238,7 @@ def viewer(request: Request):
 
 
 def require_user(request: Request, *roles, login_doctor_id: int | None = None):
-    """Load id, role and blocked from users. Cookie role is ignored.
-
-    An expired session goes to /login?expired=1; login_doctor_id (already
-    validated) keeps the patient's way back to the selected doctor.
-    """
+    """Load the role from DB; preserve validated doctor IDs on expiry."""
     user, status = load_session_user(request)
     if status == "blocked":
         return None, _login_page(request, "Account is blocked", 403)
@@ -390,8 +381,7 @@ def register(
             **keep,
         )
 
-    # Rate limit before bcrypt and register_patient, the same for a new and an
-    # existing email. A database failure here fails closed (503).
+    # Rate-limit first; fail closed.
     try:
         conn = db()
         try:
@@ -440,17 +430,14 @@ def register(
         return _register_page(
             request, "Check the registration details.", 400, normalized_email, **keep
         )
-    # The same answer for a new and an existing email (always a redirect): the owner of an
-    # existing account gets a notice instead of a confirmation link. A new
-    # account, profile and token stay even if the mail fails.
+    # Keep responses neutral; mail failure doesn't undo signup.
     try:
         if outcome == "created":
             send_email_verification(normalized_email, clean_name, token)
         else:
             send_existing_account_notice(normalized_email)
     except Exception as exc:
-        # One line for both branches, no stack: a traceback would name the
-        # mail function (new or taken email), SMTPRecipientsRefused the address.
+        # Avoid account details in logs.
         log.warning("could not send registration email (%s)", type(exc).__name__)
         return RedirectResponse("/login?registered=1&mail=failed", status_code=303)
     return RedirectResponse("/login?registered=1", status_code=303)
@@ -519,7 +506,7 @@ RESET_TOKEN_PATTERN = re.compile(r"^[0-9a-f]{64}$")
 
 
 def _verify_email_page(request: Request, token: str, error: bool, status_code: int = 200):
-    # The page never shows the email of the account behind the token.
+    # Hide the account email.
     return templates.TemplateResponse(
         request,
         "verify_email.html",
@@ -540,7 +527,7 @@ def _verification_token_is_open(token: str) -> bool:
 
 @router.get("/verify-email")
 def verify_email_form(request: Request, token: str = ""):
-    # GET only shows a button: a mail client preview must not burn the token.
+    # GET must not consume tokens.
     if not RESET_TOKEN_PATTERN.fullmatch(token) or not _verification_token_is_open(token):
         return _verify_email_page(request, "", True, 400)
     return _verify_email_page(request, token, False)
@@ -565,8 +552,7 @@ def verify_email(request: Request, token: str = Form("")):
 
 @router.post("/resend-verification")
 def resend_verification(request: Request, email: str = Form("")):
-    """Always the same answer: unknown, confirmed, blocked, rate-limited and
-    SMTP failure all end at /login?resent=1. SMTP errors go only to the log."""
+    """Use the same redirect for all resend outcomes; SMTP errors are logged only."""
     user, status = load_session_user(request)
     if status == "ok":
         return RedirectResponse("/me", status_code=303)
@@ -913,11 +899,7 @@ def me(request: Request):
 
 
 def update_patient_profile(cur, patient_id: int, full_name, phone) -> str:
-    """Validate and store a patient's name and phone under the caller's role.
-
-    Returns "saved", "name", "phone" or "unavailable". The journal entry carries
-    only ids, never the name or the phone.
-    """
+    """Save validated profile data; return a status and journal ids, never name or phone."""
     clean_name = clean_person_name(full_name)
     if clean_name is None:
         return "name"
@@ -1162,8 +1144,7 @@ def change_own_password(
     return RedirectResponse("/me?password_changed=1", status_code=303)
 
 
-# POST only: the global CSRF check runs first, so a cross-site request or a
-# missing/wrong token cannot end the session. GET /logout answers 405.
+# POST-only; global CSRF runs first.
 @router.post("/logout")
 def logout(request: Request):
     user = viewer(request)

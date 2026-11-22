@@ -126,9 +126,7 @@ def first_doctor_id(html: str) -> str:
 
 
 def open_free_slot_page(c: httpx.Client) -> tuple[str, str]:
-	"""First free slot starting more than 3 hours from now (clinic time), so a
-	patient can still cancel or move it inside the default 2 h change deadline.
-	Days are tried forward via ?day=, at most 14 days; times come from the DB."""
+	"""Find a free slot more than three hours ahead, within the 14-day booking window."""
 	doctors = c.get("/doctors")
 	assert doctors.status_code == 200
 	doctor_ids = re.findall(r'href="/doctors/(\d+)/slots"', doctors.text)
@@ -1274,7 +1272,6 @@ def test_medical_records_are_scoped_and_audited():
 				"AND a.starts_at > now() - interval '12 months'"
 			)
 			if still_own == "0":
-				# only a cancelled visit left: no longer this doctor's patient
 				assert "patient_unavailable" in str(cancelled_history.url)
 			else:
 				assert "cancelled" in cancelled_history.text
@@ -1499,7 +1496,6 @@ def test_only_doctor_can_complete_own_started_visit():
 		assert "UPDATE 1" in done.stdout
 		assert _status(visit) == "completed"
 
-		# completed is final: nobody can cancel or reopen it
 		for role, email in (
 			("app_patient", PAT),
 			("app_registrar", REG),
@@ -2373,7 +2369,7 @@ def test_doctor_pending_time_off_rejects_overlapping_dates():
 				"""
 			) == "1"
 
-			# Exact same dates
+			# Exact match.
 			exact = doctor.post(
 				"/doctor/time-off-requests",
 				data={
@@ -2394,7 +2390,7 @@ def test_doctor_pending_time_off_rejects_overlapping_dates():
 				"""
 			) == "0"
 
-			# Partial overlap: existing 250-252 vs new 251-253
+			# Partial overlap.
 			partial_start = psql("SELECT CURRENT_DATE + 251")
 			partial_end = psql("SELECT CURRENT_DATE + 253")
 			partial = doctor.post(
@@ -2415,7 +2411,7 @@ def test_doctor_pending_time_off_rejects_overlapping_dates():
 				"""
 			) == "0"
 
-			# Non-overlapping range still succeeds
+			# No overlap.
 			free_start = psql("SELECT CURRENT_DATE + 260")
 			free_end = psql("SELECT CURRENT_DATE + 262")
 			free = doctor.post(
@@ -2715,11 +2711,7 @@ def test_apply_hours_removes_free_slots_outside_window_only():
 
 
 def test_patient_overlap_rejected_by_exclusion_without_python_select():
-	"""Same patient, overlapping slots at two doctors, rejected by the DB constraint.
-
-	The insert goes straight to PostgreSQL, so it still fails if the Python
-	SELECT overlap check in book_slot() is removed.
-	"""
+	"""Ensure PostgreSQL rejects overlapping visits for one patient across doctors."""
 	psql(
 		"""
 		DO $$
@@ -2923,7 +2915,7 @@ def test_visit_notes_keep_medical_text_off_appointment_status():
 		assert NOTE_DOCTOR1_PATIENT_A not in psql(
 			f"SELECT status FROM appointments WHERE id = {created['appointment_a_id']}"
 		)
-		# body holds an encrypted packet, never the note text itself
+		# Store ciphertext, never plaintext.
 		stored_a = psql(f"SELECT body FROM visit_notes WHERE id = {created['note_a_id']}")
 		stored_b = psql(f"SELECT body FROM visit_notes WHERE id = {created['note_b_id']}")
 		assert is_packet(stored_a) and NOTE_DOCTOR1_PATIENT_A not in stored_a
@@ -2970,9 +2962,7 @@ def test_visit_notes_keep_medical_text_off_appointment_status():
 			"""
 		) == "2"
 
-		# The database accepts only encrypted packets: plaintext of any length,
-		# including 5001 characters, is rejected. The 4000-character limit on the
-		# plaintext itself is enforced by the api below.
+		# Database rejects plaintext; API enforces length.
 		for (table, source_id), (label, value) in (
 			(pair, case)
 			for pair in (("visit_notes", created["note_a_id"]), ("prescriptions", created["note_a_id"]))
@@ -3235,8 +3225,7 @@ def test_registrar_day_list_doctor_calendar_and_time_off_approval():
 			)
 			assert "cancelled" in registrar_cancelled.text
 
-			# Rejected request uses a non-overlapping day so both pending
-			# submissions succeed under the overlap guard.
+			# Avoid overlap between pending requests.
 			rejected_day = psql("SELECT CURRENT_DATE + 400")
 			for comment, day in (
 				(approved_comment, selected_day),
@@ -4473,17 +4462,15 @@ def test_logout_requires_post_with_csrf_token():
 	with client() as c:
 		login(c, PAT2)
 		assert c.get("/my").url.path == "/my"
-		# GET no longer logs out: 405 and the session stays valid.
 		get = c.get("/logout")
 		assert get.status_code == 405
 		assert c.get("/my").url.path == "/my"
-		# POST without a token or with a wrong one is rejected and keeps the session.
 		missing = c.post("/logout", csrf=False)
 		assert missing.status_code == 403
 		wrong = c.post("/logout", data={"csrf_token": "x" * 43})
 		assert wrong.status_code == 403
 		assert c.get("/my").url.path == "/my"
-		# The menu carries the POST form with the session token, not a link.
+		# Logout uses a CSRF-protected POST.
 		cabinet = c.get("/me").text
 		assert 'href="/logout"' not in cabinet
 		form = re.search(r'<form[^>]*method="post" action="/logout"[^>]*><input type="hidden" name="csrf_token" value="([^"]+)">', cabinet)
@@ -4510,7 +4497,7 @@ def test_patient_cannot_forge_audit_events():
 		)
 		assert forged.returncode != 0, (action, forged.stdout)
 		assert "not allowed" in forged.stderr or "permission denied" in forged.stderr
-	direct = _as_role(  # expects refusal
+	direct = _as_role(
 		"app_patient", PAT,
 		"INSERT INTO audit_events (actor_user_id, actor_role, action, target_type) "
 		"VALUES (1, 'admin', 'x', 'y');",

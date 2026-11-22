@@ -1,4 +1,4 @@
-# Never part of a build context: keys, certificates, local settings, venvs.
+# Exclude secrets and local files from builds.
 secrets/
 acme-webroot/
 .env

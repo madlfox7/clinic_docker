@@ -1,14 +1,4 @@
-"""A fresh patient per test, created through superuser psql (plan 17 §9.2 (а)).
-
-The audit journal is append-only, so tests no longer clean events up after
-themselves: whatever a test writes for PAT stays (the 3 reschedules per 24 h
-limit, the 15 minute dedup of auth.session_expired). A test that depends on
-the history of its patient gets a new one instead. The account is a copy of
-PAT's password hash, confirmed, with a profile; it is created in SQL rather
-than through /register, which allows only 20 sign-ups per 15 minutes from one
-address. Users and their rows are removed afterwards (no audit foreign key,
-plan 17 Р6); their journal events stay.
-"""
+"""Create fresh patients for tests; audit history survives cleanup."""
 import subprocess
 import uuid
 from pathlib import Path

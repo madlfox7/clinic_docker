@@ -1,9 +1,4 @@
-"""Plan 18.2: the "Log integrity" banner on /admin/audit.
-
-Unit tests of app/audit_status.py (read_banner) on temporary files, then the
-page itself on the running stand, and the red/grey cases on the disposable
-stand -p e6 only (they stop audit_anchor, change a journal row as the
-database superuser and replace the chain)."""
+"""Test the audit banner; destructive cases require a disposable -p e6 stand."""
 import json
 import os
 import re
@@ -52,7 +47,7 @@ def _banner(tmp_path, content, now=NOW) -> st.Banner:
     return st.read_banner(str(path), now, INTERVAL, FULL)
 
 
-# --- unit: read_banner ------------------------------------------------------------
+# Banner unit tests
 
 def test_valid_fresh_ok_is_green(tmp_path):
     banner = _banner(tmp_path, _good())
@@ -218,7 +213,7 @@ def test_route_reads_the_banner_after_the_role_check():
     assert '"Cache-Control": "no-store"' in body
 
 
-# --- live: the page on the running stand -------------------------------------------
+# Live status page
 
 def _client(**kwargs):
     return CsrfClient(base_url=BASE, timeout=30.0, **kwargs)
@@ -266,8 +261,7 @@ def _wait_state(want: str, seconds: float, text: str | None = None) -> httpx.Res
 
 
 def _wait_login_page(seconds: float = 180) -> None:
-    """After `up -d` or `make reset` the api and the proxy start a few seconds
-    after the database: wait for /login 200 before the first sign-in."""
+    """Wait for the API and proxy after startup."""
     deadline = time.time() + seconds
     last = None
     while True:
@@ -357,7 +351,7 @@ def test_rendered_banner_escapes_an_unknown_type():
     assert "alert(1)" not in done.stdout
 
 
-# --- live, -p e6 only: grey and red ------------------------------------------------
+# E6 status colors
 
 E6_ONLY = pytest.mark.skipif(PROJECT != "e6", reason="only on the disposable stand -p e6")
 
@@ -384,19 +378,16 @@ def _psql(sql: str) -> list[str]:
 
 @E6_ONLY
 def test_e6_changed_row_before_the_last_anchor_turns_the_banner_red():
-    """A superuser change of an old row (hashes left alone) is not seen by the
-    incremental step; the full check (CLINIC_AUDIT_FULL_CHECK_EVERY=60 in the
-    e6 env) turns the banner red with row_hash and the seq within 10 min +
-    one interval."""
+    """On disposable e6, verify the full check detects a changed journal row."""
     sys.path.insert(0, str(ROOT / "experiments"))
     import e6_tamper  # noqa: E402
 
     every = _anchor_env("CLINIC_AUDIT_ANCHOR_INTERVAL", 60)
     full = _anchor_env("CLINIC_AUDIT_FULL_CHECK_EVERY", 600)
     _wait_state("ok", 2 * every + 120)
-    for _ in range(3):           # events of its own: a fresh stand has an empty journal
+    for _ in range(3):           # Seed fresh journal.
         with _client() as c:
-            _login(c, ADMIN)     # auth.login.success
+            _login(c, ADMIN)     # Record admin sign-in.
     deadline = time.time() + 2 * every + 120
     while True:
         page = _wait_state("ok", 2 * every + 120)
@@ -416,7 +407,7 @@ def test_e6_banner_stays_red_after_chain_replaced_and_a_forced_reset():
     every = _anchor_env("CLINIC_AUDIT_ANCHOR_INTERVAL", 60)
     full = _anchor_env("CLINIC_AUDIT_FULL_CHECK_EVERY", 600)
     old = _psql("SELECT chain_id FROM audit_chain_head")[0]
-    for args in (["down", "-v"], ["up", "-d"]):      # the volume dropped behind make's back
+    for args in (["down", "-v"], ["up", "-d"]):      # Simulate out-of-band volume removal.
         done = _compose(*args, timeout=1200)
         assert done.returncode == 0, done.stderr[-2000:]
     deadline = time.time() + 300
@@ -435,6 +426,6 @@ def test_e6_banner_stays_red_after_chain_replaced_and_a_forced_reset():
     assert forced.returncode == 0, forced.stdout[-3000:] + forced.stderr[-3000:]
     _wait_login_page()
     page = _wait_state("broken", 2 * every + 180, st.INTEGRITY_PROBLEMS["chain_replaced"])
-    time.sleep(full + every)          # a later full check does not turn it green
+    time.sleep(full + every)
     page = _wait_state("broken", 60, st.INTEGRITY_PROBLEMS["chain_replaced"])
     assert "Log integrity: BROKEN" in page.text

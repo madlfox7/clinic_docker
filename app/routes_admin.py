@@ -73,7 +73,7 @@ def _discard_invite(token: str) -> None:
     finally:
         conn.close()
 
-# Audit filters: fixed lists in code, checked before the query (no SELECT DISTINCT).
+# Fixed audit filters only.
 AUDIT_PAGE_SIZE = 50
 AUDIT_ACTIONS = (
     "admin.create_denied",
@@ -108,15 +108,13 @@ AUDIT_TARGET_TYPES = (
     "registrar", "service", "time_off_request", "user",
 )
 AUDIT_ID_MAX = 9_223_372_036_854_775_807
-# audit.view (plan 18.3): target_id is the bit mask of the filters used, never
-# their values. before_id (paging) is not a filter.
+# Store filter masks, not values.
 AUDIT_VIEW_FILTER_BITS = (
     ("action", 1), ("actor_role", 2), ("actor", 4), ("target_type", 8),
     ("target_id", 16), ("from", 32), ("to", 64),
 )
 AUDIT_VIEW_UNAVAILABLE = "The audit log is unavailable: the view could not be recorded."
-# Banner "Log integrity" (plan 18.2): the api takes the intervals from its own
-# environment (same names and ranges as audit_anchor), never from the file.
+# Read banner limits from env.
 AUDIT_ANCHOR_INTERVAL = env_seconds("CLINIC_AUDIT_ANCHOR_INTERVAL", INTERVAL_DEFAULT, INTERVAL_RANGE)
 AUDIT_FULL_CHECK_EVERY = env_seconds("CLINIC_AUDIT_FULL_CHECK_EVERY", FULL_EVERY_DEFAULT, FULL_EVERY_RANGE)
 
@@ -143,7 +141,7 @@ def _record_audit_view(admin_user, filters: dict) -> bool:
         finally:
             conn.close()
     except psycopg2.Error as exc:
-        # only the type: never a filter value or a query
+        # Log the error type only.
         log.warning("audit view not recorded: %s", type(exc).__name__)
         return False
     return True
@@ -157,7 +155,7 @@ def admin_audit(request: Request):
     params = request.query_params
     errors = []
     filters = {}
-    # Fixed SQL fragments only; values always go in as parameters.
+    # Parameterize all values.
     where = []
     args = []
 
@@ -183,8 +181,7 @@ def admin_audit(request: Request):
         else:
             errors.append("invalid_filter")
 
-    # actor: exact normalized email only, never a substring. Anything that is not
-    # a whole email matches nobody (empty page), it does not drop the filter.
+    # Exact email; invalid input matches nothing.
     raw_actor = params.get("actor", "")
     actor_email = None
     actor_missing = False
@@ -214,7 +211,7 @@ def admin_audit(request: Request):
         if target_id is None:
             errors.append("invalid_filter")
         else:
-            # A reschedule keeps the old visit id in old_value.
+            # old_value stores the prior visit id.
             where.append(
                 "(e.target_id = %s OR (e.action = 'appointment.reschedule' AND e.old_value = %s))"
             )
@@ -239,8 +236,7 @@ def admin_audit(request: Request):
         if before_id is None:
             errors.append("invalid_filter")
 
-    # Plan 18.3: the view is journaled first, in its own transaction; if it
-    # cannot be written the journal is not shown (fail closed, 503, no 500).
+    # Journal first; fail closed on errors.
     if not _record_audit_view(admin_user, filters):
         return templates.TemplateResponse(
             request,
@@ -309,7 +305,7 @@ def admin_audit(request: Request):
         ]
     cur.close()
     conn.close()
-    # only for an admin (require_user above); the file is read-only for the api
+    # Admin-only, read-only mount.
     integrity = read_banner(STATUS_PATH, time.time(), AUDIT_ANCHOR_INTERVAL, AUDIT_FULL_CHECK_EVERY)
     return templates.TemplateResponse(
         request,
@@ -1231,8 +1227,7 @@ def update_session_settings(request: Request, idle_minutes: str = Form("")):
     try:
         with conn:
             with conn.cursor() as cur:
-                # The DEFINER function checks the admin, updates the value and
-                # journals old and new values in the same transaction.
+                # Update and journal atomically.
                 cur.execute("SELECT public.set_session_idle_minutes(%s)", (minutes,))
     except (psycopg2.errors.CheckViolation, psycopg2.errors.InvalidParameterValue):
         return RedirectResponse("/admin/settings?error=invalid_idle", status_code=303)
@@ -1253,8 +1248,7 @@ def update_change_deadline(request: Request, deadline_hours: str = Form("")):
     try:
         with conn:
             with conn.cursor() as cur:
-                # The DEFINER function checks the admin, updates the value and
-                # journals old and new values in the same transaction.
+                # Update and journal atomically.
                 cur.execute("SELECT public.set_patient_change_deadline_hours(%s)", (hours,))
     except (psycopg2.errors.CheckViolation, psycopg2.errors.InvalidParameterValue):
         return RedirectResponse("/admin/settings?error=invalid_deadline", status_code=303)
@@ -1264,11 +1258,7 @@ def update_change_deadline(request: Request, deadline_hours: str = Form("")):
 
 
 def _purge_slots_without_scheduled(cur, where_sql, params):
-    # Remove cancelled appointments only when they have no medical history.
-    # visit_notes.appointment_id and prescriptions.appointment_id FK to
-    # appointments(id); admin cannot SELECT those tables under RLS, so each
-    # delete uses a savepoint and skips rows that still have dependents.
-    # Slots stay whenever any appointment row remains.
+    # Preserve visits with records.
     cur.execute(
         f"""
         SELECT a.id
@@ -1315,7 +1305,7 @@ def _purge_slots_without_scheduled(cur, where_sql, params):
 
 
 def _outside_hours_sql(alias="s"):
-    # work_hours.weekday 
+    # Match weekday.
     return f"""
         NOT EXISTS (
             SELECT 1 FROM work_hours w

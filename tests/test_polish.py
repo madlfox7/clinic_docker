@@ -1,5 +1,4 @@
-"""16_polish: error pages, confirmations, neutral registration, one login
-answer, patient cancel/reschedule deadline."""
+"""Test error pages, registration, login and patient appointment changes."""
 import html
 import os
 import re
@@ -57,7 +56,7 @@ def _api_logs(since: str = "2m") -> str:
     ).stdout
 
 
-# --- 4. Error pages ----------------------------------------------------------
+# Error pages
 
 def test_unexpected_error_gives_the_clinic_page_with_a_reference_only():
     _psql("REVOKE EXECUTE ON FUNCTION public.request_password_reset(text, text, boolean) FROM clinic_api")
@@ -127,7 +126,7 @@ def test_nginx_unavailable_page_names_match():
     assert "COPY docker/proxy/errors/clinic-unavailable.html /etc/nginx/clinic/errors/" in dockerfile
 
 
-# --- 1. Confirmations ----------------------------------------------------------
+# Confirmations
 
 FORM_TAG = re.compile(r"<form\b[^>]*>", re.S)
 
@@ -176,7 +175,7 @@ def test_patient_and_registrar_booking_forms_ask_with_visit_details():
             target_tag = _forms(page, f"/slots/{s.targets[0]}/book")[0]
             assert _attr(target_tag, "data-confirm") == f"Book {service} with {doctor} on {when} for {{patient}}?"
             assert _attr(target_tag, "data-confirm-patient") == "1"
-            # the registrar's cancel form for the booked old visit
+            # Registrar cancels the existing visit.
             old_doctor, old_service, old_when = _names(s.old_slot)
             cancel = _forms(page, f"/appointments/{s.old}/cancel")[0]
             assert _attr(cancel, "data-confirm") == \
@@ -260,7 +259,6 @@ def test_confirmation_is_not_a_control_csrf_and_methods_stay():
             assert pat.get(f"/appointments/{s.old}/cancel").status_code == 405
             assert _psql(f"SELECT count(*) FROM appointments WHERE slot_id = {s.targets[0]}") == ["0"]
             assert _psql(f"SELECT status FROM appointments WHERE id = {s.old}") == ["scheduled"]
-            # without the browser dialog the POST works as before
             booked = pat.post(f"/slots/{s.targets[0]}/book", data={"service_id": "1"},
                               follow_redirects=False)
             assert booked.status_code == 303 and "booked=1" in booked.headers["location"]
@@ -276,7 +274,7 @@ def test_app_js_fills_patient_only_with_the_flag_and_without_html():
     assert 'form.dataset.confirmPatient === "1"' in script
 
 
-# --- 2. Neutral registration -------------------------------------------------
+# Neutral registration
 
 NEW_PASSWORD = "Neutral-Check-2026!"
 RESET_LINK = re.compile(r"/reset-password\?token=([0-9a-f]{64})")
@@ -353,7 +351,6 @@ def test_taken_and_new_email_get_the_same_answer_and_the_owner_a_notice():
         assert verification_messages(PAT) == []
         assert len(verification_messages(fresh)) == 1
         assert _account_state(PAT) == before
-        # the new account still confirms and signs in as before
         confirm_registration(fresh)
         with _client() as c:
             done = c.post("/login", data={"email": fresh, "password": NEW_PASSWORD})
@@ -488,7 +485,7 @@ def test_register_route_and_login_page_have_no_taken_answer():
     assert "Account created" not in (ROOT / "app" / "templates" / "login.html").read_text()
 
 
-# --- 2.5 One answer for every failed sign-in ----------------------------------
+# Failed sign-in responses
 
 LOGIN_FAILED = "Invalid email or password. If you have just registered, confirm your email first."
 CSRF_VALUE = re.compile(r'name="csrf_token" value="[^"]*"')
@@ -579,7 +576,7 @@ def test_login_page_always_offers_the_resend_form_to_guests():
 
 
 
-# --- 3. Patient cancel and reschedule deadline --------------------------------
+# Patient cancellation and rescheduling
 
 YEREVAN_NOW = "(CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Yerevan')"
 
@@ -592,8 +589,7 @@ def deadline_two_hours():
 
 
 class _Near:
-    """Slots and visits a set number of minutes from now (clinic time); every
-    start is tried at a few offsets so a seeded slot or visit never collides."""
+    """Create test slots and visits at safe offsets from the current clinic time."""
 
     def __init__(self):
         self.slots = []
@@ -703,14 +699,12 @@ def test_patient_cannot_cancel_inside_the_deadline(deadline_two_hours):
 
 
 def test_reschedule_inside_the_deadline_is_refused_before_the_lock_live_for_update(deadline_two_hours):
-    """Б1: inside the deadline the UPDATE policy also hides the row from
-    SELECT ... FOR UPDATE, so too_late must be decided before step 3."""
+    """Check the cancel deadline before row locking hides an ineligible visit."""
     near = _Near()
     try:
         visit = near.visit(60)
         target = near.slot(300)
         later = near.visit(240)
-        # live PostgreSQL behaviour the route relies on
         assert _patient_sql(visit, f"SELECT id FROM appointments WHERE id = {visit}") == [str(visit)]
         assert _patient_sql(visit, f"SELECT id FROM appointments WHERE id = {visit} FOR UPDATE") == []
         assert _patient_sql(later, f"SELECT id FROM appointments WHERE id = {later} FOR UPDATE") == [str(later)]
@@ -737,7 +731,7 @@ def test_reschedule_inside_the_deadline_is_refused_before_the_lock_live_for_upda
 
 def test_patient_can_cancel_and_move_outside_the_deadline(deadline_two_hours):
     near = _Near()
-    # The move stays in the journal: a fresh patient keeps PAT's 3 a day free.
+    # Preserve PAT's daily quota.
     email, _patient = create_fresh_patient("deadline")
     try:
         to_cancel = near.visit(180, patient=email)
@@ -771,7 +765,7 @@ def test_database_refuses_late_and_past_patient_updates_in_any_session_zone(dead
         assert _patient_sql(ok, update.format(id=ok)) == ["1"]
         for zone in ("Pacific/Kiritimati", "Etc/GMT+12"):
             assert _patient_sql(late, update.format(id=late), timezone=zone) == ["0"]
-        # one transaction, so CURRENT_TIMESTAMP is the same for every zone
+        # Transaction time is stable across zones.
         cutoffs = _patient_sql(0, "SELECT public.patient_change_cutoff(); "
                                   "SET LOCAL TimeZone = 'Pacific/Kiritimati'; SELECT public.patient_change_cutoff(); "
                                   "SET LOCAL TimeZone = 'Etc/GMT+12'; SELECT public.patient_change_cutoff()")

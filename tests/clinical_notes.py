@@ -65,10 +65,7 @@ def cleanup_cross_doctor_notes() -> None:
 
 
 def insert_cross_doctor_notes() -> dict:
-	"""One note for doctor 1 / patient A and one note for doctor 2 / patient B.
-
-	doctor_id and patient_user_id are copied from the appointment on purpose.
-	"""
+	"""Create cross-doctor notes using appointment-owned doctor and patient IDs."""
 	cleanup_cross_doctor_notes()
 	row = _psql(
 		f"""

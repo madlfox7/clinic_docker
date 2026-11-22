@@ -47,8 +47,7 @@ def _psql_run(sql: str) -> subprocess.CompletedProcess:
 
 
 def _jar_domain() -> str:
-    # http.cookiejar files cookies from a dotless host name (localhost) under
-    # "<host>.local"; IP addresses and dotted names are kept as they are.
+    # Match cookiejar's localhost domain handling.
     host = urlparse(BASE).hostname
     try:
         ipaddress.ip_address(host)
@@ -60,7 +59,7 @@ def _jar_domain() -> str:
 def _client(cookie=None, follow=False):
     c = CsrfClient(base_url=BASE, follow_redirects=follow, timeout=10.0)
     if cookie:
-        # Same domain the server's Set-Cookie lands on, so updates replace it.
+        # Use the server's cookie domain.
         c.cookies.set("session", cookie, domain=_jar_domain(), path="/")
     return c
 
@@ -109,8 +108,7 @@ def _expired_events(user_id: int, reason: str) -> list[str]:
 
 @pytest.fixture
 def fresh_pat():
-    """A new patient per test: the journal is append-only and keeps one
-    auth.session_expired per account and reason in 15 minutes (plan 17 §9.2)."""
+    """Use a fresh patient to avoid deduplicated session events."""
     email, user_id = create_fresh_patient("session")
     yield email, user_id
     drop_fresh_patient(user_id)
@@ -153,7 +151,6 @@ def test_cookie_holds_only_ids_and_timestamps():
         first = c.get("/me")
         second = c.get("/me")
         assert first.status_code == second.status_code == 200
-        # seen is refreshed at most once a minute, so no cookie is re-sent here.
         assert "set-cookie" not in second.headers
 
 
@@ -334,7 +331,7 @@ def test_default_session_env_is_accepted():
     assert not [name for name in env_names.split() if name.startswith("SESSION_IDLE")]
 
 
-# --- idle timeout set by the admin ---------------------------------------------
+# Admin idle timeout
 
 
 @contextmanager

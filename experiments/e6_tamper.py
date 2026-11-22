@@ -1,18 +1,4 @@
-"""Experiment E6 (plan 17 §10.1, A10): tamper detection of the audit hash chain.
-
-Runs ONLY on the disposable stand `docker compose -p e6`:
-
-    python experiments/e6_tamper.py --disposable-stand e6 [--seed N] [--perf]
-
-The script writes .env.e6 (ports 8086/8456/8030/1030, its own anchor volume
-e6_audit_anchors_<date-time>), builds a fresh stand, runs the Б3 control,
-generates >= 500 events, applies 20 tamperings (each one restored from a dump
-afterwards), then the Б6 trigger-mode and chain-replacement scenarios, and
-removes the stand with `down -v`. The anchor volume (external) stays as an appendix.
-
-Output and the log carry only seq / id / break type: never a secret, a MAC
-input or the content of an event.
-"""
+"""E6 audit-chain tamper test; disposable stand only."""
 from __future__ import annotations
 
 import argparse
@@ -61,7 +47,7 @@ def log(text: str) -> None:
             fh.write(line + "\n")
 
 
-# --- the guard: nothing runs against another stand -----------------------------------
+# Prevent access to another stand.
 
 def env_file_value(path: Path, name: str) -> str | None:
     value = None
@@ -94,8 +80,6 @@ def ports_free() -> None:
         if re.search(rf":{port}\b", listening) or re.search(rf":{port}->", published):
             raise SystemExit(f"port {port} is busy: pick other ports and record them in the report")
 
-
-# --- compose, psql, the anchor service -------------------------------------------------
 
 def compose(*args, check=True, timeout=900, quiet=False) -> subprocess.CompletedProcess:
     cmd = ["docker", "compose", "--env-file", ".env.e6", "-p", PROJECT,
@@ -143,7 +127,7 @@ def enable_always() -> str:
 
 
 def superuser_sql(sql: str) -> str:
-    """Tampering as the database superuser: triggers off, change, triggers back in mode A."""
+    """Disable triggers for tampering; restore ALWAYS mode."""
     return ("BEGIN; ALTER TABLE public.audit_events DISABLE TRIGGER USER; "
             "ALTER TABLE public.audit_chain_head DISABLE TRIGGER USER; "
             f"{sql}; {enable_always()} COMMIT;")
@@ -154,8 +138,7 @@ def as_superuser(sql: str) -> list[str]:
 
 
 def change_row_sql(seq: int) -> str:
-    """One row changed in place, hashes left alone: BROKEN type=row_hash at seq
-    (used by tests/test_audit_status_ui.py on -p e6 for the banner)."""
+    """Change one row; leave hashes for row_hash detection."""
     return f"UPDATE public.audit_events SET action = action || '.x' WHERE seq = {int(seq)}"
 
 
@@ -176,7 +159,7 @@ def head() -> tuple[str, int]:
 
 
 def up_and_wait_head(timeout=600) -> None:
-    """up -d (migrate runs again) without --wait: audit_anchor may be red on purpose."""
+    """Wait for migration; anchor may be unhealthy."""
     compose("up", "-d", timeout=timeout)
     deadline = time.time() + timeout
     while time.time() < deadline:
@@ -196,8 +179,6 @@ def wait_healthy(want: str, timeout=200) -> str:
         time.sleep(5)
     return state
 
-
-# --- event generation ------------------------------------------------------------------
 
 def generate(total: int, rng: random.Random) -> dict:
     from tests.csrf_client import CsrfClient
@@ -235,8 +216,6 @@ def generate(total: int, rng: random.Random) -> dict:
     counts["rows"] = int(psql("SELECT count(*) FROM audit_events")[0])
     return counts
 
-
-# --- the 20 tamperings ---------------------------------------------------------------------
 
 def rows_meta() -> list[dict]:
     out = []
@@ -366,8 +345,6 @@ def run_tamperings(rng: random.Random) -> list[dict]:
     return results
 
 
-# --- perf (part of §10.2) ---------------------------------------------------------------
-
 def perf(rows: int) -> dict:
     have = int(psql("SELECT count(*) FROM audit_events")[0])
     admin = psql("SELECT id FROM users WHERE email = 'admin@clinic.local'")[0]
@@ -385,8 +362,6 @@ def perf(rows: int) -> dict:
     return {"rows": int(psql("SELECT count(*) FROM audit_events")[0]), "insert_s": round(insert_s, 1),
             "insert_rows": rows - have, "verify": line}
 
-
-# --- main --------------------------------------------------------------------------------
 
 def main() -> int:
     global LOG_PATH
@@ -417,7 +392,7 @@ def main() -> int:
     done = subprocess.run(["sh", "scripts/init_secrets.sh"], cwd=ROOT, capture_output=True, text=True)
     if done.returncode != 0:
         raise SystemExit("init_secrets.sh failed")
-    # a new anchor volume of its own (external, like make start creates it)
+    # Isolate this stand's anchors.
     made = subprocess.run(["docker", "volume", "create", "--label", "clinic.audit=keep", anchor_volume_name],
                           capture_output=True, text=True)
     if made.returncode != 0:
@@ -431,7 +406,6 @@ def main() -> int:
     log(f"stand up, head chain={head()[0]} rows={head()[1]}")
     log(f"first --once: {once()}")
 
-    # Б3 control first (П-3c.3)
     compose("stop", "proxy", "api")
     out = compose("exec", "-T", "audit_anchor", "python", "anchor.py", "--retire", check=False)
     log(f"control: retire rc={out.returncode} {out.stdout.strip()}")
@@ -454,7 +428,6 @@ def main() -> int:
     log(f"generated {counts}")
     log(f"anchor after generation: {once()}")
 
-    # e6-only checks of tests/test_audit_chain.py on this stand
     test_env = dict(os.environ, COMPOSE_PROJECT_NAME=PROJECT, COMPOSE_ENV_FILES=".env.e6",
                     COMPOSE_FILE="docker-compose.yml:docker-compose.e6.yml",
                     CLINIC_AUDIT_ANCHOR_VOLUME=anchor_volume_name, CLINIC_TEST_BASE=f"https://localhost:{PORTS['https']}",
@@ -480,7 +453,6 @@ def main() -> int:
         report["perf"] = perf(args.perf)
         log(f"perf {report['perf']}")
 
-    # Б6 on the live stand: DISABLE + ENABLE without ALWAYS
     psql("ALTER TABLE public.audit_events DISABLE TRIGGER zz_audit_chain; "
          "ALTER TABLE public.audit_events ENABLE TRIGGER zz_audit_chain")
     code, lines = verify()
@@ -490,7 +462,6 @@ def main() -> int:
     report["b6"] = {"rc": code, "line": b6["line"], "after_migrate_rc": code2, "after": lines2[-1:]}
     log(f"Б6: rc={code} {b6['line']} -> migrate -> rc={code2} {lines2[-1:]}")
 
-    # the whole chain replaced: new genesis without a retire
     once()
     dump()
     as_superuser("TRUNCATE public.audit_events; DELETE FROM public.audit_chain_head")
@@ -502,7 +473,6 @@ def main() -> int:
                               "line": parse_broken(lines)["line"]}
     log(f"replaced(new): registry={registry_kinds()[-1]} health={state} rc={code} {parse_broken(lines)['line']}")
 
-    # the dump of the old chain restored over it
     restore()
     log(f"reused: once {once()}")
     code, lines = verify()

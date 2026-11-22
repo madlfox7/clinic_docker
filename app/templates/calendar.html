@@ -199,7 +199,7 @@
   </table>
   </div>
   </div>
-  {# Phones and tablets (below lg): the same week as a list by day instead of a wide table. #}
+  {# Day list on small screens. #}
   <div class="d-lg-none">
     {% for calendar_day in days %}
       <h3 class="mt-3{% if calendar_day.closed %} is-closed px-2 py-1 rounded{% endif %}">{{ calendar_day.day.strftime("%a %Y-%m-%d") }}{% if calendar_day.closed_reasons %} <small>— {{ calendar_day.closed_reasons|join(", ") }}</small>{% endif %}</h3>

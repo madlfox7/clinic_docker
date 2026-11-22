@@ -1,10 +1,6 @@
 #!/usr/bin/env sh
-# Rotate the medical field encryption key without losing older rows.
-# The current key moves to secrets/field_encryption_previous_keys (still used
-# for reading), and a new key with a new key_id becomes current for writes.
-# Key values are never printed.
-#
-#   ./scripts/rotate_field_key.sh [new_key_id]   # default: v<N+1>
+# Rotate field key; retain old keys for decryption.
+# Never print key values.
 set -eu
 
 umask 077
@@ -36,8 +32,7 @@ if [ "$new_id" = "$current_id" ] || grep -q "^$new_id:" "$previous"; then
   exit 1
 fi
 
-# Keep the old key for reading first, then replace the current key in place
-# (same file, so its permissions and ACL stay).
+# Preserve key-file permissions by replacing it in place.
 { printf '\n'; cat "$key"; printf '\n'; } >> "$previous"
 printf '%s:%s' "$new_id" "$(openssl rand -hex 32)" > "$key"
 ./scripts/init_secrets.sh >/dev/null

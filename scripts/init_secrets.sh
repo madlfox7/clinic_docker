@@ -1,5 +1,5 @@
 #!/usr/bin/env sh
-# Create the Docker secret files in secrets/. Existing files are never overwritten.
+# Create secret files; never overwrite existing files.
 set -eu
 
 umask 077
@@ -26,9 +26,7 @@ else
   echo "        demo account password is in secrets/demo_password"
 fi
 
-# Medical field encryption key: "<key_id>:<64 hex chars>". Never overwritten,
-# or rows written with it could no longer be decrypted. Rotate with
-# scripts/rotate_field_key.sh, which keeps the old key for reading.
+# Keep old keys for decryption.
 if [ -e secrets/field_encryption_key ]; then
   echo "keep    secrets/field_encryption_key"
 else
@@ -42,9 +40,7 @@ else
   echo "created secrets/field_encryption_previous_keys (empty until the first key rotation)"
 fi
 
-# Audit chain (plan 17 §8): the clinic_auditor database password and the HMAC
-# key of the anchors. The key is never overwritten: a new key would leave the
-# existing anchors and the chain registry unverifiable.
+# Preserve the anchor HMAC key for chain verification.
 generate audit_db_password
 if [ -e secrets/audit_anchor_key ]; then
   echo "keep    secrets/audit_anchor_key"
@@ -60,15 +56,7 @@ else
   echo "created secrets/smtp_password (empty, fill in for a real SMTP server)"
 fi
 
-# --- TLS for the proxy ---------------------------------------------------------
-# CLINIC_TLS_MODE comes from the environment, else from a CLINIC_TLS_MODE= line
-# in .env (read with grep, .env is never sourced); empty means local.
-#   local:    our own CA (secrets/tls/ca.*, name constraints: localhost,
-#             127.0.0.1 and ::1 only) signs the server certificate. ca.key
-#             never leaves this host: it is not mounted into any container.
-#   provided: server.crt (full chain) and server.key are yours; this script
-#             never creates or overwrites them, it only checks them.
-# The proxy (uid 101) reads only server.key and server.crt (Compose secrets).
+# Read .env safely; never mount the CA key.
 . scripts/tls_lib.sh
 
 tls_create_ca() {
@@ -97,7 +85,7 @@ CA_CONFIG
   echo "created $TLS_DIR/ca.key, $TLS_DIR/ca.crt (local CA, 1825 days; the key never leaves this host)"
 }
 
-# Reasons to issue the server certificate again; empty = keep it.
+# Certificate renewal reasons; empty keeps the current cert.
 tls_leaf_problem() {
   if [ ! -s "$TLS_DIR/server.crt" ] || [ ! -s "$TLS_DIR/server.key" ]; then
     echo "missing"
@@ -142,7 +130,7 @@ LEAF_CONFIG
     -set_serial "0x$(openssl rand -hex 16)" -days "$leaf_days" \
     -extfile "$leaf_cfg" -extensions clinic_leaf_ext -out "$leaf_crt_new" 2>/dev/null \
     || tls_fail "could not sign the server certificate"
-  # Check the candidate before the live files are touched.
+  # Validate before replacing live certificates.
   openssl verify -x509_strict -CAfile "$TLS_DIR/ca.crt" "$leaf_crt_new" >/dev/null 2>&1 \
     || tls_fail "the new server certificate does not verify against $TLS_DIR/ca.crt"
   tls_pair_matches "$leaf_crt_new" "$leaf_key_new" \
@@ -154,8 +142,7 @@ LEAF_CONFIG
   fi
   tls_write_live "$leaf_key_new" "$leaf_crt_new"
   echo "created $TLS_DIR/server.key, $TLS_DIR/server.crt (localhost, 127.0.0.1, ::1; $leaf_days days)"
-  # Only a replaced pair can be stale in a running proxy (it keeps the old
-  # pair in memory until nginx reloads); the first pair has no proxy yet.
+  # Reload nginx to activate the replacement certificate.
   if [ "$had_leaf" = yes ]; then
     : > "$TLS_DIR/.leaf_reissued"
     echo "        a running proxy needs: docker compose exec proxy nginx -s reload (make start does it)"
@@ -208,14 +195,8 @@ echo "check   $TLS_DIR/server.crt: key, dates, $CERT_HOST in SAN, chain ($TLS_MO
 tls_cleanup
 TLS_TMP_FILES=
 
-# Compose bind-mounts each file with host ownership and mode, so non-root
-# container users (api/seed run as uid 10001, postgres as uid 999) need read
-# access to the file itself. The directory stays private to the host user.
-# Each file is 600 for the host user plus a read ACL for the one container uid
-# that reads it (migrate runs as root in its container and needs no ACL).
-# chmod must come before setfacl: a later chmod would reset the ACL mask.
-# Fallback without ACL support: root hands the file to that uid (0400);
-# anyone else keeps 644 so the stack still starts, with a warning.
+# Keep secrets private; grant each container reader access.
+# chmod before ACLs; without them, transfer ownership or warn.
 chmod 700 secrets
 for entry in postgres_password:999 clinic_api_password:10001 \
   session_secret:10001 smtp_password:10001 demo_password:10001 \
@@ -242,9 +223,8 @@ for entry in postgres_password:999 clinic_api_password:10001 \
   echo "        or: sudo chown $reader_uid:$reader_uid $secret_file && sudo chmod 400 $secret_file" >&2
 done
 
-# The field keys must not be world-readable. Keep them 600 for the host user
-# and grant read access only to the api user (uid 10001) through an ACL.
-# Without setfacl, root can hand the file to uid 10001 instead.
+# Keep field keys readable only by the API.
+# Without ACLs, transfer ownership to the API user.
 API_UID=10001
 for key_file in secrets/field_encryption_key secrets/field_encryption_previous_keys; do
   if [ ! -O "$key_file" ]; then
@@ -263,10 +243,8 @@ for key_file in secrets/field_encryption_key secrets/field_encryption_previous_k
   echo "        Install the acl package and rerun, or: sudo chown $API_UID:$API_UID $key_file" >&2
 done
 
-# The HMAC key of the anchors, like the field keys: 600 for the host user plus
-# a read ACL for the audit_anchor user (uid 10002); root hands the file to that
-# uid instead. Never 644 (Securo Б-B2): without either the key stays 600, the
-# service cannot read it and stays unhealthy (fail closed), with a warning.
+# Limit anchor key access to audit_anchor.
+# Without ACLs, transfer ownership; never expose it publicly.
 AUDIT_UID=10002
 key_file=secrets/audit_anchor_key
 if [ ! -O "$key_file" ]; then
@@ -285,8 +263,7 @@ else
   fi
 fi
 
-# Older clones may still have unused secret variables in .env.
-# The app no longer reads them; strip the lines without printing values.
+# Remove obsolete .env secrets without printing their values.
 if [ -f .env ] && grep -E '^(POSTGRES_PASSWORD|CLINIC_API_PASSWORD|SESSION_SECRET|SMTP_PASSWORD)=' .env >/dev/null 2>&1; then
   sed -i -E '/^(POSTGRES_PASSWORD|CLINIC_API_PASSWORD|SESSION_SECRET|SMTP_PASSWORD)=/d' .env
   echo "removed leftover secret variables from .env"

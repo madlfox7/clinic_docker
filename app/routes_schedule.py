@@ -23,10 +23,7 @@ router = APIRouter()
 
 
 def normalize_patient_query(value: str) -> str | None:
-    """Directory search by email or name: strip, lowercase, collapse spaces.
-
-    Control characters and anything over 254 bytes are rejected.
-    """
+    """Normalize a directory query, rejecting control characters and oversized input."""
     if not isinstance(value, str) or contains_nul(value) or has_control_char(value):
         return None
     normalized = " ".join(value.split()).lower()

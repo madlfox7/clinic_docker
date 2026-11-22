@@ -1,3 +1,6 @@
+# Проверка роли API и границ RLS
+
+```bash
 docker compose up -d --build
 docker compose exec api python - <<'PY'
 import os, psycopg2
@@ -18,29 +21,13 @@ except Exception as exc:
 c.rollback()
 c.close()
 PY
+```
 
+Ожидаемый результат:
 
-
-
-
-
-
-
-
-
-
-
---------------------------
-
-expected:
-who: ('clinic_api', False, False, False) — сессия API это clinic_api, не суперюзер, не BYPASSRLS, не может создавать базы. Политика, на эту сессию действует.
-owner: ('clinic',) — таблицы принадлежат мигратору. API их не владеет, значит не обходит RLS как owner.
-ddl refused: InsufficientPrivilege — с учётных данных API схема не меняется. CREATE TABLE от этой роли отклонён.
-
- «роль приложения не обходит RLS». 
-
-
- -----
+- `who: ('clinic_api', False, False, False)` — API подключается как `clinic_api`, не суперпользователь, не `BYPASSRLS` и не может создавать базы; к сессии применяются политики.
+- `owner: ('clinic',)` — таблицы принадлежат мигратору, поэтому API не обходит RLS как владелец.
+- `ddl refused: InsufficientPrivilege` — роль API не может менять схему; `CREATE TABLE` отклоняется.
 
 
  

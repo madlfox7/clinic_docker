@@ -72,9 +72,7 @@ $function$;
 REVOKE ALL ON FUNCTION public.doctor_patients(integer) FROM PUBLIC;
 GRANT EXECUTE ON FUNCTION public.doctor_patients(integer) TO app_doctor;
 
--- identities on the doctor's own visits, cancelled ones included (schedule labels only).
--- This is the only way a doctor reads a patient's name and phone: app_doctor has
--- no grant on patient_profiles.
+-- Restrict doctor identity access to own visits.
 DROP FUNCTION IF EXISTS public.doctor_visit_patients(integer);
 CREATE FUNCTION public.doctor_visit_patients(doc_user_id int)
 RETURNS TABLE (id int, email text, blocked boolean, full_name text, phone text)
@@ -268,7 +266,7 @@ BEGIN
       USING ERRCODE = '42501';
   END IF;
 
-  -- only events the application itself emits, with targets the actor owns
+  -- Restrict events to app-emitted actions and owned targets.
   IF NOT (
     (event_action IN ('user.email_notifications')
       AND target_type = 'user' AND target_id = actor_id)
@@ -329,17 +327,7 @@ BEGIN
 END;
 $function$;
 
--- Plan 18.3: views of the admin journal (/admin/audit) are journaled too, as
--- audit.view by the admin, target audit_log, target_id = the bit mask of the
--- filters used (1 action, 2 actor_role, 4 actor, 8 target_type, 16 target_id,
--- 32 from, 64 to). Never a filter value (no email, no id, no date, no hash).
--- The same mask by the same admin is written again only after the window
--- (audit_view_window) since the last written one, so F5 adds at most one row
--- per window and a new set of filters is always written. The journal itself
--- is the dedup state; the advisory lock serialises one admin with himself
--- (lock order: advisory lock, then the chain head on INSERT).
--- The window is a constant here, not a parameter: the api cannot change it.
--- STABLE, not IMMUTABLE, so a replaced value is not kept in a cached plan.
+-- Store masks, not filter values; deduplicate per admin/window.
 CREATE OR REPLACE FUNCTION public.audit_view_window()
 RETURNS interval
 LANGUAGE sql
@@ -393,11 +381,7 @@ BEGIN
 END;
 $function$;
 
--- Sign-in journal (auth.*), called only from the SECURITY DEFINER auth
--- functions below. One INSERT per call; auth.rate_limited is written at most
--- once per 15 minutes for the same reason, source and account. A journal error
--- never changes the answer to the client: it is reported as a server warning
--- (no email, password or token in it) and the sign-in goes on.
+-- Dedupe throttles; never log secrets or alter responses.
 CREATE OR REPLACE FUNCTION public.record_auth_event(
   event_action text,
   event_user_id integer,
@@ -706,9 +690,7 @@ BEGIN
     RETURN;
   END IF;
 
-  -- The link reached this mailbox, so setting a password also confirms the
-  -- email (staff invites, and the real owner taking back a pre-registered
-  -- address).
+  -- Password reset confirms mailbox ownership.
   SELECT u.email_verified_at IS NULL INTO was_unverified
   FROM public.users AS u
   WHERE u.id = target_id;
@@ -817,7 +799,7 @@ BEGIN
     RETURN;
   END IF;
 
-  -- One cost-12 crypt runs whether or not the email exists.
+  -- Keep password hashing constant for unknown emails.
   SELECT u.id, u.email, u.role, u.blocked, u.email_verified_at IS NOT NULL,
          u.auth_version, u.password_hash
   INTO matched_id, matched_email, matched_role, matched_blocked, matched_verified,
@@ -841,13 +823,7 @@ BEGIN
 
   password_matches := public.crypt(password_to_check, stored_hash) = stored_hash;
 
-  -- Branch order: rate limit, one crypt, success, then one failure path for
-  -- everything else. Success needs the right password on an account that is
-  -- neither blocked nor waiting for email confirmation. Unknown email, wrong
-  -- password, blocked and unverified accounts get the same answer (no row,
-  -- counter +1, one journal row), so a failed sign-in does not tell whether
-  -- the email is registered. The "unverified" column stays for the signature
-  -- and is always FALSE.
+    -- Hash once; generic failures prevent enumeration.
   IF user_found AND password_matches AND stored_hash IS DISTINCT FROM dummy_hash
      AND NOT matched_blocked AND matched_verified THEN
     DELETE FROM public.login_attempts
@@ -862,10 +838,7 @@ BEGIN
     RETURN;
   END IF;
 
-  -- Blocked or unverified accounts with the right password take the
-  -- bad-credentials path as a whole (attempt counter, one journal row, no row
-  -- returned); only the journal reason differs, blocked wins over unverified.
-  -- Unknown email: no account id and no email in the journal.
+  -- Share failures; blocked takes priority. Omit unknown-user identifiers.
   PERFORM public.record_auth_event(
     'auth.login.failure',
     CASE WHEN user_found THEN matched_id END,
@@ -1053,7 +1026,7 @@ BEGIN
 END;
 $function$;
 
--- Same rule as calendar_patient_email, for the patient's name.
+-- Apply the same patient scope as calendar_patient_email.
 CREATE OR REPLACE FUNCTION public.calendar_patient_name(
   target_patient_id integer,
   target_doctor_id integer
@@ -1393,7 +1366,7 @@ GRANT EXECUTE ON FUNCTION public.is_valid_free_slot(
 ) TO app_patient, app_registrar;
 GRANT EXECUTE ON FUNCTION public.record_audit_event(text, text, integer)
   TO app_patient, app_doctor, app_registrar, app_admin;
--- audit.view (plan 18.3): admins only; audit_view_window is not granted to anyone.
+-- Admin-only; keep the window helper ungranted.
 GRANT EXECUTE ON FUNCTION public.record_audit_view(integer) TO app_admin;
 REVOKE ALL ON FUNCTION public.admin_request_password_reset(integer) FROM PUBLIC;
 GRANT EXECUTE ON FUNCTION public.admin_request_password_reset(integer) TO app_admin;
@@ -1520,7 +1493,7 @@ BEGIN
     END IF;
   END IF;
 
-  -- Unconfirmed until the invite link sets a password (consume_password_reset).
+  -- Keep invited accounts unconfirmed until password set.
   INSERT INTO public.users (email, password_hash, role, blocked, email_verified_at)
   VALUES (
     normalized_email,
@@ -1612,7 +1585,7 @@ BEGIN
     RETURN;
   END IF;
 
-  -- Unconfirmed until the invite link sets a password (consume_password_reset).
+  -- Keep invited accounts unconfirmed until password set.
   INSERT INTO public.users (email, password_hash, role, blocked, email_verified_at)
   VALUES (
     normalized_email,
@@ -1694,10 +1667,7 @@ BEGIN
   END IF;
 
   SELECT id INTO invited_doctor_id FROM public.doctors WHERE user_id = invited_id;
-  -- The journal is append-only: the invite stays in it and the discard is a
-  -- new event by the admin who sent the invite (a doctor invite names the
-  -- doctors.id, the other invites the users.id). Without an invite event
-  -- nothing is discarded (fail closed); the warning carries no email or id.
+  -- Require an invite; audit discard without exposing identifiers.
   SELECT actor_user_id
   INTO inviter_id
   FROM public.audit_events
@@ -1716,7 +1686,7 @@ BEGIN
   DELETE FROM public.doctor_services WHERE doctor_id = invited_doctor_id;
   DELETE FROM public.doctors WHERE id = invited_doctor_id;
   DELETE FROM public.users WHERE id = invited_id;
-  -- Last locking step of the transaction (the chain head lock).
+  -- Acquire the chain-head lock last.
   INSERT INTO public.audit_events (
     actor_user_id, actor_role, action, target_type, target_id
   )
@@ -1937,8 +1907,7 @@ GRANT USAGE, SELECT ON SEQUENCE public.doctors_id_seq TO app_admin;
 GRANT SELECT ON public.clinic_settings
   TO app_guest, app_patient, app_doctor, app_registrar, app_admin;
 GRANT UPDATE (address, phone) ON public.clinic_settings TO app_admin;
--- Registration goes only through register_patient (SECURITY DEFINER); the
--- guest role has no INSERT on users and no use of its sequence.
+-- Require SECURITY DEFINER registration; deny guest-side user inserts.
 REVOKE INSERT ON public.users FROM app_guest;
 REVOKE USAGE, SELECT ON SEQUENCE public.users_id_seq FROM app_guest;
 GRANT SELECT ON public.slots, public.work_hours, public.time_off, public.holidays
@@ -1988,15 +1957,13 @@ REVOKE ALL ON TABLE public.email_change_requests
   FROM PUBLIC, clinic_api, app_guest, app_patient, app_doctor, app_registrar, app_admin;
 GRANT USAGE, SELECT ON SEQUENCE public.users_id_seq TO app_admin;
 GRANT SELECT ON public.audit_events TO app_admin;
--- The journal and its chain head are written only by the DEFINER functions and
--- the chain trigger (owner clinic); nobody else may write or alter them.
+-- Restrict audit writes to trusted functions and triggers.
 REVOKE INSERT, UPDATE, DELETE, TRUNCATE, TRIGGER, REFERENCES ON public.audit_events
   FROM PUBLIC, clinic_api, app_guest, app_patient, app_doctor, app_registrar, app_admin;
 REVOKE ALL ON TABLE public.audit_chain_head
   FROM PUBLIC, clinic_api, app_guest, app_patient, app_doctor, app_registrar, app_admin;
 REVOKE ALL ON FUNCTION public.audit_chain_before_insert() FROM PUBLIC;
--- clinic_auditor (audit_anchor, verify_audit): SELECT on the journal and the
--- head only; roles.sql has already revoked every other table and sequence.
+-- Auditor roles read only the journal and head.
 GRANT SELECT ON public.audit_events, public.audit_chain_head TO clinic_auditor;
 GRANT SELECT ON public.time_off_requests TO app_admin;
 GRANT UPDATE (status, decided_by, decided_at)
@@ -2043,10 +2010,7 @@ WHERE email IS DISTINCT FROM lower(btrim(email));
 
 DROP POLICY IF EXISTS patient_appointments ON public.appointments;
 DROP POLICY IF EXISTS doctor_appointments ON public.appointments;
--- The moment after which a patient can no longer cancel or move a visit:
--- clinic local time (starts_at is TIMESTAMP without zone, so the session
--- TimeZone must not matter) plus the admin-set deadline. NULL (no settings
--- row) makes every comparison NULL, so the patient UPDATE policy fails closed.
+-- Enforce clinic-local deadline; fail closed if unset.
 CREATE OR REPLACE FUNCTION public.patient_change_cutoff()
 RETURNS timestamp
 LANGUAGE sql
@@ -2101,8 +2065,7 @@ CREATE POLICY appointments_patient_update ON public.appointments
   USING (
     patient_user_id = current_setting('app.user_id', true)::int
     AND status = 'scheduled'
-    -- Patients cancel or move a visit only before the change deadline. This
-    -- also filters SELECT ... FOR UPDATE, so the app checks the deadline first.
+    -- Check deadline before locking; enforce it in policy.
     AND starts_at > public.patient_change_cutoff()
     AND public.current_patient_is_active()
   )
@@ -2516,7 +2479,7 @@ ALTER TABLE public.visit_notes FORCE ROW LEVEL SECURITY;
 ALTER TABLE public.prescriptions ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.prescriptions FORCE ROW LEVEL SECURITY;
 
--- doctor may only mark own started visit (last 12 months) as completed
+-- Restrict completion to own recent visits.
 DROP POLICY IF EXISTS appointments_doctor_complete ON public.appointments;
 CREATE POLICY appointments_doctor_complete ON public.appointments
   FOR UPDATE TO app_doctor
@@ -2537,14 +2500,13 @@ CREATE POLICY appointments_doctor_complete ON public.appointments
     )
   );
 
--- registrar may only cancel a scheduled future visit
 DROP POLICY IF EXISTS appointments_registrar_update ON public.appointments;
 CREATE POLICY appointments_registrar_update ON public.appointments
   FOR UPDATE TO app_registrar
   USING (status = 'scheduled' AND starts_at > CURRENT_TIMESTAMP)
   WITH CHECK (status = 'cancelled');
 
--- logout invalidates every cookie issued for the current account
+-- Revoke all account sessions on logout.
 CREATE OR REPLACE FUNCTION public.revoke_own_sessions()
 RETURNS void
 LANGUAGE plpgsql
@@ -2574,8 +2536,7 @@ REVOKE ALL ON FUNCTION public.revoke_own_sessions() FROM PUBLIC;
 GRANT EXECUTE ON FUNCTION public.revoke_own_sessions()
   TO app_patient, app_doctor, app_registrar, app_admin;
 
--- Idle or absolute session timeout of the current account. One event per
--- account and reason in 15 minutes, so replaying an expired cookie adds nothing.
+-- Deduplicate timeout events per account and reason.
 CREATE OR REPLACE FUNCTION public.record_session_expired(
   event_reason text,
   event_source text
@@ -2618,9 +2579,7 @@ REVOKE ALL ON FUNCTION public.record_session_expired(text, text) FROM PUBLIC;
 GRANT EXECUTE ON FUNCTION public.record_session_expired(text, text)
   TO app_patient, app_doctor, app_registrar, app_admin;
 
--- The idle timeout changes only here: admin check, range check, update and
--- journal entry with old and new value in one transaction. app_admin has no
--- UPDATE grant on the column, so no change can skip the journal.
+-- Journal idle-timeout updates atomically; prevent bypass by app_admin.
 CREATE OR REPLACE FUNCTION public.set_session_idle_minutes(new_minutes integer)
 RETURNS integer
 LANGUAGE plpgsql
@@ -2667,10 +2626,7 @@ $function$;
 REVOKE ALL ON FUNCTION public.set_session_idle_minutes(integer) FROM PUBLIC;
 GRANT EXECUTE ON FUNCTION public.set_session_idle_minutes(integer) TO app_admin;
 
--- The patient change deadline changes only here, written like
--- set_session_idle_minutes: admin check, range check, update and journal entry
--- with old and new value in one transaction; app_admin has no UPDATE grant on
--- the column.
+-- Journal deadline updates atomically; prevent bypass by app_admin.
 CREATE OR REPLACE FUNCTION public.set_patient_change_deadline_hours(new_hours integer)
 RETURNS integer
 LANGUAGE plpgsql
@@ -2717,14 +2673,7 @@ $function$;
 REVOKE ALL ON FUNCTION public.set_patient_change_deadline_hours(integer) FROM PUBLIC;
 GRANT EXECUTE ON FUNCTION public.set_patient_change_deadline_hours(integer) TO app_admin;
 
--- Medical text encryption: the api encrypts plaintext rows left in an older
--- volume, rewrites legacy fe1 packets (not bound to their row) as row-bound
--- fe2 packets, and re-encrypts rows after a key rotation. The key never
--- reaches SQL: these functions only hand out stored values and accept
--- finished fe2 packets. Only the clinic_api login itself (not an app_* role)
--- may call them.
--- The result now carries appointment_id (bound into the packet), so the
--- older signature is dropped first.
+-- Keep medical keys in API; restrict SQL to clinic_api.
 DROP FUNCTION IF EXISTS public.medical_bodies_to_encrypt(text, text, boolean, integer, integer);
 CREATE FUNCTION public.medical_bodies_to_encrypt(
   p_table text,
@@ -2752,8 +2701,6 @@ BEGIN
       USING ERRCODE = '42501';
   END IF;
 
-  -- Rows that are not yet bound fe2 packets (plaintext or fe1), plus fe2
-  -- packets under another key id when re-encrypting after a rotation.
   IF p_table = 'visit_notes' THEN
     RETURN QUERY
       SELECT n.id, n.appointment_id, n.body
@@ -2833,10 +2780,7 @@ GRANT EXECUTE ON FUNCTION public.medical_bodies_to_encrypt(text, text, boolean, 
 GRANT EXECUTE ON FUNCTION public.medical_body_replace(text, integer, text, text)
   TO clinic_api;
 
--- Patient name and phone (table in init.sql). FORCE RLS; no grants for
--- app_guest, clinic_api or app_doctor (the doctor reads them only through
--- doctor_visit_patients). Patient and registrar may change only full_name and
--- phone; updated_at is set by the trigger. The admin sees the name, not the phone.
+-- FORCE RLS; scope doctors and hide admin phones.
 CREATE OR REPLACE FUNCTION public.touch_patient_profile()
 RETURNS trigger
 LANGUAGE plpgsql
@@ -2854,8 +2798,7 @@ CREATE TRIGGER patient_profiles_touch
   FOR EACH ROW
   EXECUTE FUNCTION public.touch_patient_profile();
 
--- Patients that existed before the table: demo names, otherwise a placeholder
--- the patient is asked to replace on /me.
+-- Backfill legacy profiles with demo names or placeholders.
 INSERT INTO public.patient_profiles (user_id, full_name, phone)
 SELECT u.id,
        CASE lower(u.email)
@@ -2919,11 +2862,7 @@ CREATE POLICY patient_profiles_admin_select ON public.patient_profiles
   FOR SELECT TO app_admin
   USING (true);
 
--- Public registration. The role is fixed to patient here, email, name, phone
--- and the bcrypt hash are checked again, and the user (email not confirmed),
--- the profile and a 24-hour confirmation token are written in one transaction.
--- The raw token is returned once. Only app_guest (the role of db_as_guest)
--- may call it.
+-- Validate registration; only app_guest receives the token once.
 DROP FUNCTION IF EXISTS public.register_patient(text, text, text, text);
 CREATE FUNCTION public.register_patient(
   candidate_email text,
@@ -2986,11 +2925,7 @@ $function$;
 REVOKE ALL ON FUNCTION public.register_patient(text, text, text, text) FROM PUBLIC;
 GRANT EXECUTE ON FUNCTION public.register_patient(text, text, text, text) TO app_guest;
 
--- POST /register, before the password is hashed. Limits: 20 per 15 minutes
--- and 100 per day per source, 5 per day per email. Every accepted attempt
--- counts, whatever the outcome (new, existing or invalid email), so the answer
--- never depends on whether the account exists. Refused attempts are not
--- recorded, so a bot behind the same NAT cannot extend the block.
+-- Count outcomes equally to prevent enumeration.
 CREATE OR REPLACE FUNCTION public.note_registration_attempt(
   candidate_email text,
   candidate_source text
@@ -3037,10 +2972,9 @@ REVOKE ALL ON SEQUENCE public.registration_attempts_id_seq
 REVOKE ALL ON FUNCTION public.note_registration_attempt(text, text) FROM PUBLIC;
 GRANT EXECUTE ON FUNCTION public.note_registration_attempt(text, text) TO clinic_api;
 
--- Email confirmation after registration (tables in init.sql). The api reaches
--- these only as clinic_api; no role has direct rights on the tables.
+-- Restrict email verification to clinic_api.
 
--- GET /verify-email: only valid / invalid, never the email.
+-- Return only valid/invalid; never expose email.
 CREATE OR REPLACE FUNCTION public.email_verification_token_status(raw_token text)
 RETURNS text
 LANGUAGE sql
@@ -3064,10 +2998,7 @@ AS $function$
   END;
 $function$;
 
--- POST /verify-email: the token is taken atomically (one UPDATE ... RETURNING),
--- then the user row is locked. Success confirms the email, burns every token
--- of the user and journals user.email_verified (ids only). Anything else is
--- the same neutral 'invalid'.
+-- Consume once; keep failures indistinguishable.
 CREATE OR REPLACE FUNCTION public.confirm_email_verification(raw_token text)
 RETURNS text
 LANGUAGE plpgsql
@@ -3085,8 +3016,7 @@ BEGIN
     RETURN 'invalid';
   END IF;
 
-  -- Lock the user row first (same order as request_email_verification), then
-  -- take the token with one atomic UPDATE: two parallel confirms cannot both win.
+  -- Lock user before token to prevent double confirmation.
   SELECT t.user_id INTO target_id
   FROM public.email_verification_tokens AS t
   WHERE t.token_hash = public.digest(raw_token, 'sha256');
@@ -3130,10 +3060,7 @@ BEGIN
 END;
 $function$;
 
--- POST /resend-verification. Own attempt table: 5 per 15 minutes for the pair
--- email + source, 100 per 15 minutes per source, 10 per day per email. A new
--- token goes out only for an existing, unblocked, unconfirmed patient and
--- burns the older unused ones. The caller always shows the same message.
+-- Rate-limit resends; return one generic response.
 CREATE OR REPLACE FUNCTION public.request_email_verification(
   candidate_email text,
   candidate_source text
@@ -3231,14 +3158,10 @@ GRANT EXECUTE ON FUNCTION public.email_verification_token_status(text) TO clinic
 GRANT EXECUTE ON FUNCTION public.confirm_email_verification(text) TO clinic_api;
 GRANT EXECUTE ON FUNCTION public.request_email_verification(text, text) TO clinic_api;
 
--- Reschedule (14_ux_filters.md п. 5). The move itself is an ordinary
--- transaction of the patient or registrar (RLS, UPDATE (status) and INSERT
--- grants stay as they are); these two functions only answer "does the visit
--- have medical records" and write the one journal event.
+-- Keep checks and audit atomic.
 
--- Whether a visit has notes or prescriptions, without reading the text.
--- Patient: only an own visit (anything else is 42501, so it is no oracle);
--- registrar: any visit (the registrar has no grant on visit_notes).
+-- Check record existence without reading text.
+-- Patients check own visits; registrars may check any.
 CREATE OR REPLACE FUNCTION public.appointment_has_medical_records(appt_id integer)
 RETURNS boolean
 LANGUAGE plpgsql
@@ -3275,10 +3198,7 @@ REVOKE ALL ON FUNCTION public.appointment_has_medical_records(integer) FROM PUBL
 GRANT EXECUTE ON FUNCTION public.appointment_has_medical_records(integer)
   TO app_patient, app_registrar;
 
--- The single appointment.reschedule event: target_id and new_value are the new
--- visit, old_value the old one, ids only. Written like set_session_idle_minutes
--- (typed columns, not the generic record_audit_event allowlist). It checks the
--- pair again, so a wrong pair raises 42501 and the whole move rolls back.
+-- Audit reschedules by IDs; reject mismatches.
 CREATE OR REPLACE FUNCTION public.record_appointment_reschedule(old_id integer, new_id integer)
 RETURNS void
 LANGUAGE plpgsql
@@ -3303,9 +3223,7 @@ BEGIN
     RAISE EXCEPTION 'invalid reschedule context' USING ERRCODE = '42501';
   END IF;
 
-  -- row_xmin: both rows must be written by this very transaction (the
-  -- cancel of the old visit and the insert of the new one), so a pair made
-  -- by hand in earlier transactions cannot be reported as a move.
+  -- Require both visit rows in the current transaction.
   SELECT a.patient_user_id, a.doctor_id, a.slot_id, a.status, s.service_id,
          a.xmin AS row_xmin
   INTO old_row
@@ -3340,9 +3258,6 @@ BEGIN
     RAISE EXCEPTION 'reschedule pair is not allowed' USING ERRCODE = '42501';
   END IF;
 
-  -- Daily patient limit (RESCHEDULE_DAILY_LIMIT in routes_booking.py), counted
-  -- under the patient's two-key lock (1, patient id), the same key the app
-  -- takes for booking and rescheduling; the lock is re-entrant in a session.
   PERFORM pg_advisory_xact_lock(1::int, old_row.patient_user_id::int);
   IF actor_role = 'patient' AND (
        SELECT count(*) FROM public.audit_events
@@ -3367,7 +3282,6 @@ REVOKE ALL ON FUNCTION public.record_appointment_reschedule(integer, integer) FR
 GRANT EXECUTE ON FUNCTION public.record_appointment_reschedule(integer, integer)
   TO app_patient, app_registrar;
 
--- How many moves the signed-in patient made in the last 24 hours.
 CREATE OR REPLACE FUNCTION public.own_reschedules_last_day()
 RETURNS integer
 LANGUAGE plpgsql

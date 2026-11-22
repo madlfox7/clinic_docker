@@ -1,14 +1,4 @@
-"""Encrypt and decrypt medical text in tests with the stand's own key files.
-
-Reads secrets/field_encryption_key and secrets/field_encryption_previous_keys
-from the checkout (the same files the api mounts). No key value lives in the repo.
-
-Packets are bound to their row id and appointment id, which raw SQL fixtures
-do not know before the INSERT. sql_packet() therefore returns a unique
-placeholder packet; seal_pending() (called by the tests' psql helpers right
-after each statement) swaps every placeholder that reached a table for the
-real packet bound to that row.
-"""
+"""Seal test medical fields using the stand's mounted keys."""
 
 import os
 import subprocess
@@ -21,8 +11,7 @@ sys.path.insert(0, str(ROOT / "app"))
 
 import field_crypto  # noqa: E402
 
-# Syntactically valid packet for RLS probes that are rejected or rolled back;
-# it decrypts under no key.
+# Opaque packets for rejected RLS probes.
 PROBE_PACKET = "fe2:probe:AAAAAAAAAAAAAAAA:AAAA:AAAAAAAAAAAAAAAAAAAAAA"
 
 _pending = {}
@@ -33,7 +22,7 @@ def _read(name: str) -> str:
     try:
         return path.read_text(encoding="utf-8")
     except PermissionError:
-        # File handed to the api uid (no ACL support): read it from the api container.
+        # Read mounted file inside api.
         completed = subprocess.run(
             ["docker", "compose", "exec", "-T", "api", "cat", f"/run/secrets/{name}"],
             cwd=ROOT, capture_output=True, text=True,

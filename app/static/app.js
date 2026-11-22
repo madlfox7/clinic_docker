@@ -1,10 +1,8 @@
-// Clinic UI behaviour. Loaded with defer from base.html; templates contain no inline JS.
-// Rules: read data-* only through dataset, write text only through textContent,
-// never touch cookies, storage or the hidden anti-forgery form fields.
+// Escape UI data; avoid storage.
 (function () {
   "use strict";
 
-  // "Select all" / "Clear selection" buttons for checkbox groups.
+  // Bulk checkbox selection.
   document.querySelectorAll("[data-check-group]").forEach((button) => {
     button.addEventListener("click", () => {
       const form = button.closest("form");
@@ -16,7 +14,7 @@
     });
   });
 
-  // Forms that act on the selected checkboxes: block empty submits, confirm the count.
+  // Validate bulk actions.
   document.querySelectorAll("form[data-confirm-selected]").forEach((form) => {
     form.addEventListener("submit", (event) => {
       const name = form.dataset.confirmSelected;
@@ -33,11 +31,11 @@
     });
   });
 
-  // Plain confirmations: <form data-confirm="..."> or <button data-confirm="...">.
+  // Handle shared confirmation prompts.
   document.querySelectorAll("form[data-confirm]").forEach((form) => {
     form.addEventListener("submit", (event) => {
       let message = form.dataset.confirm;
-      // {patient} only on the registrar booking form (data-confirm-patient="1").
+      // Registrar patient name.
       if (form.dataset.confirmPatient === "1") {
         const field = form.querySelector('input[name="patient_email"]');
         message = message.split("{patient}").join(field && field.value ? field.value : "the selected patient");
@@ -51,12 +49,12 @@
     });
   });
 
-  // Booking errors that were shown as a popup before: same static message, now from the alert box.
+  // Inline booking errors.
   document.querySelectorAll("[data-popup-message]").forEach((box) => {
     window.alert(box.dataset.popupMessage);
   });
 
-  // Admin cabinet dropdown (<details>): close it on an outside click or Escape.
+  // Close the admin menu on outside click or Escape.
   document.querySelectorAll("details.cabinet-menu").forEach((menu) => {
     document.addEventListener("click", (event) => {
       if (menu.open && !menu.contains(event.target)) menu.open = false;
@@ -66,7 +64,7 @@
     });
   });
 
-  // Booking form: show the chosen service's duration and buffer under the short option label.
+  // Show service timing.
   const serviceSelect = document.getElementById("service-select");
   const serviceDetails = document.getElementById("service-details");
   if (serviceSelect && serviceDetails) {
@@ -80,7 +78,7 @@
     });
   }
 
-  // Admin schedule: weekday presets in the bulk work-hours form.
+  // Work-hour presets.
   const bulkWorkHoursForm = document.getElementById("bulk-work-hours-form");
   if (bulkWorkHoursForm) {
     const weekdayCheckboxes = bulkWorkHoursForm.querySelectorAll('input[name="weekdays"]');
@@ -94,7 +92,7 @@
     });
   }
 
-  // Admin users: the password confirmation is shown only when creating an administrator.
+  // Confirm new-admin passwords.
   const staffRole = document.getElementById("staff-role");
   const adminConfirm = document.getElementById("admin-confirm");
   if (staffRole && adminConfirm) {
@@ -111,7 +109,7 @@
     syncAdminConfirm();
   }
 
-  // Registrar booking: search a patient by email and fill the hidden patient_email fields.
+  // Fill patient from search.
   const patientPicker = document.getElementById("registrar-patient-picker");
   const patientSearch = document.getElementById("registrar-patient-search");
   const patientResults = document.getElementById("registrar-patient-results");
@@ -140,7 +138,7 @@
       patientResults.append(item);
     };
 
-    // The preselected email comes from the search field's server-rendered value.
+    // Preserve preselected email.
     setSelectedPatient(patientSearch.defaultValue, patientPicker.dataset.selectedBlocked === "true");
 
     patientSearch.addEventListener("input", () => {

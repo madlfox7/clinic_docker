@@ -31,11 +31,7 @@ else
 fi
 
 ./scripts/init_secrets.sh
-# Only after pip install: pip must keep using the system trust store for PyPI.
-# From here on urllib (readiness) and httpx (pytest) verify the stand
-# certificate against the stand CA and nothing else.
-# provided mode: a public (or CLINIC_TLS_CA_FILE) certificate, so the system
-# store or that file is used instead.
+# Keep system trust for package installation.
 TLS_MODE="${CLINIC_TLS_MODE:-$(grep '^CLINIC_TLS_MODE=' .env 2>/dev/null | tail -n 1 | cut -d= -f2- | tr -d '\r"'"'"'' || true)}"
 if [ "$TLS_MODE" = provided ]; then
   if [ -n "${CLINIC_TLS_CA_FILE:-}" ]; then

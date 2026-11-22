@@ -1,10 +1,6 @@
 #!/usr/bin/env sh
-# Read-only check of the proxy certificate before a start (make tls-check):
-# key matches certificate, dates, the PUBLIC_BASE_URL host in SAN, chain,
-# ports. Usage: scripts/tls_check.sh [KEY CERT]   (default secrets/tls/server.*)
-# make tls-check runs it through scripts/tls_compose_env.py, which takes the
-# ports and environment from `docker compose config` (override files and
-# shell variables included).
+# Check the proxy certificate before startup.
+# Use Compose-resolved TLS settings.
 set -eu
 umask 077
 cd "$(dirname "$0")/.."

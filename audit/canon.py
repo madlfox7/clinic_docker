@@ -1,13 +1,4 @@
-"""Canonical form v1 of an audit journal row (plan 17 §6.2), independent of
-the SQL function public.audit_canon_v1: verify_audit and the anchors trust
-only this code, never functions in the database.
-
-Fields in this order, each as b"<length>:<UTF-8 bytes>" and NULL as b"-":
-seq, id, created_at, actor_user_id, actor_role, action, target_type,
-target_id, reason, source, old_value, new_value. Integers are decimal text;
-created_at is whole microseconds since the UTC epoch.
-row_hash = sha256(prev_hash || canon); prev_hash of seq 1 = sha256(chain_id bytes).
-"""
+"""Canonicalize audit rows independently of SQL for v1 chain hashes."""
 from __future__ import annotations
 
 import datetime as _dt
@@ -52,8 +43,7 @@ def canon_v1(row: dict) -> bytes:
     return b"".join(parts)
 
 
-# The one place that names the hash algorithm on the Python side (v1: SHA-256);
-# the SQL side is audit_row_hash_v1 / audit_genesis_hash_v1 in db/init.sql.
+# Match db/init.sql hash version.
 def _digest(data: bytes) -> bytes:
     return hashlib.sha256(data).digest()
 

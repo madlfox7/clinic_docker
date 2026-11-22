@@ -1,5 +1,4 @@
-"""AUDIT_ROLES_2 fixes: neutral answer for a blocked account at sign-in,
-patient name and phone (patient_profiles), email confirmation before sign-in."""
+"""Test neutral sign-in, patient profiles and email confirmation."""
 import json
 import os
 import re
@@ -105,7 +104,7 @@ def _clear_login_attempts(email: str) -> None:
     _psql(f"DELETE FROM login_attempts WHERE email_fingerprint = public.digest('{email}', 'sha256')")
 
 
-# --- R2-C-enum-blocked-msg ---------------------------------------------------
+# Blocked-user enum
 
 def test_blocked_account_answers_like_unknown_email():
     unknown = f"nobody-{uuid.uuid4().hex}@example.com"
@@ -155,7 +154,7 @@ def test_session_revoked_by_block_still_says_blocked():
             _psql(f"UPDATE users SET blocked = FALSE WHERE email = '{PAT2}'")
 
 
-# --- R2-A-no-patient-name ----------------------------------------------------
+# Patient-name privacy
 
 def test_demo_patients_have_their_names():
     for email, name, phone in ((PAT, PAT_NAME, PAT_PHONE), (PAT2, PAT2_NAME, PAT2_PHONE)):
@@ -360,7 +359,7 @@ def test_guest_and_api_roles_have_no_profile_or_user_insert():
     assert grantees == ["app_guest"]
 
 
-# --- R2-A-reg-no-email-confirm -----------------------------------------------
+# Registration confirmation
 
 LOGIN_FAILED = "Invalid email or password. If you have just registered, confirm your email first."
 RESENT = "If this email belongs to an unconfirmed account, we sent a new link."
@@ -445,8 +444,7 @@ def test_registration_mails_once_and_sign_in_waits_for_confirmation():
             for _ in range(2):
                 c.post("/login", data={"email": email, "password": "wrong-password"})
             page = c.post("/login", data={"email": email, "password": REG_PASSWORD})
-            # A right password on an unconfirmed account is a failed sign-in
-            # like any other: 401, the shared text, the counter is not cleared.
+            # Keep unconfirmed sign-ins indistinguishable.
             assert page.status_code == 401 and LOGIN_FAILED in page.text
             assert 'action="/resend-verification"' in page.text
             assert c.get("/me").url.path == "/login"
@@ -570,7 +568,7 @@ def test_resend_rate_limits_do_not_reveal_the_address():
                 for _ in range(7):
                     page = c.post("/resend-verification", data={"email": address})
                     assert page.status_code == 200 and RESENT in page.text
-        # one mail at registration plus five accepted resends; the rest is limited
+        # Exercise the resend quota.
         assert len(verification_messages(pending)) == 6
         assert len(verification_messages(unknown)) == 0
         daily = f"limit-daily-{stamp}@example.com"

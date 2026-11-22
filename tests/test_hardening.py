@@ -1,5 +1,4 @@
-"""15_hardening: POST /register rate limit and reschedule limits (one event per
-move, daily patient limit, two-key advisory lock)."""
+"""Test registration throttling and reschedule limits."""
 import os
 import re
 import subprocess
@@ -44,7 +43,7 @@ REG_PASSWORD = "Limit-Check-2026!"
 CSRF_VALUE = re.compile(r'name="csrf_token" value="[^"]*"')
 
 
-# --- 1. Registration rate limit ----------------------------------------------
+# Registration rate limit
 
 def _client(follow_redirects: bool = True):
     return CsrfClient(base_url=BASE, follow_redirects=follow_redirects, timeout=15.0)
@@ -102,19 +101,14 @@ def test_source_limit_twenty_then_429_same_for_any_email_and_one_event():
             assert over not in refused.text
             assert _psql(f"SELECT count(*) FROM users WHERE email = '{over}'") == ["0"]
             assert _mails_to(over) == 0
-            # (10) the refused attempt is not stored
             assert _attempts() == 20
-            # (2) existing and new email: the same 429 body, never 409
             existing = _register(c, PAT)
             fresh = _register(c, f"{prefix}-fresh@example.com")
             assert existing.status_code == fresh.status_code == 429
             assert CSRF_VALUE.sub("", existing.text) == CSRF_VALUE.sub("", fresh.text)
             assert existing.headers["retry-after"] == fresh.headers["retry-after"] == "900"
             assert _attempts() == 20
-        # (4) one anonymous rate_limited event, no email in it. The journal is
-        # append-only, so an event from an earlier run inside 15 minutes (same
-        # reason, the one test source) stands in for it: record_auth_event
-        # dedup is part of what is tested (plan 17 §9.2 (ж)).
+        # Allow recent event deduplication.
         events = _registration_events(mark)
         assert len(events) <= 1, events
         where = f"seq > {mark}"
@@ -242,7 +236,7 @@ def test_reason_check_rebuilt_only_when_registration_is_missing():
     assert "'registration'" in definition
     _run_migrate()
     assert _reason_check() == (oid, definition)
-    # an old volume: the CHECK without 'registration' is rebuilt once
+    # Rebuild the legacy CHECK once.
     _psql(
         "ALTER TABLE audit_events DROP CONSTRAINT audit_events_reason_check; "
         "ALTER TABLE audit_events ADD CONSTRAINT audit_events_reason_check "
@@ -273,13 +267,13 @@ def test_registration_limit_db_failure_fails_closed_with_503():
     assert "pwd.hash" not in branch and "register_patient" not in branch
     log_line = next(line for line in branch.splitlines() if "log.exception" in line)
     assert "email" not in log_line
-    # the limit runs before bcrypt and register_patient
+    # Enforce the limit before bcrypt.
     limit_at = body.index("note_registration_attempt")
     assert limit_at < body.index("pwd.hash(") and limit_at < body.index("public.register_patient(")
     assert body.index("Passwords do not match") < body.index("note_registration_attempt")
 
 
-# --- 3. Reschedule: one event per move, daily patient limit, own lock space ---
+# Reschedule events and patient limits
 
 FAKE_BASE = 2_100_000_000
 LIMIT_TEXT = "You can reschedule up to 3 times a day."
@@ -306,12 +300,7 @@ _FAKE_NEXT_BASE = (
 
 
 def _fake_events(actor_id: int, role: str, count: int) -> list[tuple[int, int]]:
-    """count reschedule events of actor_id made just now, on ids no visit has.
-
-    The journal is append-only, so the rows stay: the base is worked out in the
-    same INSERT from the largest fake old_value so far (plan 17 §9.2 (д)), and
-    new_value = old_value + 1 stays below the next base, so both unique
-    indexes hold. Returns the (old_value, new_value) pairs."""
+    """Add append-only reschedule events on unused IDs and return their value pairs."""
     rows = _psql(
         f"WITH b AS ({_FAKE_NEXT_BASE}) "
         "INSERT INTO audit_events (actor_user_id, actor_role, action, target_type, target_id, "
@@ -394,9 +383,9 @@ def test_unique_indexes_exist_and_refuse_a_duplicate_event():
                      "audit_events_reschedule_old_unique"], names
     reg = _user_id(REG)
     [(old_value, new_value)] = _fake_events(reg, "registrar", 1)
-    # +5 stays below the next fake base (+10), so a refused row never blocks a later run
+    # Keep synthetic event IDs distinct.
     for old_v, new_v in ((old_value, new_value + 5), (old_value + 5, new_value)):
-        dup = _psql_try(  # expects refusal (unique index)
+        dup = _psql_try(  # Duplicate-key case.
             "INSERT INTO audit_events (actor_user_id, actor_role, action, target_type, target_id, "
             f"old_value, new_value) VALUES ({reg}, 'registrar', 'appointment.reschedule', "
             f"'appointment', {new_v}, {old_v}, {new_v})"
@@ -424,11 +413,7 @@ def _reschedule_unique_block() -> str:
 
 
 def test_old_volume_with_duplicates_starts_and_index_comes_back():
-    """An old volume with duplicate moves: the index is skipped with a warning.
-
-    The journal is append-only, so duplicates would stay forever and the index
-    would never come back (plan 17 §9.2 (е), О-19): drop, duplicates and the
-    init.sql block run in one transaction that is rolled back."""
+    """On a duplicate-filled volume, skip index creation; roll back all fixture changes."""
     reg = _user_id(REG)
     old_oid = _index_oid("audit_events_reschedule_old_unique")
     new_oid = _index_oid("audit_events_reschedule_new_unique")
@@ -478,9 +463,7 @@ def test_patient_daily_limit_three_moves_then_too_many_and_again_after_a_day():
             assert LIMIT_TEXT in page.text
             assert _status(current) == "scheduled" and _current_visit(s) == current
             assert _rescheduled_mails(s.email) == 3
-            # "Again after a day" needed created_at moved back, which the
-            # append-only journal refuses; the 24 hour window itself is read
-            # from the function in test_limit_constant_is_the_same_in_python_and_sql.
+            # Append-only fixture for the daily-window check.
     finally:
         s.cleanup()
 
@@ -517,7 +500,6 @@ def test_database_layer_refuses_the_fourth_move_in_a_proper_transaction():
         assert result.returncode != 0 and "reschedule limit reached" in result.stderr, result.stderr
         assert _status(s.old) == "scheduled"
         assert _psql(f"SELECT count(*) FROM appointments WHERE slot_id = {s.targets[0]}") == ["0"]
-        # control: a patient with fewer than 3 gets the same transaction accepted (then rolled back)
         _fake_events(control.patient, "patient", 2)
         ok = _psql_try(_hand_move_sql(control.patient, control.old, control.targets[0], "ROLLBACK;"))
         assert ok.returncode == 0, ok.stderr

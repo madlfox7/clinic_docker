@@ -1,4 +1,4 @@
-{#- Shared status badge. The CSS class comes only from this fixed table; unknown statuses get a neutral badge. -#}
+{#- Unknown statuses use a neutral badge. -#}
 {%- macro status_badge(status) -%}
 {%- set classes = {
   "scheduled": "text-bg-primary",
